@@ -9,7 +9,7 @@ Målet er at selve skjermen skal være enkel: den henter ferdig tilrettelagte da
 - Cloudflare Worker med FR24-integrasjon
 - Webinterface for posisjon, radius og skjerminnstillinger
 - 128x64 LED-emulator med runde piksler og 42x42 logo-felt
-- Fargekontroll per displaylinje, scrollhastighet og rotasjonstid per fly
+- Fargekontroll per displaylinje, progressbar-farge, scrollhastighet og rotasjonstid per fly
 - Nederste LED-rad som progressbar når flere fly roterer på skjermen
 - Airline-logoer som lokale assets
 - Permanent KV-cache for airline- og airport-oppslag

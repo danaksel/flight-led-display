@@ -37,6 +37,7 @@ type DeviceSettings = {
     route: string;
     aircraft: string;
     context: string;
+    progress: string;
   };
   nightMode: {
     enabled: boolean;
@@ -80,7 +81,7 @@ export default {
     try {
       if (url.pathname === "/") return htmlResponse(renderIndexHtml());
       if (url.pathname.startsWith("/logos/")) return env.ASSETS.fetch(request);
-      if (url.pathname === "/api/config" && request.method === "GET") return jsonResponse(await getConfig(env));
+      if (url.pathname === "/api/config" && request.method === "GET") return jsonResponse(await getConfig(env), 200, { "Cache-Control": "no-store" });
       if (url.pathname === "/api/config" && request.method === "POST") return saveConfig(request, env);
       if (url.pathname === "/api/device-config" && request.method === "GET") return deviceConfigResponse(env);
       if (url.pathname === "/api/flights" && request.method === "GET") return flightsResponse(env, false);
@@ -124,7 +125,7 @@ async function saveConfig(request: Request, env: Env): Promise<Response> {
   };
 
   await env.FLIGHT_DISPLAY_KV.put(CONFIG_KEY, JSON.stringify(config));
-  return jsonResponse(config);
+  return jsonResponse(config, 200, { "Cache-Control": "no-store" });
 }
 
 async function deviceConfigResponse(env: Env): Promise<Response> {
@@ -173,7 +174,8 @@ function normalizeLineColors(value: unknown): DeviceSettings["lineColors"] {
     airline: normalizeHexColor(v.airline, "#f4f7ff"),
     route: normalizeHexColor(v.route, "#f4f7ff"),
     aircraft: normalizeHexColor(v.aircraft, "#f4f7ff"),
-    context: normalizeHexColor(v.context, "#f4f7ff")
+    context: normalizeHexColor(v.context, "#f4f7ff"),
+    progress: normalizeHexColor(v.progress, "#f7b500")
   };
 }
 
@@ -565,47 +567,54 @@ function renderIndexHtml(): string {
   <title>Flight Display Server</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <style>
-    :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; --ink:#142033; --muted:#657184; --line:#dce3ed; --panel:#ffffff; --soft:#f5f7fb; --accent:#2f6fbd; }
-    body { margin: 0; background: radial-gradient(circle at top left, #eef5ff 0, #f7f9fc 34%, #eef1f5 100%); color: var(--ink); }
-    .shell { min-height: 100vh; display: grid; grid-template-columns: minmax(340px, 460px) 1fr; }
-    aside { padding: 22px; background: rgba(255,255,255,.86); backdrop-filter: blur(18px); border-right: 1px solid var(--line); box-shadow: 12px 0 34px rgba(31,48,75,.08); }
-    h1 { margin: 0 0 6px; font-size: 24px; line-height: 1.2; }
-    p { margin: 0 0 18px; color: var(--muted); line-height: 1.45; }
-    .card { margin-top: 16px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.78); box-shadow: 0 10px 28px rgba(31,48,75,.05); }
-    .card h2 { margin: 0 0 10px; font-size: 15px; letter-spacing: .01em; }
-    label { display: block; margin: 14px 0 6px; font-weight: 650; font-size: 13px; }
-    input { width: 100%; box-sizing: border-box; border: 1px solid #cbd3df; border-radius: 6px; padding: 10px 11px; font: inherit; background: #fff; }
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; --ink:#f5f0df; --muted:#9fa8b8; --line:#273345; --panel:#101720; --panel2:#151f2b; --field:#0b1118; --amber:#f6b800; --amber2:#ffd761; --blue:#2f7fdd; --danger:#ff6d4a; --ok:#78d98f; }
+    body { margin: 0; background: #05080d; color: var(--ink); }
+    .shell { min-height: 100vh; display: grid; grid-template-columns: minmax(360px, 470px) 1fr; background: linear-gradient(135deg, #05080d 0%, #0d141e 54%, #161205 100%); }
+    aside { padding: 18px; background: linear-gradient(180deg, rgba(9,14,20,.98), rgba(13,19,28,.96)); border-right: 1px solid #2c3542; box-shadow: 18px 0 42px rgba(0,0,0,.32); overflow: auto; max-height: 100vh; box-sizing: border-box; }
+    .brand { margin: 0 0 14px; padding: 14px 14px 12px; background: #05070a; border: 1px solid #293241; border-left: 5px solid var(--amber); border-radius: 6px; }
+    .eyebrow { margin: 0 0 7px; color: var(--amber2); font-size: 11px; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; }
+    h1 { margin: 0; font-size: 25px; line-height: 1.05; letter-spacing: .02em; }
+    p { margin: 7px 0 0; color: var(--muted); line-height: 1.45; font-size: 13px; }
+    .card { margin-top: 12px; padding: 13px; border: 1px solid var(--line); border-radius: 6px; background: rgba(16,23,32,.88); box-shadow: 0 14px 36px rgba(0,0,0,.22); }
+    .card h2 { margin: 0 0 12px; color: var(--amber2); font-size: 13px; letter-spacing: .12em; text-transform: uppercase; }
+    label { display: block; margin: 11px 0 5px; color: #d7deea; font-weight: 700; font-size: 12px; }
+    input, select { width: 100%; box-sizing: border-box; border: 1px solid #334154; border-radius: 5px; padding: 9px 10px; font: inherit; background: var(--field); color: var(--ink); }
     input[type="checkbox"] { width: auto; }
-    input:focus { outline: 3px solid #b9d7ff; border-color: #3d82d5; }
-    input[type="color"] { height: 42px; padding: 4px; cursor: pointer; }
+    input:focus, select:focus { outline: 2px solid rgba(246,184,0,.35); border-color: var(--amber); }
+    input[type="color"] { height: 38px; padding: 3px; cursor: pointer; }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    .color-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+    .color-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
     .color-grid label { margin-top: 10px; }
     .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 8px 0 4px; }
     .toggle-row label { margin: 0; }
-    button { margin-top: 18px; width: 100%; border: 0; border-radius: 6px; padding: 11px 14px; background: #17202a; color: white; font: inherit; font-weight: 700; cursor: pointer; }
-    button.secondary { background: #e8edf4; color: #17202a; margin-top: 10px; }
+    button { margin-top: 14px; width: 100%; border: 0; border-radius: 5px; padding: 10px 13px; background: var(--amber); color: #111; font: inherit; font-weight: 850; cursor: pointer; }
+    button.secondary { background: #1d2938; color: #f3f6fb; border: 1px solid #354457; margin-top: 9px; }
     button:hover { filter: brightness(1.05); }
-    .status { min-height: 20px; margin-top: 12px; font-size: 13px; color: #42613a; }
-    .error { color: #9b2f25; }
-    .links { margin-top: 14px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 13px; }
+    .savebar { position: sticky; bottom: 0; z-index: 20; margin: 12px -18px -18px; padding: 10px 18px 14px; background: linear-gradient(180deg, rgba(9,14,20,.18), rgba(9,14,20,.98) 28%); border-top: 1px solid #273345; }
+    .savebar button { margin: 0; }
+    .status { min-height: 18px; margin-top: 9px; font-size: 12px; color: var(--ok); }
+    .status.dirty { color: var(--amber2); }
+    .error { color: var(--danger); }
+    .links { margin-top: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 12px; }
+    .links a { padding: 7px 8px; background: #0b1118; border: 1px solid #263345; border-radius: 5px; }
     .preview { margin-top: 16px; }
     .preview-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-    .preview-head h2 { margin: 0; font-size: 16px; }
-    .preview-head button { width: auto; margin: 0; padding: 8px 10px; font-size: 13px; background: #e8edf4; color: #17202a; }
-    .meta { margin: 8px 0 10px; color: #5c6675; font-size: 12px; }
+    .preview-head h2 { margin: 0; font-size: 13px; }
+    .preview-head button { width: auto; margin: 0; padding: 8px 10px; font-size: 12px; background: #1d2938; color: #f3f6fb; border: 1px solid #354457; }
+    .meta { margin: 8px 0 10px; color: var(--muted); font-size: 12px; }
     .flight-list { display: grid; gap: 8px; max-height: 34vh; overflow: auto; padding-right: 3px; }
-    .flight { border: 1px solid #d9dee7; border-radius: 6px; padding: 9px 10px; background: #fbfcfe; }
+    .flight { border: 1px solid #2e3a4c; border-radius: 6px; padding: 9px 10px; background: #0b1118; }
     .flight-row { display: grid; grid-template-columns: 42px 1fr; gap: 10px; align-items: center; }
     .flight-logo { width: 42px; height: 42px; object-fit: contain; background: #000; border-radius: 4px; }
-    .flight-logo.missing { display: grid; place-items: center; color: #7b8797; font-size: 10px; border: 1px solid #d9dee7; background: #f4f6f9; }
+    .flight-logo.missing { display: grid; place-items: center; color: #7b8797; font-size: 10px; border: 1px solid #2e3a4c; background: #111923; }
     .flight strong { display: block; font-size: 15px; }
-    .flight span { display: block; margin-top: 3px; color: #5c6675; font-size: 12px; line-height: 1.35; }
-    .empty { color: #5c6675; font-size: 13px; line-height: 1.4; }
-    .emulator { padding: 22px; background: #111821; color: #e8edf4; border-top: 1px solid #263242; }
+    .flight span { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; line-height: 1.35; }
+    .empty { color: var(--muted); font-size: 13px; line-height: 1.4; }
+    .workbench { display: grid; grid-template-rows: minmax(330px, 48vh) auto; min-height: 100vh; }
+    .emulator { padding: 18px 22px 22px; background: #0c121a; color: #e8edf4; border-top: 1px solid #263242; }
     .emulator h2 { margin: 0 0 6px; font-size: 18px; }
     .emulator p { color: #aeb8c5; margin-bottom: 14px; }
-    .emu-controls { display: grid; grid-template-columns: 130px minmax(220px, 1fr) 120px 120px 180px; gap: 12px; align-items: end; margin-bottom: 14px; }
+    .emu-controls { display: grid; grid-template-columns: 170px minmax(220px, 420px); gap: 12px; align-items: end; margin-bottom: 14px; }
     .emu-controls label { color: #dce4ee; margin-top: 0; }
     .emu-controls input, .emu-controls select { width: 100%; box-sizing: border-box; border: 1px solid #3b4859; border-radius: 6px; padding: 9px 10px; background: #182232; color: #f8fafc; font: inherit; }
     .emu-stage { overflow: auto; padding: 12px; background: #070a0e; border: 1px solid #2c3849; border-radius: 8px; }
@@ -614,20 +623,24 @@ function renderIndexHtml(): string {
     .emu-meta { margin-top: 10px; color: #aeb8c5; font-size: 12px; }
     a { color: #2f6fbd; text-decoration: none; }
     a:hover { text-decoration: underline; }
-    #map { min-height: 58vh; border-bottom: 1px solid #263242; }
+    #map { min-height: 330px; border-bottom: 1px solid #263242; filter: saturate(.78) contrast(1.05); }
     @media (max-width: 820px) {
       .shell { grid-template-columns: 1fr; grid-template-rows: auto 60vh; }
       aside { border-right: 0; border-bottom: 1px solid #d9dee7; }
       #map { min-height: 60vh; }
       .emu-controls { grid-template-columns: 1fr; }
+      .color-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
   </style>
 </head>
 <body>
   <main class="shell">
     <aside>
-      <h1>Flight Display</h1>
-      <p>Sett nålen i kartet, velg radius og lagre posisjonen som skjermen skal bruke.</p>
+      <header class="brand">
+        <div class="eyebrow">OSL local display control</div>
+        <h1>Flight Display</h1>
+        <p>Styr posisjon, skjermatferd, farger og preview fra Worker. Live-data hentes bare når du ber om det.</p>
+      </header>
       <section class="card">
         <h2>Område</h2>
         <label for="label">Navn</label>
@@ -652,7 +665,6 @@ function renderIndexHtml(): string {
             <input id="homeAirport" maxlength="4" placeholder="OSL">
           </div>
         </div>
-        <button id="save">Lagre oppsett</button>
         <button id="locate" class="secondary">Bruk min posisjon</button>
       </section>
       <section class="card">
@@ -705,8 +717,12 @@ function renderIndexHtml(): string {
             <input id="aircraftColor" type="color">
           </div>
           <div>
-            <label for="contextColor">Scroll</label>
+            <label for="contextColor">Tekstscroll</label>
             <input id="contextColor" type="color">
+          </div>
+          <div>
+            <label for="progressColor">Progress</label>
+            <input id="progressColor" type="color">
           </div>
         </div>
         <div class="row">
@@ -730,7 +746,6 @@ function renderIndexHtml(): string {
           </div>
         </div>
       </section>
-      <div id="status" class="status"></div>
       <div class="links">
         <a href="/api/config" target="_blank">/api/config</a>
         <a href="/api/device-config" target="_blank">/api/device-config</a>
@@ -745,42 +760,27 @@ function renderIndexHtml(): string {
         <div id="previewMeta" class="meta"></div>
         <div id="flightList" class="flight-list"></div>
       </section>
+      <div class="savebar">
+        <button id="save">Lagre alle innstillinger</button>
+        <div id="status" class="status"></div>
+      </div>
     </aside>
-    <div>
+    <div class="workbench">
       <section id="map" aria-label="Map"></section>
       <section class="emulator" aria-label="LED matrix emulator">
         <h2>128 x 64 emulator</h2>
-        <p>Last opp et bilde for å se hvordan det oppfører seg på HUB75-panelet. Previewen er skalert opp, men kildedata er 128 x 64 piksler.</p>
+        <p>Forhåndsvis nøyaktig 128 x 64 LED-layout. Brightness, farger, rotasjon og scroll styres fra innstillingene til venstre.</p>
         <div class="emu-controls">
           <div>
             <label for="emuSource">Source</label>
             <select id="emuSource">
               <option value="live">Live data</option>
-              <option value="upload">Upload</option>
+              <option value="upload">Logo test</option>
             </select>
           </div>
           <div>
-            <label for="imageUpload">Bilde</label>
+            <label for="imageUpload">Logo 42 x 42 PNG</label>
             <input id="imageUpload" type="file" accept="image/*">
-          </div>
-          <div>
-            <label for="fitMode">Fit</label>
-            <select id="fitMode">
-              <option value="contain">Contain</option>
-              <option value="cover">Cover</option>
-              <option value="stretch">Stretch</option>
-            </select>
-          </div>
-          <div>
-            <label for="sampling">Sampling</label>
-            <select id="sampling">
-              <option value="sharp">Sharp</option>
-              <option value="smooth">Smooth</option>
-            </select>
-          </div>
-          <div>
-            <label for="brightness">Brightness</label>
-            <input id="brightness" type="range" min="10" max="100" value="80">
           </div>
         </div>
         <div class="emu-stage">
@@ -811,6 +811,7 @@ function renderIndexHtml(): string {
       routeColor: document.querySelector("#routeColor"),
       aircraftColor: document.querySelector("#aircraftColor"),
       contextColor: document.querySelector("#contextColor"),
+      progressColor: document.querySelector("#progressColor"),
       timezone: document.querySelector("#timezone"),
       nightEnabled: document.querySelector("#nightEnabled"),
       nightStart: document.querySelector("#nightStart"),
@@ -823,9 +824,6 @@ function renderIndexHtml(): string {
       flightList: document.querySelector("#flightList"),
       emuSource: document.querySelector("#emuSource"),
       imageUpload: document.querySelector("#imageUpload"),
-      fitMode: document.querySelector("#fitMode"),
-      sampling: document.querySelector("#sampling"),
-      brightness: document.querySelector("#brightness"),
       ledCanvas: document.querySelector("#ledCanvas"),
       emuMeta: document.querySelector("#emuMeta")
     };
@@ -840,6 +838,7 @@ function renderIndexHtml(): string {
     let flightCycleStartedAt = performance.now();
     let tickerAnimationFrame = null;
     let tickerStartedAt = performance.now();
+    let formIsDirty = false;
     const logoCache = new Map();
 
     init();
@@ -859,15 +858,27 @@ function renderIndexHtml(): string {
         const pos = marker.getLatLng();
         els.lat.value = pos.lat.toFixed(6);
         els.lon.value = pos.lng.toFixed(6);
+        markDirty();
         redraw();
       });
       map.on("click", (event) => {
         els.lat.value = event.latlng.lat.toFixed(6);
         els.lon.value = event.latlng.lng.toFixed(6);
+        markDirty();
         redraw();
       });
       ["lat", "lon", "radius"].forEach((id) => els[id].addEventListener("input", redraw));
+      document.querySelectorAll("aside input").forEach((input) => {
+        input.addEventListener("input", markDirty);
+        input.addEventListener("change", markDirty);
+      });
       renderEmulator();
+    }
+
+    function markDirty() {
+      formIsDirty = true;
+      els.status.className = "status dirty";
+      els.status.textContent = "Endringer ikke lagret";
     }
 
     function setForm(config) {
@@ -890,6 +901,7 @@ function renderIndexHtml(): string {
       els.routeColor.value = colors.route || "#f4f7ff";
       els.aircraftColor.value = colors.aircraft || "#f4f7ff";
       els.contextColor.value = colors.context || "#f4f7ff";
+      els.progressColor.value = colors.progress || "#f7b500";
       els.timezone.value = device.timezone || "Europe/Oslo";
       els.nightEnabled.checked = night.enabled !== false;
       els.nightStart.value = night.start || "23:00";
@@ -915,7 +927,8 @@ function renderIndexHtml(): string {
             airline: els.airlineColor.value,
             route: els.routeColor.value,
             aircraft: els.aircraftColor.value,
-            context: els.contextColor.value
+            context: els.contextColor.value,
+            progress: els.progressColor.value
           },
           nightMode: {
             enabled: els.nightEnabled.checked,
@@ -953,6 +966,8 @@ function renderIndexHtml(): string {
       }
       setForm(json);
       redraw();
+      formIsDirty = false;
+      els.status.className = "status";
       els.status.textContent = "Lagret " + new Date().toLocaleTimeString();
       displayFlights = [];
       currentFlightIndex = 0;
@@ -967,6 +982,7 @@ function renderIndexHtml(): string {
       navigator.geolocation.getCurrentPosition((position) => {
         els.lat.value = position.coords.latitude.toFixed(6);
         els.lon.value = position.coords.longitude.toFixed(6);
+        markDirty();
         redraw();
         map.setView([Number(els.lat.value), Number(els.lon.value)], 12);
       });
@@ -978,16 +994,15 @@ function renderIndexHtml(): string {
       renderEmulator();
     });
     els.imageUpload.addEventListener("change", handleImageUpload);
-    els.fitMode.addEventListener("change", renderEmulator);
-    els.sampling.addEventListener("change", renderEmulator);
-    els.brightness.addEventListener("input", renderEmulator);
     [
+      els.deviceBrightness,
       els.cycleSeconds,
       els.scrollSpeed,
       els.airlineColor,
       els.routeColor,
       els.aircraftColor,
-      els.contextColor
+      els.contextColor,
+      els.progressColor
     ].forEach((input) => input.addEventListener("input", () => {
       resetFlightCycle();
       renderEmulator();
@@ -1063,7 +1078,7 @@ function renderIndexHtml(): string {
       source.width = 128;
       source.height = 64;
       const sourceCtx = source.getContext("2d", { willReadFrequently: true });
-      sourceCtx.imageSmoothingEnabled = els.sampling.value === "smooth";
+      sourceCtx.imageSmoothingEnabled = false;
       sourceCtx.fillStyle = "#000";
       sourceCtx.fillRect(0, 0, source.width, source.height);
       ctx.fillStyle = "#000";
@@ -1073,6 +1088,7 @@ function renderIndexHtml(): string {
         const flight = displayFlights[currentFlightIndex] || displayFlights[0];
         drawLiveFlightLayout(sourceCtx, flight);
         drawFlightProgress(sourceCtx);
+        applyDisplayBrightness(sourceCtx);
         drawLedPanel(ctx, source);
         if (flight && flight.logoUrl) loadLogoForFlight(flight);
         return;
@@ -1080,53 +1096,19 @@ function renderIndexHtml(): string {
 
       if (!uploadedImage) {
         drawPlaceholder(sourceCtx);
+        applyDisplayBrightness(sourceCtx);
         drawLedPanel(ctx, source);
         return;
       }
 
-      const fit = els.fitMode.value;
-      const brightness = Number(els.brightness.value) / 100;
       const logoCanvas = document.createElement("canvas");
       logoCanvas.width = 42;
       logoCanvas.height = 42;
       const logoCtx = logoCanvas.getContext("2d", { willReadFrequently: true });
-      logoCtx.imageSmoothingEnabled = els.sampling.value === "smooth";
+      logoCtx.imageSmoothingEnabled = false;
       logoCtx.fillStyle = "#000";
       logoCtx.fillRect(0, 0, logoCanvas.width, logoCanvas.height);
-      let sx = 0;
-      let sy = 0;
-      let sw = uploadedImage.naturalWidth;
-      let sh = uploadedImage.naturalHeight;
-      let dx = 0;
-      let dy = 0;
-      let dw = logoCanvas.width;
-      let dh = logoCanvas.height;
-
-      if (fit === "contain") {
-        const scale = Math.min(logoCanvas.width / sw, logoCanvas.height / sh);
-        dw = Math.round(sw * scale);
-        dh = Math.round(sh * scale);
-        dx = Math.round((logoCanvas.width - dw) / 2);
-        dy = Math.round((logoCanvas.height - dh) / 2);
-      } else if (fit === "cover") {
-        const scale = Math.max(logoCanvas.width / sw, logoCanvas.height / sh);
-        const cropW = logoCanvas.width / scale;
-        const cropH = logoCanvas.height / scale;
-        sx = Math.round((sw - cropW) / 2);
-        sy = Math.round((sh - cropH) / 2);
-        sw = Math.round(cropW);
-        sh = Math.round(cropH);
-      }
-
-      logoCtx.drawImage(uploadedImage, sx, sy, sw, sh, dx, dy, dw, dh);
-      const imageData = logoCtx.getImageData(0, 0, logoCanvas.width, logoCanvas.height);
-      const data = imageData.data;
-      for (let i = 0; i < data.length; i += 4) {
-        data[i] = Math.round(data[i] * brightness);
-        data[i + 1] = Math.round(data[i + 1] * brightness);
-        data[i + 2] = Math.round(data[i + 2] * brightness);
-      }
-      logoCtx.putImageData(imageData, 0, 0);
+      logoCtx.drawImage(uploadedImage, 0, 0, uploadedImage.naturalWidth, uploadedImage.naturalHeight, 0, 0, 42, 42);
       sourceCtx.fillStyle = "#000";
       sourceCtx.fillRect(0, 0, 128, 64);
       sourceCtx.drawImage(logoCanvas, 3, 3);
@@ -1136,8 +1118,25 @@ function renderIndexHtml(): string {
         aircraft: "737 MAX 9",
         context: "Arriving from Portland Intl"
       });
+      applyDisplayBrightness(sourceCtx);
       drawLedPanel(ctx, source);
-      els.emuMeta.textContent = uploadedImage.naturalWidth + " x " + uploadedImage.naturalHeight + " px → 42 x 42 logo field · 128 x 64 LEDs · " + fit + " · " + els.sampling.value + " · " + Math.round(brightness * 100) + "%";
+      els.emuMeta.textContent = uploadedImage.naturalWidth + " x " + uploadedImage.naturalHeight + " px → 42 x 42 logo field · 128 x 64 LEDs · brightness " + Math.round(getDisplayBrightnessFactor() * 100) + "%";
+    }
+
+    function getDisplayBrightnessFactor() {
+      return Math.max(0, Math.min(1, Number(els.deviceBrightness.value || 40) / 255));
+    }
+
+    function applyDisplayBrightness(ctx) {
+      const brightness = getDisplayBrightnessFactor();
+      const imageData = ctx.getImageData(0, 0, 128, 64);
+      const data = imageData.data;
+      for (let i = 0; i < data.length; i += 4) {
+        data[i] = Math.round(data[i] * brightness);
+        data[i + 1] = Math.round(data[i + 1] * brightness);
+        data[i + 2] = Math.round(data[i + 2] * brightness);
+      }
+      ctx.putImageData(imageData, 0, 0);
     }
 
     function resetFlightCycle() {
@@ -1207,7 +1206,8 @@ function renderIndexHtml(): string {
         airline: els.airlineColor.value || "#f4f7ff",
         route: els.routeColor.value || "#f4f7ff",
         aircraft: els.aircraftColor.value || "#f4f7ff",
-        context: els.contextColor.value || "#f4f7ff"
+        context: els.contextColor.value || "#f4f7ff",
+        progress: els.progressColor.value || "#f7b500"
       };
     }
 
@@ -1228,7 +1228,7 @@ function renderIndexHtml(): string {
       const width = Math.max(1, Math.min(128, Math.round(128 * progress)));
       ctx.fillStyle = "#07101c";
       ctx.fillRect(0, 63, 128, 1);
-      ctx.fillStyle = getLineColors().context;
+      ctx.fillStyle = getLineColors().progress;
       ctx.fillRect(0, 63, width, 1);
     }
 
