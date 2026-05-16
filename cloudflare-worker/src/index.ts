@@ -73,6 +73,7 @@ type AvinorFlight = {
   flightId: string;
   airport: string;
   time: string;
+  sortTime: number;
   gate?: string;
 };
 
@@ -237,7 +238,7 @@ async function getIdleScreens(env: Env, config: Config): Promise<IdleScreen[]> {
 }
 
 async function getAvinorFlights(env: Env, airport: string, direction: "A" | "D", timezone: string): Promise<AvinorFlight[]> {
-  const cacheKey = `avinor:v1:${airport}:${direction}`;
+  const cacheKey = `avinor:v2:${airport}:${direction}`;
   const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
   if (Array.isArray(cached)) return cached as AvinorFlight[];
 
@@ -274,8 +275,8 @@ function parseAvinorFlights(xml: string, direction: "A" | "D", timezone: string)
       const status = block.match(/<status\b([^>]*)\/>/);
       const statusCode = status ? xmlAttribute(status[1], "code") : "";
       const statusTime = status ? xmlAttribute(status[1], "time") : "";
-      const bestTime = statusTime || scheduleTime;
-      const timestamp = Date.parse(bestTime || scheduleTime || "");
+      const bestTime = statusCode === "E" && statusTime ? statusTime : scheduleTime;
+      const timestamp = Date.parse(bestTime || "");
       if (!flightId || !airport || !Number.isFinite(timestamp)) return null;
       if (statusCode === "C" || statusCode === doneStatus) return null;
       if (timestamp < now - 10 * 60 * 1000) return null;
@@ -283,11 +284,12 @@ function parseAvinorFlights(xml: string, direction: "A" | "D", timezone: string)
         flightId,
         airport,
         time: formatLocalTime(bestTime || scheduleTime || "", timezone),
+        sortTime: timestamp,
         ...(gate ? { gate } : {})
       };
     })
     .filter((flight): flight is AvinorFlight => Boolean(flight))
-    .sort((a, b) => a.time.localeCompare(b.time))
+    .sort((a, b) => a.sortTime - b.sortTime)
     .slice(0, 3);
 }
 
