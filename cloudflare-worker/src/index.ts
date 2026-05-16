@@ -152,7 +152,7 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
   const night = v.nightMode && typeof v.nightMode === "object" ? v.nightMode as Partial<DeviceSettings["nightMode"]> : {};
   return {
     enabled: typeof v.enabled === "boolean" ? v.enabled : true,
-    brightness: clampNumber(v.brightness, 1, 255, 40),
+    brightness: clampNumber(v.brightness, 1, 100, 80),
     pollSeconds: clampNumber(v.pollSeconds, 30, 900, 90),
     displayCycleSeconds: clampNumber(v.displayCycleSeconds, 2, 30, 5),
     scrollPixelsPerSecond: clampNumber(v.scrollPixelsPerSecond, 2, 30, 9),
@@ -163,7 +163,7 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
       enabled: typeof night.enabled === "boolean" ? night.enabled : true,
       start: normalizeTimeString(night.start, "23:00"),
       end: normalizeTimeString(night.end, "07:00"),
-      brightness: clampNumber(night.brightness, 0, 255, 0)
+      brightness: clampNumber(night.brightness, 0, 100, 0)
     }
   };
 }
@@ -675,12 +675,12 @@ function renderIndexHtml(): string {
         </div>
         <div class="row">
           <div>
-            <label for="deviceBrightness">Brightness</label>
-            <input id="deviceBrightness" type="number" min="1" max="255" step="1">
+            <label for="deviceBrightness">Brightness %</label>
+            <input id="deviceBrightness" type="number" min="1" max="100" step="1">
           </div>
           <div>
-            <label for="nightBrightness">Natt-brightness</label>
-            <input id="nightBrightness" type="number" min="0" max="255" step="1">
+            <label for="nightBrightness">Natt-brightness %</label>
+            <input id="nightBrightness" type="number" min="0" max="100" step="1">
           </div>
         </div>
         <div class="row">
@@ -890,7 +890,7 @@ function renderIndexHtml(): string {
       els.radius.value = config.radiusKm || 10;
       els.homeAirport.value = config.homeAirportIata || "OSL";
       els.deviceEnabled.checked = device.enabled !== false;
-      els.deviceBrightness.value = device.brightness ?? 40;
+      els.deviceBrightness.value = device.brightness ?? 80;
       els.nightBrightness.value = night.brightness ?? 0;
       els.pollSeconds.value = device.pollSeconds ?? 90;
       els.cycleSeconds.value = device.displayCycleSeconds ?? 5;
@@ -969,11 +969,6 @@ function renderIndexHtml(): string {
       formIsDirty = false;
       els.status.className = "status";
       els.status.textContent = "Lagret " + new Date().toLocaleTimeString();
-      displayFlights = [];
-      currentFlightIndex = 0;
-      resetFlightCycle();
-      els.previewMeta.textContent = "Trykk Hent data for å laste flydata.";
-      els.flightList.innerHTML = "";
       renderEmulator();
     });
 
@@ -996,7 +991,6 @@ function renderIndexHtml(): string {
     els.imageUpload.addEventListener("change", handleImageUpload);
     [
       els.deviceBrightness,
-      els.cycleSeconds,
       els.scrollSpeed,
       els.airlineColor,
       els.routeColor,
@@ -1004,9 +998,12 @@ function renderIndexHtml(): string {
       els.contextColor,
       els.progressColor
     ].forEach((input) => input.addEventListener("input", () => {
-      resetFlightCycle();
       renderEmulator();
     }));
+    els.cycleSeconds.addEventListener("input", () => {
+      resetFlightCycle();
+      renderEmulator();
+    });
 
     async function loadPreview() {
       els.previewMeta.textContent = "Henter...";
@@ -1124,7 +1121,7 @@ function renderIndexHtml(): string {
     }
 
     function getDisplayBrightnessFactor() {
-      return Math.max(0, Math.min(1, Number(els.deviceBrightness.value || 40) / 255));
+      return Math.max(0, Math.min(1, Number(els.deviceBrightness.value || 80) / 100));
     }
 
     function applyDisplayBrightness(ctx) {
