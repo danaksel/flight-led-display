@@ -12,6 +12,7 @@ export interface Env {
   DEFAULT_RADIUS_KM?: string;
   CACHE_TTL_SECONDS?: string;
   DISPLAY_LIMIT?: string;
+  AVINOR_XML_BASE_URL?: string;
 }
 
 type Config = {
@@ -66,6 +67,19 @@ type DisplayFlight = {
   headingDeg?: number;
   distanceKm: number;
   bearingDeg: number;
+};
+
+type AvinorFlight = {
+  flightId: string;
+  airport: string;
+  time: string;
+  gate?: string;
+};
+
+type IdleScreen = {
+  title: string;
+  rows: string[];
+  source: string;
 };
 
 const CONFIG_KEY = "config:v1";
@@ -199,11 +213,120 @@ function clampNumber(value: unknown, min: number, max: number, fallback: number)
   return Number.isFinite(parsed) ? clamp(parsed, min, max) : fallback;
 }
 
+async function getIdleScreens(env: Env, config: Config): Promise<IdleScreen[]> {
+  const airport = normalizeAirportCode(config.homeAirportIata, env.HOME_AIRPORT_IATA || "OSL");
+  const [departures, arrivals] = await Promise.all([
+    getAvinorFlights(env, airport, "D", config.device?.timezone || "Europe/Oslo"),
+    getAvinorFlights(env, airport, "A", config.device?.timezone || "Europe/Oslo")
+  ]);
+
+  return [
+    {
+      title: "Next departures",
+      rows: departures.map((flight) => [flight.flightId, flight.airport, flight.time, flight.gate ? `G${flight.gate}` : ""].filter(Boolean).join(" "))
+    },
+    {
+      title: "Next arrivals",
+      rows: arrivals.map((flight) => [flight.airport, flight.time, flight.flightId].filter(Boolean).join(" "))
+    }
+  ].map((screen) => ({
+    ...screen,
+    rows: screen.rows.length ? screen.rows : ["No airport data"],
+    source: "Flight data from Avinor"
+  }));
+}
+
+async function getAvinorFlights(env: Env, airport: string, direction: "A" | "D", timezone: string): Promise<AvinorFlight[]> {
+  const cacheKey = `avinor:v1:${airport}:${direction}`;
+  const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
+  if (Array.isArray(cached)) return cached as AvinorFlight[];
+
+  const baseUrl = env.AVINOR_XML_BASE_URL || "https://asrv.avinor.no/XmlFeed/v1.0";
+  const url = new URL(baseUrl);
+  url.searchParams.set("airport", airport);
+  url.searchParams.set("TimeFrom", "0");
+  url.searchParams.set("TimeTo", "12");
+  url.searchParams.set("direction", direction);
+
+  const response = await fetch(url.toString(), {
+    headers: {
+      Accept: "application/xml,text/xml"
+    }
+  });
+  if (!response.ok) return [];
+
+  const xml = await response.text();
+  const flights = parseAvinorFlights(xml, direction, timezone);
+  await env.FLIGHT_DISPLAY_KV.put(cacheKey, JSON.stringify(flights), { expirationTtl: 180 });
+  return flights;
+}
+
+function parseAvinorFlights(xml: string, direction: "A" | "D", timezone: string): AvinorFlight[] {
+  const now = Date.now();
+  const doneStatus = direction === "D" ? "D" : "A";
+  return Array.from(xml.matchAll(/<flight\b[^>]*>([\s\S]*?)<\/flight>/g))
+    .map((match): AvinorFlight | null => {
+      const block = match[1];
+      const flightId = xmlText(block, "flight_id");
+      const airport = xmlText(block, "airport");
+      const scheduleTime = xmlText(block, "schedule_time");
+      const gate = xmlText(block, "gate");
+      const status = block.match(/<status\b([^>]*)\/>/);
+      const statusCode = status ? xmlAttribute(status[1], "code") : "";
+      const statusTime = status ? xmlAttribute(status[1], "time") : "";
+      const bestTime = statusTime || scheduleTime;
+      const timestamp = Date.parse(bestTime || scheduleTime || "");
+      if (!flightId || !airport || !Number.isFinite(timestamp)) return null;
+      if (statusCode === "C" || statusCode === doneStatus) return null;
+      if (timestamp < now - 10 * 60 * 1000) return null;
+      return {
+        flightId,
+        airport,
+        time: formatLocalTime(bestTime || scheduleTime || "", timezone),
+        ...(gate ? { gate } : {})
+      };
+    })
+    .filter((flight): flight is AvinorFlight => Boolean(flight))
+    .sort((a, b) => a.time.localeCompare(b.time))
+    .slice(0, 3);
+}
+
+function xmlText(xml: string, tag: string): string {
+  const match = xml.match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`));
+  return match ? decodeXml(match[1].trim()) : "";
+}
+
+function xmlAttribute(attributes: string, name: string): string {
+  const match = attributes.match(new RegExp(`${name}="([^"]*)"`));
+  return match ? decodeXml(match[1].trim()) : "";
+}
+
+function decodeXml(value: string): string {
+  return value
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'");
+}
+
+function formatLocalTime(value: string, timezone: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("nb-NO", {
+    timeZone: timezone || "Europe/Oslo",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).format(date);
+}
+
 async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
   const config = await getConfig(env);
   const flights = await getFlights(env, config);
   const limit = Math.max(1, Math.min(50, parseNumber(env.DISPLAY_LIMIT, 8)));
   const displayFlights = flights.slice(0, limit);
+  const idleScreens = displayFlights.length ? [] : await getIdleScreens(env, config);
 
   const payload = compact
     ? {
@@ -212,6 +335,7 @@ async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
         lon: config.lon,
         radiusKm: config.radiusKm,
         device: config.device,
+        idleScreens,
         flights: displayFlights.map((f) => {
           const route = [f.origin, f.destination].filter(Boolean).join("-");
           const context = [f.contextLabel, f.contextValue].filter(Boolean).join(" ");
@@ -242,7 +366,8 @@ async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
     : {
         updatedAt: new Date().toISOString(),
         config,
-        flights: displayFlights
+        flights: displayFlights,
+        idleScreens
       };
 
   return jsonResponse(payload, 200, {
@@ -833,7 +958,9 @@ function renderIndexHtml(): string {
     let circle;
     let uploadedImage = null;
     let displayFlights = [];
+    let idleScreens = [];
     let currentFlightIndex = 0;
+    let currentIdleScreenIndex = 0;
     let flightCycleTimer = null;
     let flightCycleStartedAt = performance.now();
     let tickerAnimationFrame = null;
@@ -1013,13 +1140,22 @@ function renderIndexHtml(): string {
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Kunne ikke hente display-data");
         const flights = Array.isArray(data.flights) ? data.flights : [];
+        idleScreens = Array.isArray(data.idleScreens) ? data.idleScreens : [];
         displayFlights = flights;
         currentFlightIndex = 0;
+        currentIdleScreenIndex = 0;
         resetFlightCycle();
         renderEmulator();
         els.previewMeta.textContent = "Oppdatert " + new Date(data.updatedAt).toLocaleTimeString() + " · " + flights.length + " treff";
         if (!flights.length) {
-          els.flightList.innerHTML = '<div class="empty">Ingen fly i valgt radius akkurat nå, eller FR24 svarte uten matchende data.</div>';
+          if (idleScreens.length) {
+            els.flightList.innerHTML = idleScreens.map((screen) => {
+              const rows = Array.isArray(screen.rows) ? screen.rows : [];
+              return '<article class="flight"><strong>' + escapeHtml(screen.title || "Airport") + '</strong><span>' + rows.map(escapeHtml).join("<br>") + '</span></article>';
+            }).join("") + '<div class="empty">Flight data from Avinor.</div>';
+          } else {
+            els.flightList.innerHTML = '<div class="empty">Ingen fly i valgt radius akkurat nå, eller FR24/Avinor svarte uten matchende data.</div>';
+          }
           return;
         }
         els.flightList.innerHTML = flights.map((flight) => {
@@ -1083,8 +1219,12 @@ function renderIndexHtml(): string {
 
       if (els.emuSource.value === "live") {
         const flight = displayFlights[currentFlightIndex] || displayFlights[0];
-        drawLiveFlightLayout(sourceCtx, flight);
-        drawFlightProgress(sourceCtx);
+        if (flight) {
+          drawLiveFlightLayout(sourceCtx, flight);
+          drawFlightProgress(sourceCtx);
+        } else {
+          drawIdleLayout(sourceCtx, idleScreens[currentIdleScreenIndex] || idleScreens[0]);
+        }
         applyDisplayBrightness(sourceCtx);
         drawLedPanel(ctx, source);
         if (flight && flight.logoUrl) loadLogoForFlight(flight);
@@ -1143,11 +1283,16 @@ function renderIndexHtml(): string {
       }
       tickerStartedAt = performance.now();
       flightCycleStartedAt = performance.now();
-      if (els.emuSource.value !== "live" || displayFlights.length <= 1) return;
+      if (els.emuSource.value !== "live") return;
       const cycleMs = Math.max(2000, Number(els.cycleSeconds.value || 5) * 1000);
+      if (displayFlights.length <= 1 && (displayFlights.length || idleScreens.length <= 1)) return;
       flightCycleTimer = setInterval(() => {
-        if (els.emuSource.value !== "live" || displayFlights.length <= 1) return;
-        currentFlightIndex = (currentFlightIndex + 1) % displayFlights.length;
+        if (els.emuSource.value !== "live") return;
+        if (displayFlights.length > 1) {
+          currentFlightIndex = (currentFlightIndex + 1) % displayFlights.length;
+        } else if (!displayFlights.length && idleScreens.length > 1) {
+          currentIdleScreenIndex = (currentIdleScreenIndex + 1) % idleScreens.length;
+        }
         flightCycleStartedAt = performance.now();
         tickerStartedAt = performance.now();
         renderEmulator();
@@ -1172,9 +1317,7 @@ function renderIndexHtml(): string {
       ctx.fillRect(0, 0, 128, 64);
 
       if (!flight) {
-        drawPlaceholderLogo(ctx, 3, 3, 42);
-        drawDotText(ctx, "No flights", 50, 20, "#f4f7ff", { maxWidth: 75 });
-        els.emuMeta.textContent = "Live data: ingen fly i valgt radius.";
+        drawIdleLayout(ctx, idleScreens[currentIdleScreenIndex] || idleScreens[0]);
         return;
       }
 
@@ -1196,6 +1339,23 @@ function renderIndexHtml(): string {
         context
       });
       els.emuMeta.textContent = "Live layout: " + (flight.flt || flight.cs || route || "flight") + " · 128 x 64 LEDs · 320 x 160 mm · P2.5 pitch.";
+    }
+
+    function drawIdleLayout(ctx, screen) {
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, 128, 64);
+      const colors = getLineColors();
+      if (!screen) {
+        drawDotText(ctx, "No flights", 3, 9, colors.airline, { maxWidth: 122 });
+        drawDotText(ctx, "No airport data", 3, 23, colors.context, { maxWidth: 122 });
+        els.emuMeta.textContent = "Idle layout: ingen flydata tilgjengelig.";
+        return;
+      }
+      drawDotText(ctx, screen.title || "Airport", 3, 4, colors.airline, { maxWidth: 122 });
+      const rows = Array.isArray(screen.rows) ? screen.rows.slice(0, 3) : [];
+      rows.forEach((row, index) => drawDotText(ctx, row, 3, 18 + index * 12, index === 0 ? colors.route : colors.aircraft, { maxWidth: 122 }));
+      drawDotText(ctx, "AVINOR", 3, 55, colors.progress, { maxWidth: 122 });
+      els.emuMeta.textContent = "Idle layout: " + (screen.title || "airport") + " · Flight data from Avinor.";
     }
 
     function getLineColors() {

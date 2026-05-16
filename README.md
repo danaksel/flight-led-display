@@ -11,6 +11,7 @@ Målet er at selve skjermen skal være enkel: den henter ferdig tilrettelagte da
 - 128x64 LED-emulator med runde piksler og 42x42 logo-felt
 - Fargekontroll per displaylinje, progressbar-farge, scrollhastighet og rotasjonstid per fly
 - Nederste LED-rad som progressbar når flere fly roterer på skjermen
+- Idle-skjermer med neste OSL-avganger og -ankomster fra Avinor når ingen fly er i sonen
 - Airline-logoer som lokale assets
 - Permanent KV-cache for airline- og airport-oppslag
 - Grunnstruktur for kommende ESP32-S3 HUB75-firmware
