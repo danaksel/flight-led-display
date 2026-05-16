@@ -837,6 +837,7 @@ function renderIndexHtml(): string {
     let displayFlights = [];
     let currentFlightIndex = 0;
     let flightCycleTimer = null;
+    let flightCycleStartedAt = performance.now();
     let tickerAnimationFrame = null;
     let tickerStartedAt = performance.now();
     const logoCache = new Map();
@@ -1071,6 +1072,7 @@ function renderIndexHtml(): string {
       if (els.emuSource.value === "live") {
         const flight = displayFlights[currentFlightIndex] || displayFlights[0];
         drawLiveFlightLayout(sourceCtx, flight);
+        drawFlightProgress(sourceCtx);
         drawLedPanel(ctx, source);
         if (flight && flight.logoUrl) loadLogoForFlight(flight);
         return;
@@ -1144,11 +1146,13 @@ function renderIndexHtml(): string {
         flightCycleTimer = null;
       }
       tickerStartedAt = performance.now();
+      flightCycleStartedAt = performance.now();
       if (els.emuSource.value !== "live" || displayFlights.length <= 1) return;
       const cycleMs = Math.max(2000, Number(els.cycleSeconds.value || 5) * 1000);
       flightCycleTimer = setInterval(() => {
         if (els.emuSource.value !== "live" || displayFlights.length <= 1) return;
         currentFlightIndex = (currentFlightIndex + 1) % displayFlights.length;
+        flightCycleStartedAt = performance.now();
         tickerStartedAt = performance.now();
         renderEmulator();
       }, cycleMs);
@@ -1213,6 +1217,19 @@ function renderIndexHtml(): string {
       drawDotText(ctx, lines.route || "", 50, 19, colors.route, { maxWidth: 75 });
       drawDotText(ctx, lines.aircraft || "", 50, 33, colors.aircraft, { maxWidth: 75 });
       drawTickerLine(ctx, lines.context || "", 3, 52, colors.context, 122);
+    }
+
+    function drawFlightProgress(ctx) {
+      if (els.emuSource.value !== "live" || displayFlights.length <= 1) return;
+      ensureTickerAnimation();
+      const cycleMs = Math.max(2000, Number(els.cycleSeconds.value || 5) * 1000);
+      const elapsed = Math.max(0, performance.now() - flightCycleStartedAt);
+      const progress = Math.min(1, elapsed / cycleMs);
+      const width = Math.max(1, Math.min(128, Math.round(128 * progress)));
+      ctx.fillStyle = "#07101c";
+      ctx.fillRect(0, 63, 128, 1);
+      ctx.fillStyle = getLineColors().context;
+      ctx.fillRect(0, 63, width, 1);
     }
 
     function loadLogoForFlight(flight) {

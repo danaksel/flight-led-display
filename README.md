@@ -10,6 +10,7 @@ Målet er at selve skjermen skal være enkel: den henter ferdig tilrettelagte da
 - Webinterface for posisjon, radius og skjerminnstillinger
 - 128x64 LED-emulator med runde piksler og 42x42 logo-felt
 - Fargekontroll per displaylinje, scrollhastighet og rotasjonstid per fly
+- Nederste LED-rad som progressbar når flere fly roterer på skjermen
 - Airline-logoer som lokale assets
 - Permanent KV-cache for airline- og airport-oppslag
 - Grunnstruktur for kommende ESP32-S3 HUB75-firmware
