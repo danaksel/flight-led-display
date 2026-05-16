@@ -9,6 +9,7 @@ Målet er at selve skjermen skal være enkel: den henter ferdig tilrettelagte da
 - Cloudflare Worker med FR24-integrasjon
 - Webinterface for posisjon, radius og skjerminnstillinger
 - 128x64 LED-emulator med runde piksler og 42x42 logo-felt
+- Fargekontroll per displaylinje, scrollhastighet og rotasjonstid per fly
 - Airline-logoer som lokale assets
 - Permanent KV-cache for airline- og airport-oppslag
 - Grunnstruktur for kommende ESP32-S3 HUB75-firmware
@@ -85,6 +86,7 @@ Ny firmware skal ligge i `firmware-hub75/`. Den skal etter hvert:
 - hente `/api/display` for flydata og logo-referanser
 - vise logoer og tekst på 128x64 HUB75-panelet
 - rotere mellom flere fly uten ekstra API-kall
+- bruke Worker-styrt rotasjonstid, scrollhastighet og tekstfarger
 
 `firmware-original/` er beholdt som referanse til det opprinnelige TheFlightWall OSS-prosjektet, men dette prosjektet bruker en annen hardware- og dataarkitektur.
 

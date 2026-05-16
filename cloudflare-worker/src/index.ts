@@ -29,8 +29,15 @@ type DeviceSettings = {
   brightness: number;
   pollSeconds: number;
   displayCycleSeconds: number;
+  scrollPixelsPerSecond: number;
   configRefreshSeconds: number;
   timezone: string;
+  lineColors: {
+    airline: string;
+    route: string;
+    aircraft: string;
+    context: string;
+  };
   nightMode: {
     enabled: boolean;
     start: string;
@@ -147,8 +154,10 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
     brightness: clampNumber(v.brightness, 1, 255, 40),
     pollSeconds: clampNumber(v.pollSeconds, 30, 900, 90),
     displayCycleSeconds: clampNumber(v.displayCycleSeconds, 2, 30, 5),
+    scrollPixelsPerSecond: clampNumber(v.scrollPixelsPerSecond, 2, 30, 9),
     configRefreshSeconds: clampNumber(v.configRefreshSeconds, 60, 3600, 300),
     timezone: typeof v.timezone === "string" && v.timezone.trim() ? v.timezone.slice(0, 64) : "Europe/Oslo",
+    lineColors: normalizeLineColors((v as { lineColors?: unknown }).lineColors),
     nightMode: {
       enabled: typeof night.enabled === "boolean" ? night.enabled : true,
       start: normalizeTimeString(night.start, "23:00"),
@@ -156,6 +165,21 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
       brightness: clampNumber(night.brightness, 0, 255, 0)
     }
   };
+}
+
+function normalizeLineColors(value: unknown): DeviceSettings["lineColors"] {
+  const v = value && typeof value === "object" ? value as Partial<DeviceSettings["lineColors"]> : {};
+  return {
+    airline: normalizeHexColor(v.airline, "#f4f7ff"),
+    route: normalizeHexColor(v.route, "#f4f7ff"),
+    aircraft: normalizeHexColor(v.aircraft, "#f4f7ff"),
+    context: normalizeHexColor(v.context, "#f4f7ff")
+  };
+}
+
+function normalizeHexColor(value: unknown, fallback: string): string {
+  const raw = typeof value === "string" ? value.trim() : "";
+  return /^#[0-9a-fA-F]{6}$/.test(raw) ? raw.toLowerCase() : fallback;
 }
 
 function normalizeAirportCode(value: unknown, fallback: string): string {
@@ -186,22 +210,32 @@ async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
         lon: config.lon,
         radiusKm: config.radiusKm,
         device: config.device,
-        flights: displayFlights.map((f) => ({
-          cs: f.callsign || f.flight || "",
-          flt: f.flight || "",
-          air: f.airline || "",
-          airCode: f.airlineCode || "",
-          logoUrl: logoUrlFor(displayLogoCodeFor(f)),
-          ac: f.aircraft || "",
-          reg: f.registration || "",
-          from: f.origin || "",
-          to: f.destination || "",
-          ctxLabel: f.contextLabel || "",
-          ctxValue: f.contextValue || "",
-          b: Math.round(f.bearingDeg),
-          alt: f.altitudeFt ?? null,
-          spd: f.speedKts ?? null
-        }))
+        flights: displayFlights.map((f) => {
+          const route = [f.origin, f.destination].filter(Boolean).join("-");
+          const context = [f.contextLabel, f.contextValue].filter(Boolean).join(" ");
+          return {
+            cs: f.callsign || f.flight || "",
+            flt: f.flight || "",
+            air: f.airline || "",
+            airCode: f.airlineCode || "",
+            logoUrl: logoUrlFor(displayLogoCodeFor(f)),
+            ac: f.aircraft || "",
+            reg: f.registration || "",
+            from: f.origin || "",
+            to: f.destination || "",
+            ctxLabel: f.contextLabel || "",
+            ctxValue: f.contextValue || "",
+            lines: {
+              airline: f.airline || f.airlineCode || "",
+              route,
+              aircraft: f.aircraft || f.registration || "",
+              context
+            },
+            b: Math.round(f.bearingDeg),
+            alt: f.altitudeFt ?? null,
+            spd: f.speedKts ?? null
+          };
+        })
       }
     : {
         updatedAt: new Date().toISOString(),
@@ -543,7 +577,10 @@ function renderIndexHtml(): string {
     input { width: 100%; box-sizing: border-box; border: 1px solid #cbd3df; border-radius: 6px; padding: 10px 11px; font: inherit; background: #fff; }
     input[type="checkbox"] { width: auto; }
     input:focus { outline: 3px solid #b9d7ff; border-color: #3d82d5; }
+    input[type="color"] { height: 42px; padding: 4px; cursor: pointer; }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .color-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+    .color-grid label { margin-top: 10px; }
     .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 8px 0 4px; }
     .toggle-row label { margin: 0; }
     button { margin-top: 18px; width: 100%; border: 0; border-radius: 6px; padding: 11px 14px; background: #17202a; color: white; font: inherit; font-weight: 700; cursor: pointer; }
@@ -646,9 +683,33 @@ function renderIndexHtml(): string {
         </div>
         <div class="row">
           <div>
+            <label for="scrollSpeed">Scroll px/s</label>
+            <input id="scrollSpeed" type="number" min="2" max="30" step="1">
+          </div>
+          <div>
             <label for="configRefreshSeconds">Config sek</label>
             <input id="configRefreshSeconds" type="number" min="60" max="3600" step="30">
           </div>
+        </div>
+        <div class="color-grid">
+          <div>
+            <label for="airlineColor">Flyselskap</label>
+            <input id="airlineColor" type="color">
+          </div>
+          <div>
+            <label for="routeColor">Rute</label>
+            <input id="routeColor" type="color">
+          </div>
+          <div>
+            <label for="aircraftColor">Flytype</label>
+            <input id="aircraftColor" type="color">
+          </div>
+          <div>
+            <label for="contextColor">Scroll</label>
+            <input id="contextColor" type="color">
+          </div>
+        </div>
+        <div class="row">
           <div>
             <label for="timezone">Timezone</label>
             <input id="timezone" placeholder="Europe/Oslo">
@@ -744,7 +805,12 @@ function renderIndexHtml(): string {
       nightBrightness: document.querySelector("#nightBrightness"),
       pollSeconds: document.querySelector("#pollSeconds"),
       cycleSeconds: document.querySelector("#cycleSeconds"),
+      scrollSpeed: document.querySelector("#scrollSpeed"),
       configRefreshSeconds: document.querySelector("#configRefreshSeconds"),
+      airlineColor: document.querySelector("#airlineColor"),
+      routeColor: document.querySelector("#routeColor"),
+      aircraftColor: document.querySelector("#aircraftColor"),
+      contextColor: document.querySelector("#contextColor"),
       timezone: document.querySelector("#timezone"),
       nightEnabled: document.querySelector("#nightEnabled"),
       nightStart: document.querySelector("#nightStart"),
@@ -816,7 +882,13 @@ function renderIndexHtml(): string {
       els.nightBrightness.value = night.brightness ?? 0;
       els.pollSeconds.value = device.pollSeconds ?? 90;
       els.cycleSeconds.value = device.displayCycleSeconds ?? 5;
+      els.scrollSpeed.value = device.scrollPixelsPerSecond ?? 9;
       els.configRefreshSeconds.value = device.configRefreshSeconds ?? 300;
+      const colors = device.lineColors || {};
+      els.airlineColor.value = colors.airline || "#f4f7ff";
+      els.routeColor.value = colors.route || "#f4f7ff";
+      els.aircraftColor.value = colors.aircraft || "#f4f7ff";
+      els.contextColor.value = colors.context || "#f4f7ff";
       els.timezone.value = device.timezone || "Europe/Oslo";
       els.nightEnabled.checked = night.enabled !== false;
       els.nightStart.value = night.start || "23:00";
@@ -835,8 +907,15 @@ function renderIndexHtml(): string {
           brightness: Number(els.deviceBrightness.value),
           pollSeconds: Number(els.pollSeconds.value),
           displayCycleSeconds: Number(els.cycleSeconds.value),
+          scrollPixelsPerSecond: Number(els.scrollSpeed.value),
           configRefreshSeconds: Number(els.configRefreshSeconds.value),
           timezone: els.timezone.value.trim(),
+          lineColors: {
+            airline: els.airlineColor.value,
+            route: els.routeColor.value,
+            aircraft: els.aircraftColor.value,
+            context: els.contextColor.value
+          },
           nightMode: {
             enabled: els.nightEnabled.checked,
             start: els.nightStart.value,
@@ -901,6 +980,17 @@ function renderIndexHtml(): string {
     els.fitMode.addEventListener("change", renderEmulator);
     els.sampling.addEventListener("change", renderEmulator);
     els.brightness.addEventListener("input", renderEmulator);
+    [
+      els.cycleSeconds,
+      els.scrollSpeed,
+      els.airlineColor,
+      els.routeColor,
+      els.aircraftColor,
+      els.contextColor
+    ].forEach((input) => input.addEventListener("input", () => {
+      resetFlightCycle();
+      renderEmulator();
+    }));
 
     async function loadPreview() {
       els.previewMeta.textContent = "Henter...";
@@ -1038,10 +1128,12 @@ function renderIndexHtml(): string {
       sourceCtx.fillStyle = "#000";
       sourceCtx.fillRect(0, 0, 128, 64);
       sourceCtx.drawImage(logoCanvas, 3, 3);
-      drawDotText(sourceCtx, "Alaska", 50, 6, "#f4f7ff", { maxWidth: 75 });
-      drawDotText(sourceCtx, "PDX-LAX", 50, 20, "#f4f7ff", { maxWidth: 75 });
-      drawDotText(sourceCtx, "737 MAX 9", 50, 34, "#f4f7ff", { maxWidth: 75 });
-      drawTickerLine(sourceCtx, "Arriving from Portland Intl", 3, 52, "#f4f7ff", 122);
+      drawDisplayText(sourceCtx, {
+        airline: "Alaska",
+        route: "PDX-LAX",
+        aircraft: "737 MAX 9",
+        context: "Arriving from Portland Intl"
+      });
       drawLedPanel(ctx, source);
       els.emuMeta.textContent = uploadedImage.naturalWidth + " x " + uploadedImage.naturalHeight + " px → 42 x 42 logo field · 128 x 64 LEDs · " + fit + " · " + els.sampling.value + " · " + Math.round(brightness * 100) + "%";
     }
@@ -1053,21 +1145,25 @@ function renderIndexHtml(): string {
       }
       tickerStartedAt = performance.now();
       if (els.emuSource.value !== "live" || displayFlights.length <= 1) return;
+      const cycleMs = Math.max(2000, Number(els.cycleSeconds.value || 5) * 1000);
       flightCycleTimer = setInterval(() => {
         if (els.emuSource.value !== "live" || displayFlights.length <= 1) return;
         currentFlightIndex = (currentFlightIndex + 1) % displayFlights.length;
+        tickerStartedAt = performance.now();
         renderEmulator();
-      }, 5000);
+      }, cycleMs);
     }
 
     function drawPlaceholder(ctx) {
       ctx.fillStyle = "#000";
       ctx.fillRect(0, 0, 128, 64);
       drawPlaceholderLogo(ctx, 3, 3, 42);
-      drawDotText(ctx, "Alaska", 50, 6, "#f4f7ff", { maxWidth: 75 });
-      drawDotText(ctx, "PDX-LAX", 50, 20, "#f4f7ff", { maxWidth: 75 });
-      drawDotText(ctx, "737 MAX 9", 50, 34, "#f4f7ff", { maxWidth: 75 });
-      drawTickerLine(ctx, "Arriving from Portland Intl", 3, 52, "#f4f7ff", 122);
+      drawDisplayText(ctx, {
+        airline: "Alaska",
+        route: "PDX-LAX",
+        aircraft: "737 MAX 9",
+        context: "Arriving from Portland Intl"
+      });
       els.emuMeta.textContent = "Ingen bilde lastet opp. Viser 128 x 64 runde LEDs med P2.5 pitch.";
     }
 
@@ -1088,17 +1184,35 @@ function renderIndexHtml(): string {
       } else {
         drawPlaceholderLogo(ctx, 3, 3, 42);
       }
-      const airline = flight.air || flight.airCode || "";
-      const route = [flight.from, flight.to].filter(Boolean).join("-");
-      const aircraft = flight.ac || flight.reg || "";
-      const contextLabel = flight.ctxLabel || "";
-      const contextValue = flight.ctxValue || "";
+      const airline = (flight.lines && flight.lines.airline) || flight.air || flight.airCode || "";
+      const route = (flight.lines && flight.lines.route) || [flight.from, flight.to].filter(Boolean).join("-");
+      const aircraft = (flight.lines && flight.lines.aircraft) || flight.ac || flight.reg || "";
+      const context = (flight.lines && flight.lines.context) || [flight.ctxLabel, flight.ctxValue].filter(Boolean).join(" ");
 
-      drawDotText(ctx, airline, 50, 6, "#f4f7ff", { maxWidth: 75 });
-      drawDotText(ctx, route || flight.flt || flight.cs || "", 50, 20, "#f4f7ff", { maxWidth: 75 });
-      drawDotText(ctx, aircraft, 50, 34, "#f4f7ff", { maxWidth: 75 });
-      drawTickerLine(ctx, [contextLabel, contextValue].filter(Boolean).join(" "), 3, 52, "#f4f7ff", 122);
+      drawDisplayText(ctx, {
+        airline,
+        route: route || flight.flt || flight.cs || "",
+        aircraft,
+        context
+      });
       els.emuMeta.textContent = "Live layout: " + (flight.flt || flight.cs || route || "flight") + " · 128 x 64 LEDs · 320 x 160 mm · P2.5 pitch.";
+    }
+
+    function getLineColors() {
+      return {
+        airline: els.airlineColor.value || "#f4f7ff",
+        route: els.routeColor.value || "#f4f7ff",
+        aircraft: els.aircraftColor.value || "#f4f7ff",
+        context: els.contextColor.value || "#f4f7ff"
+      };
+    }
+
+    function drawDisplayText(ctx, lines) {
+      const colors = getLineColors();
+      drawDotText(ctx, lines.airline || "", 50, 5, colors.airline, { maxWidth: 75 });
+      drawDotText(ctx, lines.route || "", 50, 19, colors.route, { maxWidth: 75 });
+      drawDotText(ctx, lines.aircraft || "", 50, 33, colors.aircraft, { maxWidth: 75 });
+      drawTickerLine(ctx, lines.context || "", 3, 52, colors.context, 122);
     }
 
     function loadLogoForFlight(flight) {
@@ -1202,7 +1316,7 @@ function renderIndexHtml(): string {
 
     function getTickerOffset(overflow) {
       const holdMs = 900;
-      const pxPerSecond = 9;
+      const pxPerSecond = Math.max(2, Number(els.scrollSpeed.value || 9));
       const travelMs = Math.max(1200, (overflow / pxPerSecond) * 1000);
       const cycleMs = holdMs + travelMs + holdMs + travelMs;
       const t = (performance.now() - tickerStartedAt) % cycleMs;
