@@ -1,0 +1,17 @@
+misc
+.DS_Store
+.venv
+
+# Cloudflare Worker
+cloudflare-worker/.dev.vars
+cloudflare-worker/.wrangler/
+cloudflare-worker/node_modules/
+cloudflare-worker/dist/
+
+# PlatformIO / firmware
+firmware-original/.pio/
+firmware-hub75/.pio/
+
+# Local editor and OS files
+.idea/
+.vscode/

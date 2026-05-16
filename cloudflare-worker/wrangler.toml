@@ -1,0 +1,21 @@
+name = "flight-display-server"
+main = "src/index.ts"
+compatibility_date = "2026-05-16"
+
+assets = { directory = "./public", binding = "ASSETS" }
+
+[vars]
+FR24_API_BASE_URL = "https://fr24api.flightradar24.com/api"
+FR24_LIVE_ENDPOINT = "/live/flight-positions/full"
+FR24_AIRLINE_ENDPOINT_TEMPLATE = "/static/airlines/{icao}/light"
+FR24_AIRPORT_ENDPOINT_TEMPLATE = "/static/airports/{code}/light"
+HOME_AIRPORT_IATA = "OSL"
+DEFAULT_LAT = "59.9139"
+DEFAULT_LON = "10.7522"
+DEFAULT_RADIUS_KM = "10"
+CACHE_TTL_SECONDS = "60"
+DISPLAY_LIMIT = "8"
+
+[[kv_namespaces]]
+binding = "FLIGHT_DISPLAY_KV"
+id = "075d6ed547f64f1ab5129a88f48e25ca"
