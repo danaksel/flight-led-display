@@ -99,6 +99,28 @@ type IdleScreen = {
 };
 
 const CONFIG_KEY = "config:v1";
+const AIRPORT_CITY_OVERRIDES: Record<string, string> = {
+  ARN: "Stockholm",
+  BGY: "Milan",
+  CDG: "Paris",
+  CIA: "Rome",
+  CPH: "Copenhagen",
+  FCO: "Rome",
+  FLL: "Fort Lauderdale",
+  HND: "Tokyo",
+  JFK: "New York",
+  LGA: "New York",
+  LGW: "London",
+  LTN: "London",
+  MXP: "Milan",
+  NRT: "Tokyo",
+  OSL: "Oslo",
+  ORY: "Paris",
+  STN: "London",
+  SWF: "New York",
+  TRF: "Oslo",
+  WAW: "Warsaw"
+};
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -665,7 +687,7 @@ async function enrichAirportContext(env: Env, config: Config, flights: DisplayFl
   }
 
   const codes = Array.from(neededCodes);
-  const names = await Promise.all(codes.map((code) => getAirportName(env, code)));
+  const names = await Promise.all(codes.map((code) => getAirportDisplayName(env, code)));
   const nameByCode = new Map<string, string>();
   codes.forEach((code, index) => {
     if (names[index]) nameByCode.set(code, names[index]);
@@ -678,11 +700,17 @@ async function enrichAirportContext(env: Env, config: Config, flights: DisplayFl
   }
 }
 
-async function getAirportName(env: Env, code: string): Promise<string | undefined> {
+async function getAirportDisplayName(env: Env, code: string): Promise<string | undefined> {
   const normalized = code.toUpperCase();
-  const cacheKey = `airport:v1:${normalized}`;
+  const cacheKey = `airport:v2:${normalized}`;
   const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey);
   if (cached) return cached;
+
+  const override = AIRPORT_CITY_OVERRIDES[normalized];
+  if (override) {
+    await env.FLIGHT_DISPLAY_KV.put(cacheKey, override);
+    return override;
+  }
 
   const baseUrl = env.FR24_API_BASE_URL || "https://fr24api.flightradar24.com/api";
   const template = env.FR24_AIRPORT_ENDPOINT_TEMPLATE || "/static/airports/{code}/light";
@@ -699,11 +727,25 @@ async function getAirportName(env: Env, code: string): Promise<string | undefine
 
   const json = await response.json();
   const data = json && typeof json === "object" && "data" in json ? (json as { data: unknown }).data : json;
-  const name = extractAirportName(data);
-  if (name) {
-    await env.FLIGHT_DISPLAY_KV.put(cacheKey, name);
+  const displayName = extractAirportCity(data) || cleanAirportName(extractAirportName(data));
+  if (displayName) {
+    await env.FLIGHT_DISPLAY_KV.put(cacheKey, displayName);
   }
-  return name;
+  return displayName;
+}
+
+function extractAirportCity(value: unknown): string | undefined {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const city = extractAirportCity(item);
+      if (city) return city;
+    }
+    return undefined;
+  }
+
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  return firstString(record, ["city", "city_name", "municipality", "place", "location"]);
 }
 
 function extractAirportName(value: unknown): string | undefined {
@@ -718,6 +760,16 @@ function extractAirportName(value: unknown): string | undefined {
   if (!value || typeof value !== "object") return undefined;
   const record = value as Record<string, unknown>;
   return firstString(record, ["name", "full_name", "airport_name", "display_name"]);
+}
+
+function cleanAirportName(name: string | undefined): string | undefined {
+  if (!name) return undefined;
+  const withoutDecorators = name
+    .replace(/\b(international|intl\.?|airport|aeropuerto|aeroport|aeroporto|lufthavn|flyplass)\b/gi, "")
+    .replace(/\s+/g, " ")
+    .replace(/\s*[-–—]\s*$/g, "")
+    .trim();
+  return withoutDecorators || name;
 }
 
 function renderIndexHtml(): string {
