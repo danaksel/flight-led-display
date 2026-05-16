@@ -74,13 +74,22 @@ type AvinorFlight = {
   airport: string;
   time: string;
   sortTime: number;
+  status: "scheduled" | "newTime" | "canceled";
+  gate?: string;
+};
+
+type IdleRow = {
+  flightId: string;
+  airport: string;
+  time: string;
+  status: "scheduled" | "newTime" | "canceled";
   gate?: string;
 };
 
 type IdleScreen = {
-  title: string;
-  rows: string[];
-  source: string;
+  title: "DEPARTURES" | "ARRIVALS";
+  kind: "departures" | "arrivals";
+  rows: IdleRow[];
 };
 
 const CONFIG_KEY = "config:v1";
@@ -223,22 +232,30 @@ async function getIdleScreens(env: Env, config: Config): Promise<IdleScreen[]> {
 
   return [
     {
-      title: "Next departures",
-      rows: departures.map((flight) => [flight.flightId, flight.airport, flight.time, flight.gate ? `G${flight.gate}` : ""].filter(Boolean).join(" "))
+      title: "DEPARTURES" as const,
+      kind: "departures" as const,
+      rows: departures.map(toIdleRow)
     },
     {
-      title: "Next arrivals",
-      rows: arrivals.map((flight) => [flight.airport, flight.time, flight.flightId].filter(Boolean).join(" "))
+      title: "ARRIVALS" as const,
+      kind: "arrivals" as const,
+      rows: arrivals.map(toIdleRow)
     }
-  ].map((screen) => ({
-    ...screen,
-    rows: screen.rows.length ? screen.rows : ["No airport data"],
-    source: "Flight data from Avinor"
-  }));
+  ];
+}
+
+function toIdleRow(flight: AvinorFlight): IdleRow {
+  return {
+    flightId: flight.flightId,
+    airport: flight.airport,
+    time: flight.time,
+    status: flight.status,
+    ...(flight.gate ? { gate: flight.gate } : {})
+  };
 }
 
 async function getAvinorFlights(env: Env, airport: string, direction: "A" | "D", timezone: string): Promise<AvinorFlight[]> {
-  const cacheKey = `avinor:v2:${airport}:${direction}`;
+  const cacheKey = `avinor:v3:${airport}:${direction}`;
   const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
   if (Array.isArray(cached)) return cached as AvinorFlight[];
 
@@ -278,19 +295,20 @@ function parseAvinorFlights(xml: string, direction: "A" | "D", timezone: string)
       const bestTime = statusCode === "E" && statusTime ? statusTime : scheduleTime;
       const timestamp = Date.parse(bestTime || "");
       if (!flightId || !airport || !Number.isFinite(timestamp)) return null;
-      if (statusCode === "C" || statusCode === doneStatus) return null;
+      if (statusCode === doneStatus) return null;
       if (timestamp < now - 10 * 60 * 1000) return null;
       return {
         flightId,
         airport,
         time: formatLocalTime(bestTime || scheduleTime || "", timezone),
         sortTime: timestamp,
+        status: statusCode === "C" ? "canceled" : (statusCode === "E" || xmlText(block, "delayed") === "Y" ? "newTime" : "scheduled"),
         ...(gate ? { gate } : {})
       };
     })
     .filter((flight): flight is AvinorFlight => Boolean(flight))
     .sort((a, b) => a.sortTime - b.sortTime)
-    .slice(0, 3);
+    .slice(0, 4);
 }
 
 function xmlText(xml: string, tag: string): string {
@@ -1153,8 +1171,8 @@ function renderIndexHtml(): string {
           if (idleScreens.length) {
             els.flightList.innerHTML = idleScreens.map((screen) => {
               const rows = Array.isArray(screen.rows) ? screen.rows : [];
-              return '<article class="flight"><strong>' + escapeHtml(screen.title || "Airport") + '</strong><span>' + rows.map(escapeHtml).join("<br>") + '</span></article>';
-            }).join("") + '<div class="empty">Flight data from Avinor.</div>';
+              return '<article class="flight"><strong>' + escapeHtml(screen.title || "Airport") + '</strong><span>' + rows.map(formatIdleRow).map(escapeHtml).join("<br>") + '</span></article>';
+            }).join("");
           } else {
             els.flightList.innerHTML = '<div class="empty">Ingen fly i valgt radius akkurat nå, eller FR24/Avinor svarte uten matchende data.</div>';
           }
@@ -1179,6 +1197,11 @@ function renderIndexHtml(): string {
         els.previewMeta.textContent = "";
         els.flightList.innerHTML = '<div class="empty error">' + escapeHtml(error.message || "Ukjent feil") + '</div>';
       }
+    }
+
+    function formatIdleRow(row) {
+      if (!row || typeof row !== "object") return "";
+      return [row.flightId, row.airport, row.gate || "", row.time, row.status && row.status !== "scheduled" ? row.status : ""].filter(Boolean).join(" · ");
     }
 
     function escapeHtml(value) {
@@ -1353,11 +1376,27 @@ function renderIndexHtml(): string {
         els.emuMeta.textContent = "Idle layout: ingen flydata tilgjengelig.";
         return;
       }
-      drawDotText(ctx, screen.title || "Airport", 3, 4, colors.airline, { maxWidth: 122 });
-      const rows = Array.isArray(screen.rows) ? screen.rows.slice(0, 3) : [];
-      rows.forEach((row, index) => drawDotText(ctx, row, 3, 18 + index * 12, index === 0 ? colors.route : colors.aircraft, { maxWidth: 122 }));
-      drawDotText(ctx, "AVINOR", 3, 55, colors.progress, { maxWidth: 122 });
-      els.emuMeta.textContent = "Idle layout: " + (screen.title || "airport") + " · Flight data from Avinor.";
+      ensureTickerAnimation();
+      const title = screen.title || "AIRPORT";
+      drawDotText(ctx, title, 3, 3, colors.progress, { maxWidth: 122 });
+      ctx.fillStyle = colors.progress;
+      ctx.fillRect(3, 14, 122, 1);
+      const rows = Array.isArray(screen.rows) ? screen.rows.slice(0, 4) : [];
+      rows.forEach((row, index) => drawIdleRow(ctx, screen.kind, row, 3, 20 + index * 11));
+      if (!rows.length) drawDotText(ctx, "No airport data", 3, 28, colors.context, { maxWidth: 122 });
+      els.emuMeta.textContent = "Idle layout: " + title + " · airport board.";
+    }
+
+    function drawIdleRow(ctx, kind, row, x, y) {
+      const colors = getLineColors();
+      const status = row && row.status ? row.status : "scheduled";
+      const blinkOn = Math.floor(performance.now() / 900) % 2 === 0;
+      const timeText = status === "newTime" && !blinkOn ? "New time" : status === "canceled" && !blinkOn ? "Canceled" : row.time;
+      const timeColor = status === "newTime" && !blinkOn ? colors.progress : status === "canceled" && !blinkOn ? "#ff3b30" : colors.aircraft;
+      drawDotText(ctx, row.flightId || "", x, y, colors.route, { maxWidth: 38 });
+      drawDotText(ctx, row.airport || "", x + 41, y, colors.aircraft, { maxWidth: 22 });
+      if (kind === "departures") drawDotText(ctx, row.gate || "", x + 64, y, colors.aircraft, { maxWidth: 18 });
+      drawDotText(ctx, timeText || "", x + 80, y, timeColor, { maxWidth: 45 });
     }
 
     function getLineColors() {
