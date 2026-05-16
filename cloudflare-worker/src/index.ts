@@ -454,14 +454,14 @@ const KNOWN_LOGO_CODES = new Set([
 ]);
 
 function displayLogoCodeFor(flight: DisplayFlight): string {
-  const docCode = logoCodeFromCallsign(flight.callsign);
+  const docCode = logoCodeFromCallsign(flight.callsign) || logoCodeFromCallsign(flight.flight) || logoCodeFromCallsign(flight.airline) || logoCodeFromCallsign(flight.airlineCode);
   if (docCode) return docCode;
   return normalizeLogoCode(flight.airlineCode);
 }
 
-function logoCodeFromCallsign(callsign: string | undefined): string {
-  if (!callsign) return "";
-  return /^DOC\d+/i.test(callsign.trim()) ? "DOC" : "";
+function logoCodeFromCallsign(value: string | undefined): string {
+  if (!value) return "";
+  return /^DOC(?:\d+)?$/i.test(value.trim()) ? "DOC" : "";
 }
 
 function normalizeLogoCode(airlineCode: string | undefined): string {
