@@ -40,6 +40,12 @@ type DeviceSettings = {
     context: string;
     progress: string;
   };
+  timetableColors: {
+    header: string;
+    data: string;
+    newTime: string;
+    canceled: string;
+  };
   nightMode: {
     enabled: boolean;
     start: string;
@@ -183,12 +189,23 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
     configRefreshSeconds: clampNumber(v.configRefreshSeconds, 60, 3600, 300),
     timezone: typeof v.timezone === "string" && v.timezone.trim() ? v.timezone.slice(0, 64) : "Europe/Oslo",
     lineColors: normalizeLineColors((v as { lineColors?: unknown }).lineColors),
+    timetableColors: normalizeTimetableColors((v as { timetableColors?: unknown }).timetableColors),
     nightMode: {
       enabled: typeof night.enabled === "boolean" ? night.enabled : true,
       start: normalizeTimeString(night.start, "23:00"),
       end: normalizeTimeString(night.end, "07:00"),
       brightness: clampNumber(night.brightness, 0, 100, 0)
     }
+  };
+}
+
+function normalizeTimetableColors(value: unknown): DeviceSettings["timetableColors"] {
+  const v = value && typeof value === "object" ? value as Partial<DeviceSettings["timetableColors"]> : {};
+  return {
+    header: normalizeHexColor(v.header, "#f7b500"),
+    data: normalizeHexColor(v.data, "#f4f7ff"),
+    newTime: normalizeHexColor(v.newTime, "#f7b500"),
+    canceled: normalizeHexColor(v.canceled, "#ff3b30")
   };
 }
 
@@ -870,6 +887,25 @@ function renderIndexHtml(): string {
             <input id="progressColor" type="color">
           </div>
         </div>
+        <h2 style="margin-top:16px">Tidstabell</h2>
+        <div class="color-grid">
+          <div>
+            <label for="timetableHeaderColor">Overskrift</label>
+            <input id="timetableHeaderColor" type="color">
+          </div>
+          <div>
+            <label for="timetableDataColor">Data</label>
+            <input id="timetableDataColor" type="color">
+          </div>
+          <div>
+            <label for="timetableNewTimeColor">New time</label>
+            <input id="timetableNewTimeColor" type="color">
+          </div>
+          <div>
+            <label for="timetableCanceledColor">Canceled</label>
+            <input id="timetableCanceledColor" type="color">
+          </div>
+        </div>
         <div class="row">
           <div>
             <label for="timezone">Timezone</label>
@@ -957,6 +993,10 @@ function renderIndexHtml(): string {
       aircraftColor: document.querySelector("#aircraftColor"),
       contextColor: document.querySelector("#contextColor"),
       progressColor: document.querySelector("#progressColor"),
+      timetableHeaderColor: document.querySelector("#timetableHeaderColor"),
+      timetableDataColor: document.querySelector("#timetableDataColor"),
+      timetableNewTimeColor: document.querySelector("#timetableNewTimeColor"),
+      timetableCanceledColor: document.querySelector("#timetableCanceledColor"),
       timezone: document.querySelector("#timezone"),
       nightEnabled: document.querySelector("#nightEnabled"),
       nightStart: document.querySelector("#nightStart"),
@@ -1049,6 +1089,11 @@ function renderIndexHtml(): string {
       els.aircraftColor.value = colors.aircraft || "#f4f7ff";
       els.contextColor.value = colors.context || "#f4f7ff";
       els.progressColor.value = colors.progress || "#f7b500";
+      const timetableColors = device.timetableColors || {};
+      els.timetableHeaderColor.value = timetableColors.header || "#f7b500";
+      els.timetableDataColor.value = timetableColors.data || "#f4f7ff";
+      els.timetableNewTimeColor.value = timetableColors.newTime || "#f7b500";
+      els.timetableCanceledColor.value = timetableColors.canceled || "#ff3b30";
       els.timezone.value = device.timezone || "Europe/Oslo";
       els.nightEnabled.checked = night.enabled !== false;
       els.nightStart.value = night.start || "23:00";
@@ -1076,6 +1121,12 @@ function renderIndexHtml(): string {
             aircraft: els.aircraftColor.value,
             context: els.contextColor.value,
             progress: els.progressColor.value
+          },
+          timetableColors: {
+            header: els.timetableHeaderColor.value,
+            data: els.timetableDataColor.value,
+            newTime: els.timetableNewTimeColor.value,
+            canceled: els.timetableCanceledColor.value
           },
           nightMode: {
             enabled: els.nightEnabled.checked,
@@ -1143,7 +1194,11 @@ function renderIndexHtml(): string {
       els.routeColor,
       els.aircraftColor,
       els.contextColor,
-      els.progressColor
+      els.progressColor,
+      els.timetableHeaderColor,
+      els.timetableDataColor,
+      els.timetableNewTimeColor,
+      els.timetableCanceledColor
     ].forEach((input) => input.addEventListener("input", () => {
       renderEmulator();
     }));
@@ -1201,7 +1256,7 @@ function renderIndexHtml(): string {
 
     function formatIdleRow(row) {
       if (!row || typeof row !== "object") return "";
-      return [row.flightId, row.airport, row.gate || "", row.time, row.status && row.status !== "scheduled" ? row.status : ""].filter(Boolean).join(" · ");
+      return [row.flightId, row.airport, row.time, row.status && row.status !== "scheduled" ? row.status : ""].filter(Boolean).join(" · ");
     }
 
     function escapeHtml(value) {
@@ -1369,34 +1424,42 @@ function renderIndexHtml(): string {
     function drawIdleLayout(ctx, screen) {
       ctx.fillStyle = "#000";
       ctx.fillRect(0, 0, 128, 64);
-      const colors = getLineColors();
+      const colors = getTimetableColors();
       if (!screen) {
-        drawDotText(ctx, "No flights", 3, 9, colors.airline, { maxWidth: 122 });
-        drawDotText(ctx, "No airport data", 3, 23, colors.context, { maxWidth: 122 });
+        drawDotText(ctx, "No flights", 3, 9, colors.header, { maxWidth: 122 });
+        drawDotText(ctx, "No airport data", 3, 23, colors.data, { maxWidth: 122 });
         els.emuMeta.textContent = "Idle layout: ingen flydata tilgjengelig.";
         return;
       }
       ensureTickerAnimation();
       const title = screen.title || "AIRPORT";
-      drawDotText(ctx, title, 3, 3, colors.progress, { maxWidth: 122 });
-      ctx.fillStyle = colors.progress;
+      drawDotText(ctx, title, 3, 3, colors.header, { maxWidth: 122 });
+      ctx.fillStyle = colors.header;
       ctx.fillRect(3, 14, 122, 1);
       const rows = Array.isArray(screen.rows) ? screen.rows.slice(0, 4) : [];
       rows.forEach((row, index) => drawIdleRow(ctx, screen.kind, row, 3, 20 + index * 11));
-      if (!rows.length) drawDotText(ctx, "No airport data", 3, 28, colors.context, { maxWidth: 122 });
+      if (!rows.length) drawDotText(ctx, "No airport data", 3, 28, colors.data, { maxWidth: 122 });
       els.emuMeta.textContent = "Idle layout: " + title + " · airport board.";
     }
 
     function drawIdleRow(ctx, kind, row, x, y) {
-      const colors = getLineColors();
+      const colors = getTimetableColors();
       const status = row && row.status ? row.status : "scheduled";
       const blinkOn = Math.floor(performance.now() / 900) % 2 === 0;
       const timeText = status === "newTime" && !blinkOn ? "New time" : status === "canceled" && !blinkOn ? "Canceled" : row.time;
-      const timeColor = status === "newTime" && !blinkOn ? colors.progress : status === "canceled" && !blinkOn ? "#ff3b30" : colors.aircraft;
-      drawDotText(ctx, row.flightId || "", x, y, colors.route, { maxWidth: 38 });
-      drawDotText(ctx, row.airport || "", x + 41, y, colors.aircraft, { maxWidth: 22 });
-      if (kind === "departures") drawDotText(ctx, row.gate || "", x + 64, y, colors.aircraft, { maxWidth: 18 });
-      drawDotText(ctx, timeText || "", x + 80, y, timeColor, { maxWidth: 45 });
+      const timeColor = status === "newTime" && !blinkOn ? colors.newTime : status === "canceled" && !blinkOn ? colors.canceled : colors.data;
+      drawDotText(ctx, row.flightId || "", x, y, colors.data, { maxWidth: 43 });
+      drawDotText(ctx, row.airport || "", x + 48, y, colors.data, { maxWidth: 24 });
+      drawDotTextRight(ctx, timeText || "", 125, y, timeColor, 48);
+    }
+
+    function getTimetableColors() {
+      return {
+        header: els.timetableHeaderColor.value || "#f7b500",
+        data: els.timetableDataColor.value || "#f4f7ff",
+        newTime: els.timetableNewTimeColor.value || "#f7b500",
+        canceled: els.timetableCanceledColor.value || "#ff3b30"
+      };
     }
 
     function getLineColors() {
@@ -1545,11 +1608,18 @@ function renderIndexHtml(): string {
       return String(text || "").length * 6;
     }
 
+    function drawDotTextRight(ctx, text, rightX, y, color, maxWidth) {
+      const value = String(text || "");
+      const width = Math.min(measureDotText(value), maxWidth);
+      drawDotText(ctx, value, rightX - width, y, color, { maxWidth });
+    }
+
     function drawDotText(ctx, text, x, y, color, options = {}) {
       const glyphs = {
         " ": ["00000","00000","00000","00000","00000","00000","00000"],
         "-": ["00000","00000","00000","11111","00000","00000","00000"],
         ".": ["00000","00000","00000","00000","00000","01100","01100"],
+        ":": ["00000","01100","01100","00000","01100","01100","00000"],
         "0": ["01110","10001","10011","10101","11001","10001","01110"],
         "1": ["00100","01100","00100","00100","00100","00100","01110"],
         "2": ["01110","10001","00001","00010","00100","01000","11111"],
