@@ -30,6 +30,7 @@ type DeviceSettings = {
   brightness: number;
   pollSeconds: number;
   displayCycleSeconds: number;
+  timetableCycleSeconds: number;
   scrollPixelsPerSecond: number;
   configRefreshSeconds: number;
   timezone: string;
@@ -82,6 +83,7 @@ type AvinorFlight = {
   sortTime: number;
   status: "scheduled" | "newTime" | "canceled";
   gate?: string;
+  gateMessage?: string;
 };
 
 type IdleRow = {
@@ -90,6 +92,7 @@ type IdleRow = {
   time: string;
   status: "scheduled" | "newTime" | "canceled";
   gate?: string;
+  gateMessage?: string;
 };
 
 type IdleScreen = {
@@ -207,6 +210,7 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
     brightness: clampNumber(v.brightness, 1, 100, 80),
     pollSeconds: clampNumber(v.pollSeconds, 30, 900, 90),
     displayCycleSeconds: clampNumber(v.displayCycleSeconds, 2, 30, 5),
+    timetableCycleSeconds: clampNumber((v as { timetableCycleSeconds?: unknown }).timetableCycleSeconds, 2, 60, 7),
     scrollPixelsPerSecond: clampNumber(v.scrollPixelsPerSecond, 2, 30, 9),
     configRefreshSeconds: clampNumber(v.configRefreshSeconds, 60, 3600, 300),
     timezone: typeof v.timezone === "string" && v.timezone.trim() ? v.timezone.slice(0, 64) : "Europe/Oslo",
@@ -270,17 +274,20 @@ async function getIdleScreens(env: Env, config: Config): Promise<IdleScreen[]> {
   ]);
 
   return [
-    {
-      title: "DEPARTURES" as const,
-      kind: "departures" as const,
-      rows: departures.map(toIdleRow)
-    },
-    {
-      title: "ARRIVALS" as const,
-      kind: "arrivals" as const,
-      rows: arrivals.map(toIdleRow)
-    }
+    ...toIdleScreens("DEPARTURES", "departures", departures),
+    ...toIdleScreens("ARRIVALS", "arrivals", arrivals)
   ];
+}
+
+function toIdleScreens(title: IdleScreen["title"], kind: IdleScreen["kind"], flights: AvinorFlight[]): IdleScreen[] {
+  const rows = flights.map(toIdleRow);
+  const firstPage = rows.slice(0, 4);
+  const secondPage = rows.slice(4, 8);
+  return [firstPage, secondPage].map((pageRows) => ({
+    title,
+    kind,
+    rows: pageRows
+  }));
 }
 
 function toIdleRow(flight: AvinorFlight): IdleRow {
@@ -289,12 +296,13 @@ function toIdleRow(flight: AvinorFlight): IdleRow {
     airport: flight.airport,
     time: flight.time,
     status: flight.status,
-    ...(flight.gate ? { gate: flight.gate } : {})
+    ...(flight.gate ? { gate: flight.gate } : {}),
+    ...(flight.gateMessage ? { gateMessage: flight.gateMessage } : {})
   };
 }
 
 async function getAvinorFlights(env: Env, airport: string, direction: "A" | "D", timezone: string): Promise<AvinorFlight[]> {
-  const cacheKey = `avinor:v3:${airport}:${direction}`;
+  const cacheKey = `avinor:board:v1:${airport}:${direction}`;
   const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
   if (Array.isArray(cached)) return cached as AvinorFlight[];
 
@@ -331,23 +339,48 @@ function parseAvinorFlights(xml: string, direction: "A" | "D", timezone: string)
       const status = block.match(/<status\b([^>]*)\/>/);
       const statusCode = status ? xmlAttribute(status[1], "code") : "";
       const statusTime = status ? xmlAttribute(status[1], "time") : "";
+      const statusText = status ? xmlAttribute(status[1], "text") || xmlAttribute(status[1], "status") : "";
       const bestTime = statusCode === "E" && statusTime ? statusTime : scheduleTime;
       const timestamp = Date.parse(bestTime || "");
       if (!flightId || !airport || !Number.isFinite(timestamp)) return null;
       if (statusCode === doneStatus) return null;
       if (timestamp < now - 10 * 60 * 1000) return null;
+      const gateMessage = direction === "D" ? extractGateMessage(block, statusText) : undefined;
       return {
         flightId,
         airport,
         time: formatLocalTime(bestTime || scheduleTime || "", timezone),
         sortTime: timestamp,
         status: statusCode === "C" ? "canceled" : (statusCode === "E" || xmlText(block, "delayed") === "Y" ? "newTime" : "scheduled"),
-        ...(gate ? { gate } : {})
+        ...(gate ? { gate } : {}),
+        ...(gateMessage ? { gateMessage } : {})
       };
     })
     .filter((flight): flight is AvinorFlight => Boolean(flight))
     .sort((a, b) => a.sortTime - b.sortTime)
-    .slice(0, 4);
+    .slice(0, 8);
+}
+
+function extractGateMessage(xml: string, statusText: string): string | undefined {
+  const raw = [
+    xmlText(xml, "gate_status"),
+    xmlText(xml, "gateStatus"),
+    xmlText(xml, "gate_action"),
+    xmlText(xml, "gateAction"),
+    xmlText(xml, "gate_info"),
+    xmlText(xml, "gateInfo"),
+    statusText
+  ].find(Boolean);
+  if (!raw) return undefined;
+
+  const normalized = raw.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  if (["gotogate", "togate", "go", "g"].includes(normalized)) return "Go to gate";
+  if (["gateclosing", "closing", "close", "gc"].includes(normalized)) return "Gate closing";
+  if (["gateclosed", "closed", "cl"].includes(normalized)) return "Gate closed";
+  if (normalized.includes("gotogate")) return "Go to gate";
+  if (normalized.includes("closing")) return "Gate closing";
+  if (normalized.includes("closed")) return "Gate closed";
+  return undefined;
 }
 
 function xmlText(xml: string, tag: string): string {
@@ -909,9 +942,15 @@ function renderIndexHtml(): string {
         </div>
         <div class="row">
           <div>
+            <label for="timetableCycleSeconds">Tavle sek</label>
+            <input id="timetableCycleSeconds" type="number" min="2" max="60" step="1">
+          </div>
+          <div>
             <label for="scrollSpeed">Scroll px/s</label>
             <input id="scrollSpeed" type="number" min="2" max="30" step="1">
           </div>
+        </div>
+        <div class="row">
           <div>
             <label for="configRefreshSeconds">Config sek</label>
             <input id="configRefreshSeconds" type="number" min="60" max="3600" step="30">
@@ -1038,6 +1077,7 @@ function renderIndexHtml(): string {
       nightBrightness: document.querySelector("#nightBrightness"),
       pollSeconds: document.querySelector("#pollSeconds"),
       cycleSeconds: document.querySelector("#cycleSeconds"),
+      timetableCycleSeconds: document.querySelector("#timetableCycleSeconds"),
       scrollSpeed: document.querySelector("#scrollSpeed"),
       configRefreshSeconds: document.querySelector("#configRefreshSeconds"),
       airlineColor: document.querySelector("#airlineColor"),
@@ -1133,6 +1173,7 @@ function renderIndexHtml(): string {
       els.nightBrightness.value = night.brightness ?? 0;
       els.pollSeconds.value = device.pollSeconds ?? 90;
       els.cycleSeconds.value = device.displayCycleSeconds ?? 5;
+      els.timetableCycleSeconds.value = device.timetableCycleSeconds ?? 7;
       els.scrollSpeed.value = device.scrollPixelsPerSecond ?? 9;
       els.configRefreshSeconds.value = device.configRefreshSeconds ?? 300;
       const colors = device.lineColors || {};
@@ -1164,6 +1205,7 @@ function renderIndexHtml(): string {
           brightness: Number(els.deviceBrightness.value),
           pollSeconds: Number(els.pollSeconds.value),
           displayCycleSeconds: Number(els.cycleSeconds.value),
+          timetableCycleSeconds: Number(els.timetableCycleSeconds.value),
           scrollPixelsPerSecond: Number(els.scrollSpeed.value),
           configRefreshSeconds: Number(els.configRefreshSeconds.value),
           timezone: els.timezone.value.trim(),
@@ -1258,6 +1300,10 @@ function renderIndexHtml(): string {
       resetFlightCycle();
       renderEmulator();
     });
+    els.timetableCycleSeconds.addEventListener("input", () => {
+      resetFlightCycle();
+      renderEmulator();
+    });
 
     async function loadPreview() {
       els.previewMeta.textContent = "Henter...";
@@ -1308,7 +1354,9 @@ function renderIndexHtml(): string {
 
     function formatIdleRow(row) {
       if (!row || typeof row !== "object") return "";
-      return [row.flightId, row.airport, row.time, row.status && row.status !== "scheduled" ? row.status : ""].filter(Boolean).join(" · ");
+      const gate = row.gate ? "Gate " + row.gate : "";
+      const status = row.gateMessage || (row.status && row.status !== "scheduled" ? row.status : "");
+      return [row.flightId, row.airport, gate, row.time, status].filter(Boolean).join(" · ");
     }
 
     function escapeHtml(value) {
@@ -1416,7 +1464,8 @@ function renderIndexHtml(): string {
       tickerStartedAt = performance.now();
       flightCycleStartedAt = performance.now();
       if (els.emuSource.value !== "live") return;
-      const cycleMs = Math.max(2000, Number(els.cycleSeconds.value || 5) * 1000);
+      const flightCycleMs = Math.max(2000, Number(els.cycleSeconds.value || 5) * 1000);
+      const timetableCycleMs = Math.max(2000, Number(els.timetableCycleSeconds.value || 7) * 1000);
       if (displayFlights.length <= 1 && (displayFlights.length || idleScreens.length <= 1)) return;
       flightCycleTimer = setInterval(() => {
         if (els.emuSource.value !== "live") return;
@@ -1428,7 +1477,7 @@ function renderIndexHtml(): string {
         flightCycleStartedAt = performance.now();
         tickerStartedAt = performance.now();
         renderEmulator();
-      }, cycleMs);
+      }, displayFlights.length ? flightCycleMs : timetableCycleMs);
     }
 
     function drawPlaceholder(ctx) {
@@ -1498,11 +1547,16 @@ function renderIndexHtml(): string {
       const colors = getTimetableColors();
       const status = row && row.status ? row.status : "scheduled";
       const blinkOn = Math.floor(performance.now() / 900) % 2 === 0;
-      const timeText = status === "newTime" && !blinkOn ? "New time" : status === "canceled" && !blinkOn ? "Canceled" : row.time;
-      const timeColor = status === "newTime" && !blinkOn ? colors.newTime : status === "canceled" && !blinkOn ? colors.canceled : colors.data;
+      const gateText = kind === "departures" && row.gate ? row.gate : "";
+      const airportText = kind === "departures" && gateText && !blinkOn ? gateText : row.airport || "";
+      const gateMessage = kind === "departures" && row.gateMessage ? row.gateMessage : "";
+      const alertText = gateMessage || (status === "newTime" ? "New time" : status === "canceled" ? "Canceled" : "");
+      const showAlert = Boolean(alertText) && !blinkOn;
+      const timeText = showAlert ? alertText : row.time;
+      const timeColor = showAlert ? (status === "canceled" ? colors.canceled : colors.newTime) : colors.data;
       drawDotText(ctx, row.flightId || "", x, y, colors.data, { maxWidth: 43 });
-      drawDotText(ctx, row.airport || "", x + 48, y, colors.data, { maxWidth: 24 });
-      drawDotTextRight(ctx, timeText || "", 125, y, timeColor, 48);
+      if (!showAlert) drawDotText(ctx, airportText, x + 48, y, colors.data, { maxWidth: 24 });
+      drawDotTextRight(ctx, timeText || "", 125, y, timeColor, showAlert ? 74 : 48);
     }
 
     function getTimetableColors() {
