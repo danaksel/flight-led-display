@@ -1555,8 +1555,9 @@ function renderIndexHtml(): string {
       const gateText = kind === "departures" && row.gate ? row.gate : "";
       const airportText = kind === "departures" && gateText && !gateBlinkOn ? gateText : row.airport || "";
       const timeColor = status === "canceled" ? colors.canceled : status === "newTime" ? colors.newTime : colors.data;
-      drawDotText(ctx, row.flightId || "", x, y, colors.data, { maxWidth: 43 });
-      drawDotText(ctx, airportText, x + 48, y, colors.data, { maxWidth: 24 });
+      const rowColor = status === "canceled" ? colors.canceled : colors.data;
+      drawDotText(ctx, row.flightId || "", x, y, rowColor, { maxWidth: 43 });
+      drawDotText(ctx, airportText, x + 48, y, rowColor, { maxWidth: 24 });
       drawDotTextRight(ctx, row.time || "", 125, y, timeColor, 48);
       if (status === "canceled") {
         ctx.fillStyle = colors.canceled;
@@ -1567,26 +1568,26 @@ function renderIndexHtml(): string {
     function drawAirportBoardIcon(ctx, kind, x, y, color) {
       const pattern = kind === "arrivals"
         ? [
-            "00000000000000000",
-            "00000000000010000",
-            "00000000000110000",
-            "11111111111111100",
-            "00111111111110000",
-            "00000111100000000",
-            "00001100110000000",
-            "00011000011000000",
-            "00110000001100000"
+            "00000011000000000",
+            "00000011100000000",
+            "00000010110000000",
+            "00000010011000000",
+            "11111111111110000",
+            "00111111111111000",
+            "00000010011000000",
+            "00000011001100000",
+            "00000000000110000"
           ]
         : [
-            "00110000001100000",
-            "00011000011000000",
-            "00001100110000000",
-            "00000111100000000",
-            "00111111111110000",
-            "11111111111111100",
             "00000000000110000",
-            "00000000000010000",
-            "00000000000000000"
+            "00000011001100000",
+            "00000010011000000",
+            "00111111111111000",
+            "11111111111110000",
+            "00000010011000000",
+            "00000010110000000",
+            "00000011100000000",
+            "00000011000000000"
           ];
       ctx.fillStyle = color;
       for (let row = 0; row < pattern.length; row++) {
