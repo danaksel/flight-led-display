@@ -872,11 +872,15 @@ function renderIndexHtml(): string {
     a:hover { text-decoration: underline; }
     #map { min-height: 330px; border-bottom: 1px solid #263242; filter: saturate(.78) contrast(1.05); }
     @media (max-width: 820px) {
-      .shell { grid-template-columns: 1fr; grid-template-rows: auto 60vh; }
-      aside { border-right: 0; border-bottom: 1px solid #d9dee7; }
-      #map { min-height: 60vh; }
+      .shell { display: block; min-height: 100vh; }
+      aside { max-height: none; overflow: visible; border-right: 0; border-bottom: 1px solid #273345; box-shadow: none; }
+      .workbench { display: block; min-height: 0; }
+      #map { height: 340px; min-height: 340px; }
+      .emulator { padding: 16px 12px 18px; }
       .emu-controls { grid-template-columns: 1fr; }
       .color-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .row { grid-template-columns: 1fr; }
+      .savebar { margin-bottom: -18px; }
     }
   </style>
 </head>
@@ -1546,17 +1550,19 @@ function renderIndexHtml(): string {
     function drawIdleRow(ctx, kind, row, x, y) {
       const colors = getTimetableColors();
       const status = row && row.status ? row.status : "scheduled";
-      const blinkOn = Math.floor(performance.now() / 900) % 2 === 0;
+      const statusBlinkOn = Math.floor(performance.now() / 900) % 2 === 0;
+      const gateBlinkOn = Math.floor(performance.now() / 1200) % 2 === 0;
       const gateText = kind === "departures" && row.gate ? row.gate : "";
-      const airportText = kind === "departures" && gateText && !blinkOn ? gateText : row.airport || "";
+      const airportText = kind === "departures" && gateText && !gateBlinkOn ? gateText : row.airport || "";
       const gateMessage = kind === "departures" && row.gateMessage ? row.gateMessage : "";
       const alertText = gateMessage || (status === "newTime" ? "New time" : status === "canceled" ? "Canceled" : "");
-      const showAlert = Boolean(alertText) && !blinkOn;
+      const showAlert = Boolean(alertText) && !statusBlinkOn;
+      const reserveMiddleForLongGateAlert = Boolean(gateMessage) && showAlert;
       const timeText = showAlert ? alertText : row.time;
       const timeColor = showAlert ? (status === "canceled" ? colors.canceled : colors.newTime) : colors.data;
       drawDotText(ctx, row.flightId || "", x, y, colors.data, { maxWidth: 43 });
-      if (!showAlert) drawDotText(ctx, airportText, x + 48, y, colors.data, { maxWidth: 24 });
-      drawDotTextRight(ctx, timeText || "", 125, y, timeColor, showAlert ? 74 : 48);
+      if (!reserveMiddleForLongGateAlert) drawDotText(ctx, airportText, x + 48, y, colors.data, { maxWidth: 24 });
+      drawDotTextRight(ctx, timeText || "", 125, y, timeColor, reserveMiddleForLongGateAlert ? 74 : 48);
     }
 
     function getTimetableColors() {
