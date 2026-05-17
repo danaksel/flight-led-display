@@ -31,6 +31,7 @@ type DeviceSettings = {
   pollSeconds: number;
   displayCycleSeconds: number;
   timetableCycleSeconds: number;
+  timetableScrollPixelsPerSecond: number;
   scrollPixelsPerSecond: number;
   configRefreshSeconds: number;
   timezone: string;
@@ -211,6 +212,7 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
     pollSeconds: clampNumber(v.pollSeconds, 30, 900, 90),
     displayCycleSeconds: clampNumber(v.displayCycleSeconds, 2, 30, 5),
     timetableCycleSeconds: clampNumber((v as { timetableCycleSeconds?: unknown }).timetableCycleSeconds, 2, 60, 7),
+    timetableScrollPixelsPerSecond: clampNumber((v as { timetableScrollPixelsPerSecond?: unknown }).timetableScrollPixelsPerSecond, 4, 40, 18),
     scrollPixelsPerSecond: clampNumber(v.scrollPixelsPerSecond, 2, 30, 9),
     configRefreshSeconds: clampNumber(v.configRefreshSeconds, 60, 3600, 300),
     timezone: typeof v.timezone === "string" && v.timezone.trim() ? v.timezone.slice(0, 64) : "Europe/Oslo",
@@ -955,6 +957,10 @@ function renderIndexHtml(): string {
         </div>
         <div class="row">
           <div>
+            <label for="timetableScrollSpeed">Tavle scroll px/s</label>
+            <input id="timetableScrollSpeed" type="number" min="4" max="40" step="1">
+          </div>
+          <div>
             <label for="configRefreshSeconds">Config sek</label>
             <input id="configRefreshSeconds" type="number" min="60" max="3600" step="30">
           </div>
@@ -1081,6 +1087,7 @@ function renderIndexHtml(): string {
       pollSeconds: document.querySelector("#pollSeconds"),
       cycleSeconds: document.querySelector("#cycleSeconds"),
       timetableCycleSeconds: document.querySelector("#timetableCycleSeconds"),
+      timetableScrollSpeed: document.querySelector("#timetableScrollSpeed"),
       scrollSpeed: document.querySelector("#scrollSpeed"),
       configRefreshSeconds: document.querySelector("#configRefreshSeconds"),
       airlineColor: document.querySelector("#airlineColor"),
@@ -1177,6 +1184,7 @@ function renderIndexHtml(): string {
       els.pollSeconds.value = device.pollSeconds ?? 90;
       els.cycleSeconds.value = device.displayCycleSeconds ?? 5;
       els.timetableCycleSeconds.value = device.timetableCycleSeconds ?? 7;
+      els.timetableScrollSpeed.value = device.timetableScrollPixelsPerSecond ?? 18;
       els.scrollSpeed.value = device.scrollPixelsPerSecond ?? 9;
       els.configRefreshSeconds.value = device.configRefreshSeconds ?? 300;
       const colors = device.lineColors || {};
@@ -1209,6 +1217,7 @@ function renderIndexHtml(): string {
           pollSeconds: Number(els.pollSeconds.value),
           displayCycleSeconds: Number(els.cycleSeconds.value),
           timetableCycleSeconds: Number(els.timetableCycleSeconds.value),
+          timetableScrollPixelsPerSecond: Number(els.timetableScrollSpeed.value),
           scrollPixelsPerSecond: Number(els.scrollSpeed.value),
           configRefreshSeconds: Number(els.configRefreshSeconds.value),
           timezone: els.timezone.value.trim(),
@@ -1287,6 +1296,7 @@ function renderIndexHtml(): string {
     [
       els.deviceBrightness,
       els.scrollSpeed,
+      els.timetableScrollSpeed,
       els.airlineColor,
       els.routeColor,
       els.aircraftColor,
@@ -1407,7 +1417,6 @@ function renderIndexHtml(): string {
           drawFlightProgress(sourceCtx);
         } else {
           drawIdleLayout(sourceCtx, idleScreens[currentIdleScreenIndex] || idleScreens[0]);
-          drawTimetableProgress(sourceCtx);
         }
         applyDisplayBrightness(sourceCtx);
         drawLedPanel(ctx, source);
@@ -1469,7 +1478,7 @@ function renderIndexHtml(): string {
       flightCycleStartedAt = performance.now();
       if (els.emuSource.value !== "live") return;
       const flightCycleMs = Math.max(2000, Number(els.cycleSeconds.value || 5) * 1000);
-      const timetableCycleMs = Math.max(2000, Number(els.timetableCycleSeconds.value || 7) * 1000);
+      const timetableCycleMs = getTimetableCycleMs();
       if (displayFlights.length <= 1 && (displayFlights.length || idleScreens.length <= 1)) return;
       flightCycleTimer = setInterval(() => {
         if (els.emuSource.value !== "live") return;
@@ -1542,10 +1551,46 @@ function renderIndexHtml(): string {
       drawDotText(ctx, title, 23, 3, colors.header, { maxWidth: 102 });
       ctx.fillStyle = colors.header;
       ctx.fillRect(3, 14, 122, 1);
+      const transition = getTimetableTransition(screen);
+      drawIdleRowsClipped(ctx, screen.kind, Array.isArray(screen.rows) ? screen.rows : [], 20 - transition.offset);
+      if (transition.nextScreen) {
+        drawIdleRowsClipped(ctx, transition.nextScreen.kind, Array.isArray(transition.nextScreen.rows) ? transition.nextScreen.rows : [], 64 - transition.offset);
+      }
       const rows = Array.isArray(screen.rows) ? screen.rows.slice(0, 4) : [];
-      rows.forEach((row, index) => drawIdleRow(ctx, screen.kind, row, 3, 20 + index * 11));
       if (!rows.length) drawDotText(ctx, "No airport data", 3, 28, colors.data, { maxWidth: 122 });
       els.emuMeta.textContent = "Idle layout: " + title + " · airport board.";
+    }
+
+    function drawIdleRowsClipped(ctx, kind, rows, y) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 15, 128, 49);
+      ctx.clip();
+      rows.slice(0, 4).forEach((row, index) => drawIdleRow(ctx, kind, row, 3, y + index * 11));
+      ctx.restore();
+    }
+
+    function getTimetableTransition(screen) {
+      if (els.emuSource.value !== "live" || displayFlights.length || idleScreens.length <= 1) return { offset: 0, nextScreen: null };
+      const nextScreen = idleScreens[(currentIdleScreenIndex + 1) % idleScreens.length];
+      if (!screen || !nextScreen || screen.kind !== nextScreen.kind) return { offset: 0, nextScreen: null };
+      const rowTravel = 44;
+      const cycleMs = getTimetableCycleMs();
+      const speed = Math.max(4, Number(els.timetableScrollSpeed.value || 18));
+      const transitionMs = Math.min(cycleMs * 0.75, Math.max(400, (rowTravel / speed) * 1000));
+      const elapsed = Math.max(0, performance.now() - flightCycleStartedAt);
+      const transitionStart = Math.max(0, cycleMs - transitionMs);
+      if (elapsed < transitionStart) return { offset: 0, nextScreen: null };
+      const progress = Math.min(1, (elapsed - transitionStart) / transitionMs);
+      return { offset: Math.round(rowTravel * easeInOut(progress)), nextScreen };
+    }
+
+    function getTimetableCycleMs() {
+      return Math.max(2000, Number(els.timetableCycleSeconds.value || 7) * 1000);
+    }
+
+    function easeInOut(t) {
+      return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
     }
 
     function drawIdleRow(ctx, kind, row, x, y) {
@@ -1628,13 +1673,6 @@ function renderIndexHtml(): string {
       if (els.emuSource.value !== "live" || displayFlights.length <= 1) return;
       ensureTickerAnimation();
       const cycleMs = Math.max(2000, Number(els.cycleSeconds.value || 5) * 1000);
-      drawCycleProgress(ctx, cycleMs);
-    }
-
-    function drawTimetableProgress(ctx) {
-      if (els.emuSource.value !== "live" || displayFlights.length || idleScreens.length <= 1) return;
-      ensureTickerAnimation();
-      const cycleMs = Math.max(2000, Number(els.timetableCycleSeconds.value || 7) * 1000);
       drawCycleProgress(ctx, cycleMs);
     }
 
