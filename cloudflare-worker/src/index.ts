@@ -1551,19 +1551,17 @@ function renderIndexHtml(): string {
     function drawIdleRow(ctx, kind, row, x, y) {
       const colors = getTimetableColors();
       const status = row && row.status ? row.status : "scheduled";
-      const statusBlinkOn = Math.floor(performance.now() / 900) % 2 === 0;
       const gateBlinkOn = Math.floor(performance.now() / 1200) % 2 === 0;
       const gateText = kind === "departures" && row.gate ? row.gate : "";
       const airportText = kind === "departures" && gateText && !gateBlinkOn ? gateText : row.airport || "";
-      const gateMessage = kind === "departures" && row.gateMessage ? row.gateMessage : "";
-      const alertText = gateMessage || (status === "newTime" ? "New time" : status === "canceled" ? "Canceled" : "");
-      const showAlert = Boolean(alertText) && !statusBlinkOn;
-      const reserveMiddleForLongGateAlert = Boolean(gateMessage) && showAlert;
-      const timeText = showAlert ? alertText : row.time;
-      const timeColor = showAlert ? (status === "canceled" ? colors.canceled : colors.newTime) : colors.data;
+      const timeColor = status === "canceled" ? colors.canceled : status === "newTime" ? colors.newTime : colors.data;
       drawDotText(ctx, row.flightId || "", x, y, colors.data, { maxWidth: 43 });
-      if (!reserveMiddleForLongGateAlert) drawDotText(ctx, airportText, x + 48, y, colors.data, { maxWidth: 24 });
-      drawDotTextRight(ctx, timeText || "", 125, y, timeColor, reserveMiddleForLongGateAlert ? 74 : 48);
+      drawDotText(ctx, airportText, x + 48, y, colors.data, { maxWidth: 24 });
+      drawDotTextRight(ctx, row.time || "", 125, y, timeColor, 48);
+      if (status === "canceled") {
+        ctx.fillStyle = colors.canceled;
+        ctx.fillRect(x, y + 3, 122, 1);
+      }
     }
 
     function drawAirportBoardIcon(ctx, kind, x, y, color) {
