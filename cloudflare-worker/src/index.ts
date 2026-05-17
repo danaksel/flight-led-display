@@ -815,9 +815,9 @@ function renderIndexHtml(): string {
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <style>
     :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; --ink:#f5f0df; --muted:#9fa8b8; --line:#273345; --panel:#101720; --panel2:#151f2b; --field:#0b1118; --amber:#f6b800; --amber2:#ffd761; --blue:#2f7fdd; --danger:#ff6d4a; --ok:#78d98f; }
-    body { margin: 0; background: #05080d; color: var(--ink); }
-    .shell { min-height: 100vh; display: grid; grid-template-columns: minmax(360px, 470px) 1fr; background: linear-gradient(135deg, #05080d 0%, #0d141e 54%, #161205 100%); }
-    aside { padding: 18px; background: linear-gradient(180deg, rgba(9,14,20,.98), rgba(13,19,28,.96)); border-right: 1px solid #2c3542; box-shadow: 18px 0 42px rgba(0,0,0,.32); overflow: auto; max-height: 100vh; box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: #05080d; color: var(--ink); }
+    .shell { min-height: 100vh; display: grid; grid-template-columns: minmax(390px, 450px) minmax(0, 1fr); align-items: stretch; background: linear-gradient(135deg, #05080d 0%, #0d141e 54%, #161205 100%); }
+    aside { padding: 18px; background: linear-gradient(180deg, rgba(9,14,20,.98), rgba(13,19,28,.96)); border-right: 1px solid #2c3542; box-shadow: 12px 0 30px rgba(0,0,0,.24); box-sizing: border-box; }
     .brand { margin: 0 0 14px; padding: 14px 14px 12px; background: #05070a; border: 1px solid #293241; border-left: 5px solid var(--amber); border-radius: 6px; }
     .eyebrow { margin: 0 0 7px; color: var(--amber2); font-size: 11px; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; }
     h1 { margin: 0; font-size: 25px; line-height: 1.05; letter-spacing: .02em; }
@@ -837,7 +837,7 @@ function renderIndexHtml(): string {
     button { margin-top: 14px; width: 100%; border: 0; border-radius: 5px; padding: 10px 13px; background: var(--amber); color: #111; font: inherit; font-weight: 850; cursor: pointer; }
     button.secondary { background: #1d2938; color: #f3f6fb; border: 1px solid #354457; margin-top: 9px; }
     button:hover { filter: brightness(1.05); }
-    .savebar { margin-top: 12px; padding: 12px; border: 1px solid #2e3a4c; border-radius: 6px; background: #0b1118; }
+    .savebar { margin-top: 12px; padding: 12px; border: 1px solid #2e3a4c; border-radius: 6px; background: linear-gradient(180deg, #111a25, #0b1118); }
     .savebar button { margin: 0; }
     .status { min-height: 18px; margin-top: 9px; font-size: 12px; color: var(--ok); }
     .status.dirty { color: var(--amber2); }
@@ -849,7 +849,7 @@ function renderIndexHtml(): string {
     .preview-head h2 { margin: 0; font-size: 13px; }
     .preview-head button { width: auto; margin: 0; padding: 8px 10px; font-size: 12px; background: #1d2938; color: #f3f6fb; border: 1px solid #354457; }
     .meta { margin: 8px 0 10px; color: var(--muted); font-size: 12px; }
-    .flight-list { display: grid; gap: 8px; max-height: 34vh; overflow: auto; padding-right: 3px; }
+    .flight-list { display: grid; gap: 8px; }
     .flight { border: 1px solid #2e3a4c; border-radius: 6px; padding: 9px 10px; background: #0b1118; }
     .flight-row { display: grid; grid-template-columns: 42px 1fr; gap: 10px; align-items: center; }
     .flight-logo { width: 42px; height: 42px; object-fit: contain; background: #000; border-radius: 4px; }
@@ -857,7 +857,7 @@ function renderIndexHtml(): string {
     .flight strong { display: block; font-size: 15px; }
     .flight span { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; line-height: 1.35; }
     .empty { color: var(--muted); font-size: 13px; line-height: 1.4; }
-    .workbench { display: grid; grid-template-rows: minmax(330px, 48vh) auto; min-height: 100vh; }
+    .workbench { display: grid; grid-template-rows: minmax(330px, 42vh) auto; min-height: 100vh; align-self: stretch; }
     .emulator { padding: 18px 22px 22px; background: #0c121a; color: #e8edf4; border-top: 1px solid #263242; }
     .emulator h2 { margin: 0 0 6px; font-size: 18px; }
     .emulator p { color: #aeb8c5; margin-bottom: 14px; }
@@ -1021,6 +1021,10 @@ function renderIndexHtml(): string {
           </div>
         </div>
       </section>
+      <div class="savebar">
+        <button id="save">Lagre alle innstillinger</button>
+        <div id="status" class="status"></div>
+      </div>
       <div class="links">
         <a href="/api/config" target="_blank">/api/config</a>
         <a href="/api/device-config" target="_blank">/api/device-config</a>
@@ -1035,10 +1039,6 @@ function renderIndexHtml(): string {
         <div id="previewMeta" class="meta"></div>
         <div id="flightList" class="flight-list"></div>
       </section>
-      <div class="savebar">
-        <button id="save">Lagre alle innstillinger</button>
-        <div id="status" class="status"></div>
-      </div>
     </aside>
     <div class="workbench">
       <section id="map" aria-label="Map"></section>
