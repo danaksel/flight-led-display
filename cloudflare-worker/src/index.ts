@@ -837,7 +837,7 @@ function renderIndexHtml(): string {
     button { margin-top: 14px; width: 100%; border: 0; border-radius: 5px; padding: 10px 13px; background: var(--amber); color: #111; font: inherit; font-weight: 850; cursor: pointer; }
     button.secondary { background: #1d2938; color: #f3f6fb; border: 1px solid #354457; margin-top: 9px; }
     button:hover { filter: brightness(1.05); }
-    .savebar { position: sticky; bottom: 0; z-index: 20; margin: 12px -18px -18px; padding: 10px 18px 14px; background: linear-gradient(180deg, rgba(9,14,20,.18), rgba(9,14,20,.98) 28%); border-top: 1px solid #273345; }
+    .savebar { margin-top: 12px; padding: 12px; border: 1px solid #2e3a4c; border-radius: 6px; background: #0b1118; }
     .savebar button { margin: 0; }
     .status { min-height: 18px; margin-top: 9px; font-size: 12px; color: var(--ok); }
     .status.dirty { color: var(--amber2); }
@@ -880,7 +880,6 @@ function renderIndexHtml(): string {
       .emu-controls { grid-template-columns: 1fr; }
       .color-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .row { grid-template-columns: 1fr; }
-      .savebar { margin-bottom: -18px; }
     }
   </style>
 </head>
@@ -1408,6 +1407,7 @@ function renderIndexHtml(): string {
           drawFlightProgress(sourceCtx);
         } else {
           drawIdleLayout(sourceCtx, idleScreens[currentIdleScreenIndex] || idleScreens[0]);
+          drawTimetableProgress(sourceCtx);
         }
         applyDisplayBrightness(sourceCtx);
         drawLedPanel(ctx, source);
@@ -1627,6 +1627,17 @@ function renderIndexHtml(): string {
       if (els.emuSource.value !== "live" || displayFlights.length <= 1) return;
       ensureTickerAnimation();
       const cycleMs = Math.max(2000, Number(els.cycleSeconds.value || 5) * 1000);
+      drawCycleProgress(ctx, cycleMs);
+    }
+
+    function drawTimetableProgress(ctx) {
+      if (els.emuSource.value !== "live" || displayFlights.length || idleScreens.length <= 1) return;
+      ensureTickerAnimation();
+      const cycleMs = Math.max(2000, Number(els.timetableCycleSeconds.value || 7) * 1000);
+      drawCycleProgress(ctx, cycleMs);
+    }
+
+    function drawCycleProgress(ctx, cycleMs) {
       const elapsed = Math.max(0, performance.now() - flightCycleStartedAt);
       const progress = Math.min(1, elapsed / cycleMs);
       const width = Math.max(1, Math.min(128, Math.round(128 * progress)));
