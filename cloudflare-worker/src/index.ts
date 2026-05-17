@@ -1538,7 +1538,8 @@ function renderIndexHtml(): string {
       }
       ensureTickerAnimation();
       const title = screen.title || "AIRPORT";
-      drawDotText(ctx, title, 3, 3, colors.header, { maxWidth: 122 });
+      drawAirportBoardIcon(ctx, screen.kind, 3, 3, colors.header);
+      drawDotText(ctx, title, 23, 3, colors.header, { maxWidth: 102 });
       ctx.fillStyle = colors.header;
       ctx.fillRect(3, 14, 122, 1);
       const rows = Array.isArray(screen.rows) ? screen.rows.slice(0, 4) : [];
@@ -1563,6 +1564,38 @@ function renderIndexHtml(): string {
       drawDotText(ctx, row.flightId || "", x, y, colors.data, { maxWidth: 43 });
       if (!reserveMiddleForLongGateAlert) drawDotText(ctx, airportText, x + 48, y, colors.data, { maxWidth: 24 });
       drawDotTextRight(ctx, timeText || "", 125, y, timeColor, reserveMiddleForLongGateAlert ? 74 : 48);
+    }
+
+    function drawAirportBoardIcon(ctx, kind, x, y, color) {
+      const pattern = kind === "arrivals"
+        ? [
+            "00000000000000000",
+            "00000000000010000",
+            "00000000000110000",
+            "11111111111111100",
+            "00111111111110000",
+            "00000111100000000",
+            "00001100110000000",
+            "00011000011000000",
+            "00110000001100000"
+          ]
+        : [
+            "00110000001100000",
+            "00011000011000000",
+            "00001100110000000",
+            "00000111100000000",
+            "00111111111110000",
+            "11111111111111100",
+            "00000000000110000",
+            "00000000000010000",
+            "00000000000000000"
+          ];
+      ctx.fillStyle = color;
+      for (let row = 0; row < pattern.length; row++) {
+        for (let col = 0; col < pattern[row].length; col++) {
+          if (pattern[row][col] === "1") ctx.fillRect(x + col, y + row, 1, 1);
+        }
+      }
     }
 
     function getTimetableColors() {
