@@ -941,28 +941,39 @@ function renderIndexHtml(): string {
             <input id="pollSeconds" type="number" min="30" max="900" step="5">
           </div>
           <div>
-            <label for="cycleSeconds">Flight sek</label>
-            <input id="cycleSeconds" type="number" min="2" max="30" step="1">
+            <label for="configRefreshSeconds">Config sek</label>
+            <input id="configRefreshSeconds" type="number" min="60" max="3600" step="30">
           </div>
         </div>
         <div class="row">
           <div>
-            <label for="timetableCycleSeconds">Tavle sek</label>
-            <input id="timetableCycleSeconds" type="number" min="2" max="60" step="1">
+            <label for="timezone">Timezone</label>
+            <input id="timezone" placeholder="Europe/Oslo">
+          </div>
+        </div>
+        <div class="toggle-row">
+          <label for="nightEnabled">Nattmodus</label>
+          <input id="nightEnabled" type="checkbox">
+        </div>
+        <div class="row">
+          <div>
+            <label for="nightStart">Natt start</label>
+            <input id="nightStart" type="time">
+          </div>
+          <div>
+            <label for="nightEnd">Natt slutt</label>
+            <input id="nightEnd" type="time">
+          </div>
+        </div>
+        <h2 style="margin-top:16px">Fly</h2>
+        <div class="row">
+          <div>
+            <label for="cycleSeconds">Flight sek</label>
+            <input id="cycleSeconds" type="number" min="2" max="30" step="1">
           </div>
           <div>
             <label for="scrollSpeed">Scroll px/s</label>
             <input id="scrollSpeed" type="number" min="2" max="30" step="1">
-          </div>
-        </div>
-        <div class="row">
-          <div>
-            <label for="timetableScrollSpeed">Tavle scroll px/s</label>
-            <input id="timetableScrollSpeed" type="number" min="4" max="40" step="1">
-          </div>
-          <div>
-            <label for="configRefreshSeconds">Config sek</label>
-            <input id="configRefreshSeconds" type="number" min="60" max="3600" step="30">
           </div>
         </div>
         <div class="color-grid">
@@ -988,6 +999,16 @@ function renderIndexHtml(): string {
           </div>
         </div>
         <h2 style="margin-top:16px">Tidstabell</h2>
+        <div class="row">
+          <div>
+            <label for="timetableCycleSeconds">Tavle sek</label>
+            <input id="timetableCycleSeconds" type="number" min="2" max="60" step="1">
+          </div>
+          <div>
+            <label for="timetableScrollSpeed">Tavle scroll px/s</label>
+            <input id="timetableScrollSpeed" type="number" min="4" max="40" step="1">
+          </div>
+        </div>
         <div class="color-grid">
           <div>
             <label for="timetableHeaderColor">Overskrift</label>
@@ -1004,26 +1025,6 @@ function renderIndexHtml(): string {
           <div>
             <label for="timetableCanceledColor">Canceled</label>
             <input id="timetableCanceledColor" type="color">
-          </div>
-        </div>
-        <div class="row">
-          <div>
-            <label for="timezone">Timezone</label>
-            <input id="timezone" placeholder="Europe/Oslo">
-          </div>
-        </div>
-        <div class="toggle-row">
-          <label for="nightEnabled">Nattmodus</label>
-          <input id="nightEnabled" type="checkbox">
-        </div>
-        <div class="row">
-          <div>
-            <label for="nightStart">Natt start</label>
-            <input id="nightStart" type="time">
-          </div>
-          <div>
-            <label for="nightEnd">Natt slutt</label>
-            <input id="nightEnd" type="time">
           </div>
         </div>
       </section>
