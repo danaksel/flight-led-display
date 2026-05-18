@@ -933,7 +933,7 @@ function toCompactDisplayFlight(f: DisplayFlight, config: Config): Record<string
       aircraft: f.aircraft || f.registration || "",
       context
     },
-    b: Math.round(f.bearingDeg),
+    b: f.source === "avinor" ? null : Math.round(f.bearingDeg),
     alt: f.altitudeFt ?? null,
     spd: f.speedKts ?? null,
     trk: f.headingDeg ?? null,
@@ -1073,20 +1073,58 @@ async function getFollowFlights(env: Env, config: Config, liveFlights: DisplayFl
 
   const airport = normalizeAirportCode(config.homeAirportIata, env.HOME_AIRPORT_IATA || "OSL");
   const timezone = config.device?.timezone || "Europe/Oslo";
-  const [departures, arrivals] = await Promise.all([
+  const [departures, arrivals, targetedLiveFlights] = await Promise.all([
     getAvinorRawFlights(env, airport, "D", timezone),
-    getAvinorRawFlights(env, airport, "A", timezone)
+    getAvinorRawFlights(env, airport, "A", timezone),
+    getTargetedFollowFlights(env, config, follow.flights)
   ]);
   const scheduled = [...departures, ...arrivals];
+  const liveCandidates = mergeFlightsByIdentity([...targetedLiveFlights, ...liveFlights]);
 
   return follow.flights
     .map((token) => {
-      const live = liveFlights.find((flight) => flightMatchesFollowToken(flight, token));
+      const live = liveCandidates.find((flight) => flightMatchesFollowToken(flight, token));
       const raw = scheduled.find((flight) => avinorFlightMatchesFollowToken(flight, token));
       if (live) return mergeFollowLiveFlight(live, raw, config);
       return raw ? displayFlightFromAvinor(raw, config) : undefined;
     })
     .filter((flight): flight is DisplayFlight => Boolean(flight));
+}
+
+async function getTargetedFollowFlights(env: Env, config: Config, tokens: string[]): Promise<DisplayFlight[]> {
+  const normalizedTokens = tokens
+    .map(normalizeFollowToken)
+    .filter((token): token is string => Boolean(token));
+  if (!normalizedTokens.length) return [];
+
+  const cacheTtl = Math.max(30, Math.min(300, parseNumber(env.CACHE_TTL_SECONDS, 60)));
+  const cacheKey = `follow:fr24:v1:${normalizedTokens.slice().sort().join(",")}`;
+  const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
+  if (Array.isArray(cached)) return cached as DisplayFlight[];
+
+  const records = await fetchFr24(env, undefined, { flights: normalizedTokens });
+  const flights = records
+    .map((record) => normalizeFlight(record, config))
+    .filter((flight): flight is DisplayFlight => Boolean(flight))
+    .filter(isAirborneFlight);
+
+  await enrichAirlineNames(env, flights);
+  await enrichAirportContext(env, config, flights);
+  await env.FLIGHT_DISPLAY_KV.put(cacheKey, JSON.stringify(flights), { expirationTtl: cacheTtl });
+  return flights;
+}
+
+function mergeFlightsByIdentity(flights: DisplayFlight[]): DisplayFlight[] {
+  const seen = new Set<string>();
+  return flights.filter((flight) => {
+    const key = [flight.flight, flight.callsign, flight.registration, flight.fr24Id]
+      .filter(Boolean)
+      .join("|")
+      .toUpperCase();
+    if (key && seen.has(key)) return false;
+    if (key) seen.add(key);
+    return true;
+  });
 }
 
 function flightMatchesFollowToken(flight: DisplayFlight, token: string): boolean {
@@ -1182,13 +1220,15 @@ function isAirborneFlight(flight: DisplayFlight): boolean {
   return typeof flight.altitudeFt === "number" && flight.altitudeFt > 0;
 }
 
-async function fetchFr24(env: Env, bounds: string): Promise<unknown[]> {
+async function fetchFr24(env: Env, bounds?: string, filters: { flights?: string[]; callsigns?: string[] } = {}): Promise<unknown[]> {
   if (!env.FR24_API_KEY) throw new Error("FR24_API_KEY secret is not configured");
 
   const baseUrl = env.FR24_API_BASE_URL || "https://fr24api.flightradar24.com/api";
   const endpoint = env.FR24_LIVE_ENDPOINT || "/live/flight-positions/full";
   const url = new URL(`${baseUrl}${endpoint}`);
-  url.searchParams.set("bounds", bounds);
+  if (bounds) url.searchParams.set("bounds", bounds);
+  if (filters.flights?.length) url.searchParams.set("flights", filters.flights.join(","));
+  if (filters.callsigns?.length) url.searchParams.set("callsigns", filters.callsigns.join(","));
   url.searchParams.set("limit", "300");
 
   const response = await fetch(url, {
@@ -2482,7 +2522,7 @@ function renderIndexHtml(): string {
       return {
         altitude: formatAltitudeForEmulator(flight.alt, els.altitudeUnit.value),
         speed: formatSpeedForEmulator(flight.spd, els.speedUnit.value),
-        track: formatTrackForEmulator(flight.trk ?? flight.b, els.trackUnit.value),
+        track: formatTrackForEmulator(flight.trk, els.trackUnit.value),
         verticalRate: formatVerticalRateForEmulator(flight.vr, els.verticalRateUnit.value)
       };
     }
