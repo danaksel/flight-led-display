@@ -350,13 +350,16 @@ async function logoAssetResponse(request: Request, env: Env): Promise<Response> 
   }
 
   if (env.AIRLINE_LOGOS) {
-    const object = await env.AIRLINE_LOGOS.get(filename.toUpperCase());
-    if (object) {
+    const logoObject = await getLogoObject(env.AIRLINE_LOGOS, filename);
+    if (logoObject) {
+      const { key, object } = logoObject;
       return new Response(object.body, {
         status: 200,
         headers: {
           "Content-Type": object.httpMetadata?.contentType || "image/png",
-          "Cache-Control": "public, max-age=3600"
+          "Cache-Control": "public, max-age=3600",
+          "X-Logo-Source": "r2",
+          "X-Logo-Key": key
         }
       });
     }
@@ -380,6 +383,32 @@ async function logoAssetResponse(request: Request, env: Env): Promise<Response> 
       "Cache-Control": "public, max-age=86400"
     }
   });
+}
+
+async function getLogoObject(bucket: R2Bucket, filename: string): Promise<{ key: string; object: R2ObjectBody } | undefined> {
+  const dotIndex = filename.lastIndexOf(".");
+  const code = (dotIndex >= 0 ? filename.slice(0, dotIndex) : filename).trim();
+  if (!/^[A-Za-z0-9_-]+$/.test(code)) return undefined;
+
+  const variants = [
+    `${code.toUpperCase()}.PNG`,
+    `${code.toUpperCase()}.png`,
+    `${code}.png`,
+    `${code}.PNG`,
+    `${code.toLowerCase()}.png`,
+    `logos/${code.toUpperCase()}.PNG`,
+    `logos/${code.toUpperCase()}.png`,
+    `logos/${code}.png`,
+    `airline-logos/${code.toUpperCase()}.PNG`,
+    `airline-logos/${code.toUpperCase()}.png`,
+    `airline-logos/${code}.png`
+  ];
+
+  for (const key of Array.from(new Set(variants))) {
+    const object = await bucket.get(key);
+    if (object) return { key, object };
+  }
+  return undefined;
 }
 
 function withConfigDefaults(config: Config, env: Env): Config {
