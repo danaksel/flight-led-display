@@ -923,7 +923,7 @@ async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
         follow: config.follow,
         device: config.device,
         idleScreens,
-        flights: displayFlights.map((flight) => toCompactDisplayFlight(flight, config))
+        flights: await Promise.all(displayFlights.map((flight) => toCompactDisplayFlight(env, flight, config)))
       }
     : {
         updatedAt: new Date().toISOString(),
@@ -940,16 +940,17 @@ async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
   });
 }
 
-function toCompactDisplayFlight(f: DisplayFlight, config: Config): Record<string, unknown> {
+async function toCompactDisplayFlight(env: Env, f: DisplayFlight, config: Config): Promise<Record<string, unknown>> {
   const route = [f.origin, f.destination].filter(Boolean).join("-");
   const context = [f.contextLabel, f.contextValue].filter(Boolean).join(" ");
   const metrics = formatFollowMetrics(f, config.device?.followUnits);
+  const logoCode = await displayLogoCodeFor(env, f);
   return {
     cs: f.callsign || f.flight || "",
     flt: f.flight || "",
     air: f.airline || "",
     airCode: f.airlineCode || "",
-    logoUrl: logoUrlFor(displayLogoCodeFor(f)),
+    logoUrl: logoUrlFor(logoCode),
     ac: f.aircraft || "",
     reg: f.registration || "",
     from: f.origin || "",
@@ -1036,10 +1037,22 @@ function logoUrlFor(airlineCode: string | undefined): string {
   return code ? `/logos/${code}.png` : "/logos/UNKNOWN.png";
 }
 
-function displayLogoCodeFor(flight: DisplayFlight): string {
+async function displayLogoCodeFor(env: Env, flight: DisplayFlight): Promise<string> {
   const docCode = logoCodeFromCallsign(flight.callsign) || logoCodeFromCallsign(flight.flight) || logoCodeFromCallsign(flight.airline) || logoCodeFromCallsign(flight.airlineCode);
   if (docCode) return docCode;
-  return normalizeLogoCode(flight.airlineCode);
+  const primary = normalizeLogoCode(flight.airlineCode);
+  if (primary && await logoExists(env, primary)) return primary;
+  const iataFallback = airlineIataToLogoCode(airlineIataFromFlightNumber(flight.flight || flight.callsign));
+  if (iataFallback && await logoExists(env, iataFallback)) return iataFallback;
+  return primary || normalizeLogoCode(iataFallback);
+}
+
+async function logoExists(env: Env, code: string): Promise<boolean> {
+  const normalized = normalizeLogoCode(code);
+  if (!normalized) return false;
+  if (env.AIRLINE_LOGOS && await getLogoObject(env.AIRLINE_LOGOS, `${normalized}.png`)) return true;
+  const assetResponse = await env.ASSETS.fetch(`https://assets.local/logos/${normalized}.png`, { method: "HEAD" });
+  return assetResponse.ok;
 }
 
 function logoCodeFromCallsign(value: string | undefined): string {
@@ -1067,7 +1080,6 @@ function normalizeLogoCode(airlineCode: string | undefined): string {
     SAS: "SAS",
     SZS: "SAS",
     SZN: "SAS",
-    PVG: "TAP",
     TRA: "TRA",
     TVF: "TRA",
     NOA: "DOC"
