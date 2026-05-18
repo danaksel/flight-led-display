@@ -1121,6 +1121,7 @@ function renderIndexHtml(): string {
     .preview { margin-top: 16px; }
     .preview-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
     .preview-head h2 { margin: 0; font-size: 13px; }
+    .preview-actions { display: flex; gap: 8px; }
     .preview-head button { width: auto; margin: 0; padding: 8px 10px; font-size: 12px; background: #1d2938; color: #f3f6fb; border: 1px solid #354457; }
     .meta { margin: 8px 0 10px; color: var(--muted); font-size: 12px; }
     .flight-list { display: grid; gap: 8px; }
@@ -1323,7 +1324,10 @@ function renderIndexHtml(): string {
       <section class="preview card" aria-label="Display preview">
         <div class="preview-head">
           <h2>Display-data</h2>
-          <button id="refresh" type="button">Hent data</button>
+          <div class="preview-actions">
+            <button id="refreshAvinor" type="button">Hent Avinor</button>
+            <button id="refresh" type="button">Hent data</button>
+          </div>
         </div>
         <div id="previewMeta" class="meta"></div>
         <div id="flightList" class="flight-list"></div>
@@ -1391,6 +1395,7 @@ function renderIndexHtml(): string {
       locate: document.querySelector("#locate"),
       status: document.querySelector("#status"),
       refresh: document.querySelector("#refresh"),
+      refreshAvinor: document.querySelector("#refreshAvinor"),
       previewMeta: document.querySelector("#previewMeta"),
       flightList: document.querySelector("#flightList"),
       avinorRaw: document.querySelector("#avinorRaw"),
@@ -1573,6 +1578,7 @@ function renderIndexHtml(): string {
     });
 
     els.refresh.addEventListener("click", loadPreview);
+    els.refreshAvinor.addEventListener("click", loadAvinorRawOnly);
     els.emuSource.addEventListener("change", () => {
       resetFlightCycle();
       renderEmulator();
@@ -1652,6 +1658,24 @@ function renderIndexHtml(): string {
             : '<div class="flight-logo missing"></div>';
           return '<article class="flight"><div class="flight-row">' + logo + '<div><strong>' + title + '</strong><span>' + escapeHtml(line) + '</span></div></div></article>';
         }).join("");
+      } catch (error) {
+        els.previewMeta.textContent = "";
+        els.flightList.innerHTML = '<div class="empty error">' + escapeHtml(error.message || "Ukjent feil") + '</div>';
+      }
+    }
+
+    async function loadAvinorRawOnly() {
+      els.previewMeta.textContent = "Henter Avinor...";
+      els.flightList.innerHTML = "";
+      els.avinorRaw.innerHTML = "";
+      try {
+        const avinorRes = await fetch("/api/avinor-board?ts=" + Date.now());
+        const avinorData = await avinorRes.json();
+        if (!avinorRes.ok) throw new Error(avinorData.error || "Kunne ikke hente Avinor-data");
+        renderAvinorRaw(avinorData);
+        const count = (Array.isArray(avinorData.departures) ? avinorData.departures.length : 0) + (Array.isArray(avinorData.arrivals) ? avinorData.arrivals.length : 0);
+        els.previewMeta.textContent = "Avinor oppdatert " + new Date(avinorData.updatedAt).toLocaleTimeString() + " · " + count + " rader";
+        els.flightList.innerHTML = '<div class="empty">Kun Avinor-data hentet. Dette bruker ikke FR24.</div>';
       } catch (error) {
         els.previewMeta.textContent = "";
         els.flightList.innerHTML = '<div class="empty error">' + escapeHtml(error.message || "Ukjent feil") + '</div>';
