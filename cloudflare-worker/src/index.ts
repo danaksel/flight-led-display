@@ -575,9 +575,18 @@ async function responseText(response: Response): Promise<string> {
   const buffer = await response.arrayBuffer();
   const prefix = String.fromCharCode(...new Uint8Array(buffer.slice(0, 160)));
   if (/iso-8859-1|latin-?1/i.test(`${contentType} ${prefix}`)) {
-    return new TextDecoder("iso-8859-1").decode(buffer);
+    return decodeLatin1(buffer);
   }
   return new TextDecoder("utf-8").decode(buffer);
+}
+
+function decodeLatin1(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  const chunks: string[] = [];
+  for (let index = 0; index < bytes.length; index += 8192) {
+    chunks.push(String.fromCharCode(...bytes.slice(index, index + 8192)));
+  }
+  return chunks.join("");
 }
 
 function decodeXml(value: string): string {
