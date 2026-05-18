@@ -40,6 +40,7 @@ type FollowSettings = {
 
 type DeviceSettings = {
   enabled: boolean;
+  airspaceMonitoringEnabled: boolean;
   brightness: number;
   pollSeconds: number;
   displayCycleSeconds: number;
@@ -56,7 +57,6 @@ type DeviceSettings = {
     track: "deg" | "cardinal";
     verticalRate: "fpm" | "fts" | "ms" | "mph" | "kmh";
   };
-  followDetailMode: "metrics" | "location";
   lineColors: {
     airline: string;
     route: string;
@@ -504,6 +504,9 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
   const night = v.nightMode && typeof v.nightMode === "object" ? v.nightMode as Partial<DeviceSettings["nightMode"]> : {};
   return {
     enabled: typeof v.enabled === "boolean" ? v.enabled : true,
+    airspaceMonitoringEnabled: typeof (v as { airspaceMonitoringEnabled?: unknown }).airspaceMonitoringEnabled === "boolean"
+      ? Boolean((v as { airspaceMonitoringEnabled?: unknown }).airspaceMonitoringEnabled)
+      : true,
     brightness: clampNumber(v.brightness, 1, 100, 80),
     pollSeconds: clampNumber(v.pollSeconds, 30, 900, 90),
     displayCycleSeconds: clampNumber(v.displayCycleSeconds, 2, 30, 5),
@@ -515,7 +518,6 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
     configRefreshSeconds: clampNumber(v.configRefreshSeconds, 60, 3600, 300),
     timezone: typeof v.timezone === "string" && v.timezone.trim() ? v.timezone.slice(0, 64) : "Europe/Oslo",
     followUnits: normalizeFollowUnits((v as { followUnits?: unknown }).followUnits),
-    followDetailMode: oneOf((v as { followDetailMode?: unknown }).followDetailMode, ["metrics", "location"], "metrics"),
     lineColors: normalizeLineColors((v as { lineColors?: unknown }).lineColors),
     timetableColors: normalizeTimetableColors((v as { timetableColors?: unknown }).timetableColors),
     nightMode: {
@@ -987,10 +989,13 @@ async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
   let nearbyFlights: DisplayFlight[] = [];
   let followFlights: DisplayFlight[] = [];
 
-  if (follow.enabled && follow.flights.length) {
-    followFlights = await getFollowFlights(env, config);
-  } else {
-    nearbyFlights = await getFlights(env, config);
+  const airspaceMonitoringEnabled = config.device?.airspaceMonitoringEnabled !== false;
+  if (airspaceMonitoringEnabled) {
+    if (follow.enabled && follow.flights.length) {
+      followFlights = await getFollowFlights(env, config);
+    } else {
+      nearbyFlights = await getFlights(env, config);
+    }
   }
 
   const mode = followFlights.length ? "follow" : nearbyFlights.length ? "nearby" : "idle";
@@ -1021,6 +1026,7 @@ async function displayPayload(
         updatedAt: new Date().toISOString(),
         mode,
         suspended: mode === "disabled" || mode === "night",
+        airspaceMonitoring: config.device?.airspaceMonitoringEnabled !== false,
         lat: config.lat,
         lon: config.lon,
         radiusKm: config.radiusKm,
@@ -1032,6 +1038,7 @@ async function displayPayload(
     : {
         updatedAt: new Date().toISOString(),
         mode,
+        airspaceMonitoring: config.device?.airspaceMonitoringEnabled !== false,
         config,
         followFlights,
         nearbyFlights,
@@ -1995,7 +2002,7 @@ function renderIndexHtml(): string {
     .field-grid dt, .field-grid dd { margin: 0; padding: 5px 6px; background: #0b1118; min-width: 0; overflow-wrap: anywhere; }
     .field-grid dt { color: var(--amber2); font-weight: 800; }
     .field-grid dd { color: #dce4ee; }
-    .workbench { display: grid; grid-template-rows: minmax(330px, 42vh) auto; min-height: 100vh; align-self: stretch; }
+    .workbench { min-height: 100vh; align-self: stretch; }
     .emulator { padding: 18px 22px 22px; background: #0c121a; color: #e8edf4; border-top: 1px solid #263242; }
     .emulator h2 { margin: 0 0 6px; font-size: 18px; }
     .emulator p { color: #aeb8c5; margin-bottom: 14px; }
@@ -2010,11 +2017,11 @@ function renderIndexHtml(): string {
     .emu-meta { margin-top: 10px; color: #aeb8c5; font-size: 12px; }
     a { color: #2f6fbd; text-decoration: none; }
     a:hover { text-decoration: underline; }
-    #map { min-height: 330px; border-bottom: 1px solid #263242; filter: saturate(.78) contrast(1.05); }
+    #map { height: 330px; min-height: 330px; margin-top: 12px; border: 1px solid #2c3849; border-radius: 8px; overflow: hidden; filter: saturate(.78) contrast(1.05); }
     @media (max-width: 820px) {
       .shell { display: block; min-height: 100vh; }
       aside { max-height: none; overflow: visible; border-right: 0; border-bottom: 1px solid #273345; box-shadow: none; }
-      .workbench { display: block; min-height: 0; }
+      .workbench { min-height: 0; }
       #map { height: 340px; min-height: 340px; }
       .emulator { padding: 16px 12px 18px; }
       .emu-controls { grid-template-columns: 1fr; }
@@ -2068,6 +2075,7 @@ function renderIndexHtml(): string {
           </div>
         </div>
         <button id="locate" class="secondary">Bruk min posisjon</button>
+        <section id="map" aria-label="Kart"></section>
       </section>
       <section class="card">
         <div class="section-head">
@@ -2123,6 +2131,13 @@ function renderIndexHtml(): string {
           <span class="hint" tabindex="0" data-tip="Dette gjelder skjermen som viser fly i nærheten eller et flightnummer du følger. Follow-visningen bytter automatisk mellom live tall og Flying over.">i</span>
         </div>
         <p class="section-note">Når du følger et flightnummer, viser skjermen status før avgang, live-målinger i 10 sekunder, Flying over i 5 sekunder, og Landed når flyet har landet.</p>
+        <div class="toggle-row">
+          <div>
+            <label for="airspaceMonitoringEnabled">Overvåk luftrommet</label>
+            <div class="field-help">Når denne er av, henter Worker ikke FR24-data. Tidstabell fra Avinor vises fortsatt.</div>
+          </div>
+          <input id="airspaceMonitoringEnabled" type="checkbox">
+        </div>
         <div class="toggle-row">
           <label for="followEnabled">Følg flightnummer</label>
           <input id="followEnabled" type="checkbox">
@@ -2284,7 +2299,6 @@ function renderIndexHtml(): string {
       </section>
     </aside>
     <div class="workbench">
-      <section id="map" aria-label="Map"></section>
       <section class="emulator" aria-label="LED matrix emulator">
         <h2>128 x 64 emulator</h2>
         <p>Forhåndsvis nøyaktig 128 x 64 LED-layout. Lysstyrke, farger, rotasjon og scroll styres fra innstillingene til venstre.</p>
@@ -2322,6 +2336,7 @@ function renderIndexHtml(): string {
       lon: document.querySelector("#lon"),
       radius: document.querySelector("#radius"),
       homeAirport: document.querySelector("#homeAirport"),
+      airspaceMonitoringEnabled: document.querySelector("#airspaceMonitoringEnabled"),
       followEnabled: document.querySelector("#followEnabled"),
       followFlights: document.querySelector("#followFlights"),
       altitudeUnit: document.querySelector("#altitudeUnit"),
@@ -2399,6 +2414,7 @@ function renderIndexHtml(): string {
       }).addTo(map);
       marker = L.marker([config.lat, config.lon], { draggable: true }).addTo(map);
       circle = L.circle([config.lat, config.lon], { radius: config.radiusKm * 1000 }).addTo(map);
+      setTimeout(() => map.invalidateSize(), 0);
       marker.on("dragend", () => {
         const pos = marker.getLatLng();
         els.lat.value = pos.lat.toFixed(6);
@@ -2435,6 +2451,7 @@ function renderIndexHtml(): string {
       els.radius.value = config.radiusKm || 10;
       els.homeAirport.value = config.homeAirportIata || "OSL";
       const follow = config.follow || {};
+      els.airspaceMonitoringEnabled.checked = device.airspaceMonitoringEnabled !== false;
       els.followEnabled.checked = follow.enabled === true;
       els.followFlights.value = Array.isArray(follow.flights) ? follow.flights.join(", ") : "";
       const followUnits = device.followUnits || {};
@@ -2487,6 +2504,7 @@ function renderIndexHtml(): string {
         },
         device: {
           enabled: els.deviceEnabled.checked,
+          airspaceMonitoringEnabled: els.airspaceMonitoringEnabled.checked,
           brightness: Number(els.deviceBrightness.value),
           pollSeconds: Number(els.pollSeconds.value),
           displayCycleSeconds: Number(els.cycleSeconds.value),
@@ -2497,7 +2515,6 @@ function renderIndexHtml(): string {
           scrollPixelsPerSecond: Number(els.scrollSpeed.value),
           configRefreshSeconds: Number(els.configRefreshSeconds.value),
           timezone: els.timezone.value.trim(),
-          followDetailMode: "metrics",
           followUnits: {
             altitude: els.altitudeUnit.value,
             speed: els.speedUnit.value,
@@ -2659,7 +2676,8 @@ function renderIndexHtml(): string {
         currentIdleScreenIndex = 0;
         resetFlightCycle();
         renderEmulator();
-        els.previewMeta.textContent = "Oppdatert " + new Date(data.updatedAt).toLocaleTimeString() + " · " + flights.length + " treff · " + displayMode;
+        const fr24State = data.airspaceMonitoring === false ? "FR24 av" : "FR24 på";
+        els.previewMeta.textContent = "Oppdatert " + new Date(data.updatedAt).toLocaleTimeString() + " · " + flights.length + " treff · " + displayMode + " · " + fr24State;
         if (!flights.length) {
           if (idleScreens.length) {
             els.flightList.innerHTML = idleScreens.map((screen) => {
