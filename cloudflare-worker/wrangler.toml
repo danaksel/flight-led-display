@@ -2,7 +2,7 @@ name = "flight-display-server"
 main = "src/index.ts"
 compatibility_date = "2026-05-16"
 
-assets = { directory = "./public", binding = "ASSETS" }
+assets = { directory = "./public", binding = "ASSETS", run_worker_first = ["/logos/*"] }
 
 [vars]
 FR24_API_BASE_URL = "https://fr24api.flightradar24.com/api"
