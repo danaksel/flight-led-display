@@ -13,6 +13,8 @@ export interface Env {
   CACHE_TTL_SECONDS?: string;
   DISPLAY_LIMIT?: string;
   AVINOR_XML_BASE_URL?: string;
+  AVINOR_AIRPORT_NAMES_BASE_URL?: string;
+  AVINOR_AIRLINE_NAMES_BASE_URL?: string;
 }
 
 type Config = {
@@ -322,8 +324,9 @@ async function getAvinorFlights(env: Env, airport: string, direction: "A" | "D",
   });
   if (!response.ok) return [];
 
-  const xml = await response.text();
+  const xml = await responseText(response);
   const flights = parseAvinorFlights(xml, direction, timezone);
+  await enrichAvinorAirportNames(env, flights);
   await env.FLIGHT_DISPLAY_KV.put(cacheKey, JSON.stringify(flights), { expirationTtl: 180 });
   return flights;
 }
@@ -393,6 +396,16 @@ function xmlText(xml: string, tag: string): string {
 function xmlAttribute(attributes: string, name: string): string {
   const match = attributes.match(new RegExp(`${name}="([^"]*)"`));
   return match ? decodeXml(match[1].trim()) : "";
+}
+
+async function responseText(response: Response): Promise<string> {
+  const contentType = response.headers.get("content-type") || "";
+  const buffer = await response.arrayBuffer();
+  const prefix = String.fromCharCode(...new Uint8Array(buffer.slice(0, 160)));
+  if (/iso-8859-1|latin-?1/i.test(`${contentType} ${prefix}`)) {
+    return new TextDecoder("iso-8859-1").decode(buffer);
+  }
+  return new TextDecoder("utf-8").decode(buffer);
 }
 
 function decodeXml(value: string): string {
@@ -639,6 +652,19 @@ function normalizeFlight(record: unknown, config: Config): DisplayFlight | null 
 }
 
 async function enrichAirlineNames(env: Env, flights: DisplayFlight[]): Promise<void> {
+  const iataCodes = Array.from(
+    new Set(
+      flights
+        .map((flight) => airlineIataFromFlightNumber(flight.flight))
+        .filter((code): code is string => Boolean(code))
+    )
+  );
+  const avinorNames = await Promise.all(iataCodes.map((code) => getAvinorAirlineName(env, code)));
+  const avinorNameByIata = new Map<string, string>();
+  iataCodes.forEach((code, index) => {
+    if (avinorNames[index]) avinorNameByIata.set(code, avinorNames[index]);
+  });
+
   const codes = Array.from(
     new Set(
       flights
@@ -654,6 +680,11 @@ async function enrichAirlineNames(env: Env, flights: DisplayFlight[]): Promise<v
   });
 
   for (const flight of flights) {
+    const iata = airlineIataFromFlightNumber(flight.flight);
+    if (iata && avinorNameByIata.has(iata)) {
+      flight.airline = avinorNameByIata.get(iata);
+      continue;
+    }
     if (flight.airlineCode && nameByCode.has(flight.airlineCode)) {
       flight.airline = nameByCode.get(flight.airlineCode);
     }
@@ -661,6 +692,48 @@ async function enrichAirlineNames(env: Env, flights: DisplayFlight[]): Promise<v
       flight.airline = flight.airlineCode;
     }
   }
+}
+
+function airlineIataFromFlightNumber(flightNumber: string | undefined): string | undefined {
+  const raw = flightNumber?.trim().toUpperCase();
+  if (!raw) return undefined;
+  const match = raw.match(/^([A-Z0-9]{2})(?:\s|-)?\d/);
+  return match ? match[1] : undefined;
+}
+
+async function getAvinorAirlineName(env: Env, code: string): Promise<string | undefined> {
+  const normalized = code.toUpperCase();
+  const names = await getAvinorAirlineNames(env);
+  return names[normalized];
+}
+
+async function getAvinorAirlineNames(env: Env): Promise<Record<string, string>> {
+  const cacheKey = "airlines:avinor:v1";
+  const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
+  if (cached && typeof cached === "object" && !Array.isArray(cached)) {
+    return cached as Record<string, string>;
+  }
+
+  const baseUrl = env.AVINOR_AIRLINE_NAMES_BASE_URL || "https://asrv.avinor.no/airlineNames/v1.0";
+  const response = await fetch(baseUrl, {
+    headers: {
+      Accept: "application/xml,text/xml"
+    }
+  });
+  if (!response.ok) return {};
+
+  const xml = await responseText(response);
+  const names: Record<string, string> = {};
+  for (const match of xml.matchAll(/<airlineName\b([^>]*)\/>/g)) {
+    const code = xmlAttribute(match[1], "code").toUpperCase();
+    const name = xmlAttribute(match[1], "name");
+    if (/^[A-Z0-9]{2,4}$/.test(code) && name) {
+      names[code] = name;
+    }
+  }
+
+  await env.FLIGHT_DISPLAY_KV.put(cacheKey, JSON.stringify(names), { expirationTtl: 86400 });
+  return names;
 }
 
 async function getAirlineName(env: Env, icao: string): Promise<string | undefined> {
@@ -741,6 +814,12 @@ async function getAirportDisplayName(env: Env, code: string): Promise<string | u
   const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey);
   if (cached) return cached;
 
+  const avinorName = await getAvinorAirportName(env, normalized);
+  if (avinorName) {
+    await env.FLIGHT_DISPLAY_KV.put(cacheKey, avinorName);
+    return avinorName;
+  }
+
   const override = AIRPORT_CITY_OVERRIDES[normalized];
   if (override) {
     await env.FLIGHT_DISPLAY_KV.put(cacheKey, override);
@@ -767,6 +846,54 @@ async function getAirportDisplayName(env: Env, code: string): Promise<string | u
     await env.FLIGHT_DISPLAY_KV.put(cacheKey, displayName);
   }
   return displayName;
+}
+
+async function enrichAvinorAirportNames(env: Env, flights: AvinorFlight[]): Promise<void> {
+  const codes = Array.from(new Set(flights.map((flight) => flight.airport).filter(Boolean)));
+  const names = await Promise.all(codes.map((code) => getAvinorAirportName(env, code)));
+  const nameByCode = new Map<string, string>();
+  codes.forEach((code, index) => {
+    if (names[index]) nameByCode.set(code, names[index]);
+  });
+
+  for (const flight of flights) {
+    const name = nameByCode.get(flight.airport);
+    if (name) flight.airport = name;
+  }
+}
+
+async function getAvinorAirportName(env: Env, code: string): Promise<string | undefined> {
+  const normalized = code.toUpperCase();
+  if (!/^[A-Z0-9]{3,4}$/.test(normalized)) return undefined;
+  const cacheKey = `airport:avinor:v1:${normalized}`;
+  const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey);
+  if (cached) return cached;
+
+  const baseUrl = env.AVINOR_AIRPORT_NAMES_BASE_URL || "https://asrv.avinor.no/airportNames/v1.0";
+  const url = new URL(baseUrl);
+  url.searchParams.set("airport", normalized);
+  url.searchParams.set("shortname", "Y");
+
+  const response = await fetch(url.toString(), {
+    headers: {
+      Accept: "application/xml,text/xml"
+    }
+  });
+  if (!response.ok) return undefined;
+
+  const xml = await responseText(response);
+  const match = xml.match(/<airportName\b([^>]*)\/>/);
+  if (!match) return undefined;
+
+  const attributes = match[1];
+  const name =
+    xmlAttribute(attributes, "shortname8") ||
+    xmlAttribute(attributes, "shortname15") ||
+    xmlAttribute(attributes, "name");
+  if (!name) return undefined;
+
+  await env.FLIGHT_DISPLAY_KV.put(cacheKey, name, { expirationTtl: 86400 });
+  return name;
 }
 
 function extractAirportCity(value: unknown): string | undefined {
