@@ -18,6 +18,8 @@ export interface Env {
   AVINOR_AIRPORT_NAMES_BASE_URL?: string;
   AVINOR_AIRLINE_NAMES_BASE_URL?: string;
   LOGO_BASE_URL?: string;
+  GEOCODER_REVERSE_URL?: string;
+  GEOCODER_SEARCH_URL?: string;
 }
 
 type Config = {
@@ -54,6 +56,7 @@ type DeviceSettings = {
     track: "deg" | "cardinal";
     verticalRate: "fpm" | "fts" | "ms" | "mph" | "kmh";
   };
+  followDetailMode: "metrics" | "location";
   lineColors: {
     airline: string;
     route: string;
@@ -101,6 +104,9 @@ type DisplayFlight = {
   gateMessage?: string;
   scheduledTime?: string;
   displayTime?: string;
+  locationLabel?: string;
+  locationValue?: string;
+  routeProgress?: number;
 };
 
 type AvinorFlight = {
@@ -227,6 +233,23 @@ const AIRPORT_CITY_OVERRIDES: Record<string, string> = {
   SWF: "New York",
   TRF: "Oslo",
   WAW: "Warsaw"
+};
+
+const KNOWN_AIRPORT_COORDS: Record<string, { lat: number; lon: number }> = {
+  AGP: { lat: 36.6749, lon: -4.4991 },
+  AMS: { lat: 52.3105, lon: 4.7683 },
+  ARN: { lat: 59.6498, lon: 17.9238 },
+  BGO: { lat: 60.2934, lon: 5.2181 },
+  CPH: { lat: 55.6181, lon: 12.6561 },
+  CDG: { lat: 49.0097, lon: 2.5479 },
+  DUB: { lat: 53.4213, lon: -6.2701 },
+  FRA: { lat: 50.0379, lon: 8.5622 },
+  LGW: { lat: 51.1537, lon: -0.1821 },
+  LHR: { lat: 51.4700, lon: -0.4543 },
+  LIS: { lat: 38.7742, lon: -9.1342 },
+  OSL: { lat: 60.1976, lon: 11.1004 },
+  TRD: { lat: 63.4578, lon: 10.9240 },
+  SVG: { lat: 58.8768, lon: 5.6379 }
 };
 
 export default {
@@ -456,6 +479,7 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
     configRefreshSeconds: clampNumber(v.configRefreshSeconds, 60, 3600, 300),
     timezone: typeof v.timezone === "string" && v.timezone.trim() ? v.timezone.slice(0, 64) : "Europe/Oslo",
     followUnits: normalizeFollowUnits((v as { followUnits?: unknown }).followUnits),
+    followDetailMode: oneOf((v as { followDetailMode?: unknown }).followDetailMode, ["metrics", "location"], "metrics"),
     lineColors: normalizeLineColors((v as { lineColors?: unknown }).lineColors),
     timetableColors: normalizeTimetableColors((v as { timetableColors?: unknown }).timetableColors),
     nightMode: {
@@ -911,6 +935,9 @@ async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
   const limit = Math.max(1, Math.min(50, parseNumber(env.DISPLAY_LIMIT, 8)));
   const mode = followFlights.length ? "follow" : nearbyFlights.length ? "nearby" : "idle";
   const displayFlights = (followFlights.length ? followFlights : nearbyFlights).slice(0, limit);
+  if (mode === "follow" && config.device?.followDetailMode === "location") {
+    await enrichFollowLocation(env, displayFlights);
+  }
   const idleScreens = displayFlights.length ? [] : await getIdleScreens(env, config);
 
   const payload = compact
@@ -961,6 +988,10 @@ async function toCompactDisplayFlight(env: Env, f: DisplayFlight, config: Config
     gate: f.gate || "",
     gateMessage: f.gateMessage || "",
     source: f.source || "",
+    layout: f.locationValue ? "follow_location" : "follow_metrics",
+    locationLabel: f.locationLabel || "",
+    locationValue: f.locationValue || "",
+    routeProgress: typeof f.routeProgress === "number" ? f.routeProgress : null,
     lines: {
       airline: f.airline || f.airlineCode || "",
       route,
@@ -1172,6 +1203,116 @@ function mergeFlightsByIdentity(flights: DisplayFlight[]): DisplayFlight[] {
     if (key) seen.add(key);
     return true;
   });
+}
+
+async function enrichFollowLocation(env: Env, flights: DisplayFlight[]): Promise<void> {
+  await Promise.all(flights.map(async (flight) => {
+    if (typeof flight.lat !== "number" || typeof flight.lon !== "number") return;
+    const location = await getFlightLocation(env, flight.lat, flight.lon);
+    flight.locationLabel = "Flying over";
+    flight.locationValue = location;
+    flight.routeProgress = await calculateRouteProgress(env, flight);
+  }));
+}
+
+async function getFlightLocation(env: Env, lat: number, lon: number): Promise<string> {
+  const cellLat = Math.round(lat * 10) / 10;
+  const cellLon = Math.round(lon * 10) / 10;
+  const cacheKey = `geocode:v1:${cellLat.toFixed(1)}:${cellLon.toFixed(1)}`;
+  const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey);
+  if (cached) return cached;
+
+  const baseUrl = env.GEOCODER_REVERSE_URL || "https://nominatim.openstreetmap.org/reverse";
+  const url = new URL(baseUrl);
+  url.searchParams.set("format", "jsonv2");
+  url.searchParams.set("lat", String(cellLat));
+  url.searchParams.set("lon", String(cellLon));
+  url.searchParams.set("zoom", "10");
+  url.searchParams.set("addressdetails", "1");
+
+  const response = await fetch(url.toString(), {
+    headers: {
+      Accept: "application/json",
+      "User-Agent": "flight-display-server/0.1"
+    }
+  });
+  if (!response.ok) return inferSeaName(lat, lon) || "Unknown area";
+
+  const data = await response.json() as Record<string, unknown>;
+  const value = extractGeocodeDisplayName(data) || inferSeaName(lat, lon) || "Open water";
+  await env.FLIGHT_DISPLAY_KV.put(cacheKey, value, { expirationTtl: 30 * 24 * 60 * 60 });
+  return value;
+}
+
+function extractGeocodeDisplayName(data: Record<string, unknown>): string | undefined {
+  const address = data.address && typeof data.address === "object" ? data.address as Record<string, unknown> : {};
+  const place = firstString(address, ["city", "town", "village", "municipality", "county", "state"]);
+  const country = firstString(address, ["country"]);
+  if (place && country) return `${place}, ${country}`;
+  if (country) return country;
+  return undefined;
+}
+
+function inferSeaName(lat: number, lon: number): string | undefined {
+  if (lat >= 53 && lat <= 62.5 && lon >= -4.5 && lon <= 9.5) return "North Sea";
+  if (lat >= 56 && lat <= 59.5 && lon >= 6 && lon <= 12.5) return "Skagerrak";
+  if (lat >= 55 && lat <= 58.5 && lon >= 10 && lon <= 13.5) return "Kattegat";
+  if (lat >= 54 && lat <= 66 && lon >= 13 && lon <= 31) return "Baltic Sea";
+  if (lat >= 62 && lat <= 75 && lon >= -15 && lon <= 20) return "Norwegian Sea";
+  if (lat >= 48 && lat <= 52 && lon >= -6 && lon <= 3) return "English Channel";
+  if (lat >= 35 && lat <= 46 && lon >= -6 && lon <= 37) return "Mediterranean Sea";
+  if (lat >= 35 && lat <= 72 && lon >= -65 && lon <= -6) return "Atlantic Ocean";
+  return undefined;
+}
+
+async function calculateRouteProgress(env: Env, flight: DisplayFlight): Promise<number | undefined> {
+  if (typeof flight.lat !== "number" || typeof flight.lon !== "number" || !flight.origin || !flight.destination) return undefined;
+  const [origin, destination] = await Promise.all([
+    getAirportCoordinates(env, flight.origin),
+    getAirportCoordinates(env, flight.destination)
+  ]);
+  if (!origin || !destination) return undefined;
+
+  const total = haversineKm(origin.lat, origin.lon, destination.lat, destination.lon);
+  const remaining = haversineKm(flight.lat, flight.lon, destination.lat, destination.lon);
+  if (!Number.isFinite(total) || total <= 0) return undefined;
+  return clamp(1 - remaining / total, 0, 1);
+}
+
+async function getAirportCoordinates(env: Env, code: string): Promise<{ lat: number; lon: number } | undefined> {
+  const normalized = code.toUpperCase();
+  const known = KNOWN_AIRPORT_COORDS[normalized];
+  if (known) return known;
+
+  const cacheKey = `airport-coords:v1:${normalized}`;
+  const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
+  if (cached && typeof cached === "object" && !Array.isArray(cached)) {
+    const record = cached as { lat?: unknown; lon?: unknown };
+    if (typeof record.lat === "number" && typeof record.lon === "number") return { lat: record.lat, lon: record.lon };
+  }
+
+  const baseUrl = env.GEOCODER_SEARCH_URL || "https://nominatim.openstreetmap.org/search";
+  const url = new URL(baseUrl);
+  url.searchParams.set("format", "jsonv2");
+  url.searchParams.set("q", `${normalized} airport`);
+  url.searchParams.set("limit", "1");
+
+  const response = await fetch(url.toString(), {
+    headers: {
+      Accept: "application/json",
+      "User-Agent": "flight-display-server/0.1"
+    }
+  });
+  if (!response.ok) return undefined;
+
+  const results = await response.json() as Array<Record<string, unknown>>;
+  const first = Array.isArray(results) ? results[0] : undefined;
+  const lat = first ? Number(first.lat) : NaN;
+  const lon = first ? Number(first.lon) : NaN;
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return undefined;
+  const coords = { lat, lon };
+  await env.FLIGHT_DISPLAY_KV.put(cacheKey, JSON.stringify(coords));
+  return coords;
 }
 
 function flightMatchesFollowToken(flight: DisplayFlight, token: string): boolean {
@@ -1788,6 +1929,11 @@ function renderIndexHtml(): string {
         </div>
         <label for="followFlights">Flightnummer / callsign</label>
         <input id="followFlights" autocomplete="off" placeholder="SK4673, DY1304, DOC45">
+        <label for="followDetailMode">Follow-visning</label>
+        <select id="followDetailMode">
+          <option value="metrics">Metrics</option>
+          <option value="location">Flying over</option>
+        </select>
         <div class="row">
           <div>
             <label for="altitudeUnit">Altitude</label>
@@ -1962,6 +2108,7 @@ function renderIndexHtml(): string {
       homeAirport: document.querySelector("#homeAirport"),
       followEnabled: document.querySelector("#followEnabled"),
       followFlights: document.querySelector("#followFlights"),
+      followDetailMode: document.querySelector("#followDetailMode"),
       altitudeUnit: document.querySelector("#altitudeUnit"),
       speedUnit: document.querySelector("#speedUnit"),
       trackUnit: document.querySelector("#trackUnit"),
@@ -2072,6 +2219,7 @@ function renderIndexHtml(): string {
       els.followEnabled.checked = follow.enabled === true;
       els.followFlights.value = Array.isArray(follow.flights) ? follow.flights.join(", ") : "";
       const followUnits = device.followUnits || {};
+      els.followDetailMode.value = device.followDetailMode || "metrics";
       els.altitudeUnit.value = followUnits.altitude || "ft";
       els.speedUnit.value = followUnits.speed || "kn";
       els.trackUnit.value = followUnits.track || "deg";
@@ -2131,6 +2279,7 @@ function renderIndexHtml(): string {
           scrollPixelsPerSecond: Number(els.scrollSpeed.value),
           configRefreshSeconds: Number(els.configRefreshSeconds.value),
           timezone: els.timezone.value.trim(),
+          followDetailMode: els.followDetailMode.value,
           followUnits: {
             altitude: els.altitudeUnit.value,
             speed: els.speedUnit.value,
@@ -2418,7 +2567,7 @@ function renderIndexHtml(): string {
         const flight = displayFlights[currentFlightIndex] || displayFlights[0];
         if (flight) {
           drawLiveFlightLayout(sourceCtx, flight);
-          drawFlightProgress(sourceCtx);
+          drawFlightProgress(sourceCtx, flight);
         } else {
           drawIdleLayout(sourceCtx, idleScreens[currentIdleScreenIndex] || idleScreens[0]);
         }
@@ -2553,6 +2702,11 @@ function renderIndexHtml(): string {
       drawDotText(ctx, topLine, 50, 5, colors.airline, { maxWidth: 75 });
       drawDotText(ctx, secondLine, 50, 19, colors.route, { maxWidth: 75 });
       drawDotText(ctx, thirdLine, 50, 33, colors.aircraft, { maxWidth: 75 });
+      if (flight.layout === "follow_location") {
+        drawDotText(ctx, flight.locationLabel || "Flying over", 3, 47, colors.context, { maxWidth: 122 });
+        drawTickerLine(ctx, flight.locationValue || "Unknown area", 3, 56, colors.context, 122);
+        return;
+      }
       const metrics = formatMetricsForEmulator(flight);
       const firstMetricLine = [
         metrics.altitude ? "ALT:" + metrics.altitude : "",
@@ -2765,9 +2919,14 @@ function renderIndexHtml(): string {
       drawTickerLine(ctx, lines.context || "", 3, 52, colors.context, 122);
     }
 
-    function drawFlightProgress(ctx) {
-      if (els.emuSource.value !== "live" || displayFlights.length <= 1) return;
+    function drawFlightProgress(ctx, flight) {
+      if (els.emuSource.value !== "live") return;
       ensureTickerAnimation();
+      if (flight && flight.layout === "follow_location" && typeof flight.routeProgress === "number") {
+        drawProgressValue(ctx, flight.routeProgress);
+        return;
+      }
+      if (displayFlights.length <= 1) return;
       const cycleMs = Math.max(2000, Number(els.cycleSeconds.value || 5) * 1000);
       drawCycleProgress(ctx, cycleMs);
     }
@@ -2775,6 +2934,10 @@ function renderIndexHtml(): string {
     function drawCycleProgress(ctx, cycleMs) {
       const elapsed = Math.max(0, performance.now() - flightCycleStartedAt);
       const progress = Math.min(1, elapsed / cycleMs);
+      drawProgressValue(ctx, progress);
+    }
+
+    function drawProgressValue(ctx, progress) {
       const width = Math.max(1, Math.min(128, Math.round(128 * progress)));
       ctx.fillStyle = "#07101c";
       ctx.fillRect(0, 63, 128, 1);
