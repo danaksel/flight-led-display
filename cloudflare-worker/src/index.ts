@@ -1067,6 +1067,7 @@ function normalizeLogoCode(airlineCode: string | undefined): string {
     SAS: "SAS",
     SZS: "SAS",
     SZN: "SAS",
+    PVG: "TAP",
     TRA: "TRA",
     TVF: "TRA",
     NOA: "DOC"
