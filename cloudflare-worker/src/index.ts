@@ -930,20 +930,52 @@ function localDateString(date: Date, timezone: string): string {
 
 async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
   const config = await getConfig(env);
-  const nearbyFlights = await getFlights(env, config);
-  const followFlights = await getFollowFlights(env, config, nearbyFlights);
+  const suspendedReason = displaySuspendedReason(config);
+  if (suspendedReason) {
+    return jsonResponse(await displayPayload(env, config, compact, suspendedReason, [], [], [], []), 200, {
+      "Cache-Control": "no-store"
+    });
+  }
+
   const limit = Math.max(1, Math.min(50, parseNumber(env.DISPLAY_LIMIT, 8)));
+  const follow = normalizeFollowSettings(config.follow);
+  let nearbyFlights: DisplayFlight[] = [];
+  let followFlights: DisplayFlight[] = [];
+
+  if (follow.enabled && follow.flights.length) {
+    followFlights = await getFollowFlights(env, config);
+  } else {
+    nearbyFlights = await getFlights(env, config);
+  }
+
   const mode = followFlights.length ? "follow" : nearbyFlights.length ? "nearby" : "idle";
   const displayFlights = (followFlights.length ? followFlights : nearbyFlights).slice(0, limit);
   if (mode === "follow" && config.device?.followDetailMode === "location") {
     await enrichFollowLocation(env, displayFlights);
   }
   const idleScreens = displayFlights.length ? [] : await getIdleScreens(env, config);
+  const payload = displayPayload(env, config, compact, mode, followFlights, nearbyFlights, displayFlights, idleScreens);
 
-  const payload = compact
+  return jsonResponse(await payload, 200, {
+    "Cache-Control": "public, max-age=15"
+  });
+}
+
+async function displayPayload(
+  env: Env,
+  config: Config,
+  compact: boolean,
+  mode: string,
+  followFlights: DisplayFlight[],
+  nearbyFlights: DisplayFlight[],
+  displayFlights: DisplayFlight[],
+  idleScreens: IdleScreen[]
+): Promise<Record<string, unknown>> {
+  return compact
     ? {
         updatedAt: new Date().toISOString(),
         mode,
+        suspended: mode === "disabled" || mode === "night",
         lat: config.lat,
         lon: config.lon,
         radiusKm: config.radiusKm,
@@ -961,10 +993,41 @@ async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
         flights: displayFlights,
         idleScreens
       };
+}
 
-  return jsonResponse(payload, 200, {
-    "Cache-Control": "public, max-age=15"
-  });
+function displaySuspendedReason(config: Config): "disabled" | "night" | undefined {
+  const device = normalizeDeviceSettings(config.device);
+  if (!device.enabled) return "disabled";
+  if (isNightModeActive(device)) return "night";
+  return undefined;
+}
+
+function isNightModeActive(device: DeviceSettings, now = new Date()): boolean {
+  const night = device.nightMode;
+  if (!night.enabled || night.brightness > 0) return false;
+  const current = localMinutes(now, device.timezone);
+  const start = minutesFromTime(night.start);
+  const end = minutesFromTime(night.end);
+  if (start === end) return false;
+  return start < end ? current >= start && current < end : current >= start || current < end;
+}
+
+function localMinutes(date: Date, timezone: string): number {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: timezone || "Europe/Oslo",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).formatToParts(date);
+  const hour = Number(parts.find((part) => part.type === "hour")?.value || 0);
+  const minute = Number(parts.find((part) => part.type === "minute")?.value || 0);
+  return hour * 60 + minute;
+}
+
+function minutesFromTime(value: string): number {
+  const match = value.match(/^(\d{2}):(\d{2})$/);
+  if (!match) return 0;
+  return Number(match[1]) * 60 + Number(match[2]);
 }
 
 async function toCompactDisplayFlight(env: Env, f: DisplayFlight, config: Config): Promise<Record<string, unknown>> {
@@ -1145,7 +1208,7 @@ async function getFlights(env: Env, config: Config): Promise<DisplayFlight[]> {
   return flights;
 }
 
-async function getFollowFlights(env: Env, config: Config, liveFlights: DisplayFlight[]): Promise<DisplayFlight[]> {
+async function getFollowFlights(env: Env, config: Config, liveFlights: DisplayFlight[] = []): Promise<DisplayFlight[]> {
   const follow = normalizeFollowSettings(config.follow);
   if (!follow.enabled || !follow.flights.length) return [];
 
