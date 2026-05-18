@@ -1218,7 +1218,7 @@ async function enrichFollowLocation(env: Env, flights: DisplayFlight[]): Promise
 async function getFlightLocation(env: Env, lat: number, lon: number): Promise<string> {
   const cellLat = Math.round(lat * 10) / 10;
   const cellLon = Math.round(lon * 10) / 10;
-  const cacheKey = `geocode:v1:${cellLat.toFixed(1)}:${cellLon.toFixed(1)}`;
+  const cacheKey = `geocode:v2:${cellLat.toFixed(1)}:${cellLon.toFixed(1)}`;
   const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey);
   if (cached) return cached;
 
@@ -1229,10 +1229,12 @@ async function getFlightLocation(env: Env, lat: number, lon: number): Promise<st
   url.searchParams.set("lon", String(cellLon));
   url.searchParams.set("zoom", "10");
   url.searchParams.set("addressdetails", "1");
+  url.searchParams.set("accept-language", "en");
 
   const response = await fetch(url.toString(), {
     headers: {
       Accept: "application/json",
+      "Accept-Language": "en",
       "User-Agent": "flight-display-server/0.1"
     }
   });
@@ -1248,7 +1250,7 @@ function extractGeocodeDisplayName(data: Record<string, unknown>): string | unde
   const address = data.address && typeof data.address === "object" ? data.address as Record<string, unknown> : {};
   const place = firstString(address, ["city", "town", "village", "municipality", "county", "state"]);
   const country = firstString(address, ["country"]);
-  if (place && country) return `${place}, ${country}`;
+  if (place && country) return `${place} - ${country}`;
   if (country) return country;
   return undefined;
 }
@@ -1296,10 +1298,12 @@ async function getAirportCoordinates(env: Env, code: string): Promise<{ lat: num
   url.searchParams.set("format", "jsonv2");
   url.searchParams.set("q", `${normalized} airport`);
   url.searchParams.set("limit", "1");
+  url.searchParams.set("accept-language", "en");
 
   const response = await fetch(url.toString(), {
     headers: {
       Accept: "application/json",
+      "Accept-Language": "en",
       "User-Agent": "flight-display-server/0.1"
     }
   });
@@ -2923,7 +2927,7 @@ function renderIndexHtml(): string {
       if (els.emuSource.value !== "live") return;
       ensureTickerAnimation();
       if (flight && flight.layout === "follow_location" && typeof flight.routeProgress === "number") {
-        drawProgressValue(ctx, flight.routeProgress);
+        drawRouteProgressValue(ctx, flight.routeProgress);
         return;
       }
       if (displayFlights.length <= 1) return;
@@ -2942,6 +2946,14 @@ function renderIndexHtml(): string {
       ctx.fillStyle = "#07101c";
       ctx.fillRect(0, 63, 128, 1);
       ctx.fillStyle = getLineColors().progress;
+      ctx.fillRect(0, 63, width, 1);
+    }
+
+    function drawRouteProgressValue(ctx, progress) {
+      const width = Math.max(1, Math.min(128, Math.round(128 * progress)));
+      ctx.fillStyle = "#3c3c3c";
+      ctx.fillRect(0, 63, 128, 1);
+      ctx.fillStyle = "#00d46a";
       ctx.fillRect(0, 63, width, 1);
     }
 
