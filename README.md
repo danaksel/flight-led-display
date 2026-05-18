@@ -200,7 +200,8 @@ Nøkler som skal beholdes:
 - `airport-coords:v1:*` - koordinater for flyplasser til route progress
 - `geocode:v2:*` - reverse geocode for `Flying over`
 - `avinor:raw:v2:*` og `avinor:board:v3:*` - kortlevd Avinor-cache
-- `flights:v1:*` og `follow:fr24:v1:*` - kortlevd FR24-cache
+- `flights:v1:*` og `follow:fr24:v2:*` - kortlevd FR24-cache
+- `follow:landed:v1:*` - landed-status for fulgte fly, beholdes i to timer etter landing
 
 Gamle versjoner som `airport:v1:*`, `airport:v2:*`, `airport:avinor:v1:*` og `geocode:v1:*` er ryddet bort.
 

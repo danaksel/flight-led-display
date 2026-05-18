@@ -96,6 +96,7 @@ type DisplayFlight = {
   speedKts?: number;
   headingDeg?: number;
   verticalRateFpm?: number;
+  onGround?: boolean;
   distanceKm: number;
   bearingDeg: number;
   source?: "fr24" | "avinor";
@@ -1135,6 +1136,14 @@ function followStatusFor(f: DisplayFlight): Record<string, string> | null {
     };
   }
   if (f.source === "avinor") {
+    if (f.status === "scheduled" && isFutureScheduledFlight(f.scheduledTime)) {
+      return {
+        kind: "scheduled",
+        text: "Scheduled",
+        detail: formatScheduleDetail(f.scheduledTime, f.displayTime),
+        color: "preflight"
+      };
+    }
     const detail = f.displayTime ? `Dep ${f.displayTime}` : "";
     return {
       kind: "not_departed",
@@ -1144,6 +1153,24 @@ function followStatusFor(f: DisplayFlight): Record<string, string> | null {
     };
   }
   return null;
+}
+
+function isFutureScheduledFlight(value: string | undefined): boolean {
+  const timestamp = Date.parse(value || "");
+  if (!Number.isFinite(timestamp)) return false;
+  return timestamp - Date.now() > 2 * 60 * 60 * 1000;
+}
+
+function formatScheduleDetail(value: string | undefined, displayTime: string | undefined): string {
+  const date = new Date(value || "");
+  if (Number.isNaN(date.getTime())) return displayTime || "";
+  const datePart = new Intl.DateTimeFormat("nb-NO", {
+    timeZone: "Europe/Oslo",
+    day: "2-digit",
+    month: "2-digit"
+  }).format(date);
+  const timePart = displayTime || formatLocalTime(value || "", "Europe/Oslo");
+  return [datePart, timePart].filter(Boolean).join(" ");
 }
 
 function formatFollowMetrics(f: DisplayFlight, units: DeviceSettings["followUnits"] | undefined): Record<string, string> {
@@ -1311,14 +1338,29 @@ async function getFollowFlights(env: Env, config: Config, liveFlights: DisplayFl
   const scheduled = [...departures, ...arrivals];
   const liveCandidates = mergeFlightsByIdentity([...targetedLiveFlights, ...liveFlights]);
 
-  return follow.flights
-    .map((token) => {
+  const flights = await Promise.all(follow.flights
+    .map(async (token) => {
       const live = liveCandidates.find((flight) => flightMatchesFollowToken(flight, token));
       const raw = scheduled.find((flight) => avinorFlightMatchesFollowToken(flight, token));
-      if (live) return mergeFollowLiveFlight(live, raw, config);
+      if (live) {
+        const merged = mergeFollowLiveFlight(live, raw, config);
+        if (await shouldTreatFollowAsLanded(env, merged, raw, config)) {
+          const landed = {
+            ...merged,
+            status: "done",
+            gateMessage: "Landed",
+            displayTime: merged.displayTime || formatLocalTime(new Date().toISOString(), timezone)
+          };
+          await cacheFollowLanded(env, token, landed);
+          return landed;
+        }
+        return merged;
+      }
+      const cachedLanded = await getCachedFollowLanded(env, token, raw, config);
+      if (cachedLanded) return cachedLanded;
       return raw ? displayFlightFromAvinor(raw, config) : undefined;
-    })
-    .filter((flight): flight is DisplayFlight => Boolean(flight));
+    }));
+  return flights.filter((flight): flight is DisplayFlight => Boolean(flight));
 }
 
 async function getTargetedFollowFlights(env: Env, config: Config, tokens: string[]): Promise<DisplayFlight[]> {
@@ -1328,20 +1370,61 @@ async function getTargetedFollowFlights(env: Env, config: Config, tokens: string
   if (!normalizedTokens.length) return [];
 
   const cacheTtl = Math.max(30, Math.min(300, parseNumber(env.CACHE_TTL_SECONDS, 60)));
-  const cacheKey = `follow:fr24:v1:${normalizedTokens.slice().sort().join(",")}`;
+  const cacheKey = `follow:fr24:v2:${normalizedTokens.slice().sort().join(",")}`;
   const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
   if (Array.isArray(cached)) return cached as DisplayFlight[];
 
   const records = await fetchFr24(env, undefined, { flights: normalizedTokens });
   const flights = records
     .map((record) => normalizeFlight(record, config))
-    .filter((flight): flight is DisplayFlight => Boolean(flight))
-    .filter(isAirborneFlight);
+    .filter((flight): flight is DisplayFlight => Boolean(flight));
 
   await enrichAirlineNames(env, flights);
   await enrichAirportContext(env, config, flights);
   await env.FLIGHT_DISPLAY_KV.put(cacheKey, JSON.stringify(flights), { expirationTtl: cacheTtl });
   return flights;
+}
+
+async function shouldTreatFollowAsLanded(env: Env, flight: DisplayFlight, raw: AvinorRawFlight | undefined, config: Config): Promise<boolean> {
+  if (!flight.onGround) return false;
+  if (raw?.resolved.status === "done" && raw.direction === "A") return true;
+  if (typeof flight.lat !== "number" || typeof flight.lon !== "number" || !flight.destination) return false;
+  const destination = await getAirportCoordinates(env, flight.destination);
+  if (!destination) return false;
+  const distanceToDestinationKm = haversineKm(flight.lat, flight.lon, destination.lat, destination.lon);
+  if (distanceToDestinationKm <= 40) return true;
+  const progress = await calculateRouteProgress(env, flight);
+  return typeof progress === "number" && progress >= 0.9;
+}
+
+async function cacheFollowLanded(env: Env, token: string, flight: DisplayFlight): Promise<void> {
+  const normalized = normalizeFollowToken(token);
+  if (!normalized) return;
+  const cacheKey = `follow:landed:v1:${normalized}`;
+  await env.FLIGHT_DISPLAY_KV.put(cacheKey, JSON.stringify({
+    ...flight,
+    status: "done",
+    gateMessage: "Landed",
+    landedAt: new Date().toISOString()
+  }), { expirationTtl: 2 * 60 * 60 });
+}
+
+async function getCachedFollowLanded(env: Env, token: string, raw: AvinorRawFlight | undefined, config: Config): Promise<DisplayFlight | undefined> {
+  const normalized = normalizeFollowToken(token);
+  if (!normalized) return undefined;
+  const cacheKey = `follow:landed:v1:${normalized}`;
+  const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
+  if (!cached || typeof cached !== "object" || Array.isArray(cached)) return undefined;
+  const landed = cached as DisplayFlight;
+  const avinor = raw ? displayFlightFromAvinor(raw, config) : undefined;
+  return {
+    ...(avinor || {}),
+    ...landed,
+    source: landed.source || "fr24",
+    status: "done",
+    gateMessage: "Landed",
+    displayTime: landed.displayTime || avinor?.displayTime || ""
+  };
 }
 
 function mergeFlightsByIdentity(flights: DisplayFlight[]): DisplayFlight[] {
@@ -1628,6 +1711,7 @@ function normalizeFlight(record: unknown, config: Config): DisplayFlight | null 
     speedKts: firstNumber(r, ["gspeed", "ground_speed", "speed"]),
     headingDeg: firstNumber(r, ["track", "heading"]),
     verticalRateFpm: firstNumber(r, ["vspeed", "vertical_speed", "vertical_rate", "vertical_speed_fpm"]),
+    onGround: firstBoolean(r, ["on_ground", "onground", "ground", "is_ground", "is_on_ground"]),
     distanceKm,
     bearingDeg
   };
@@ -3455,6 +3539,20 @@ function firstNumber(record: Record<string, unknown>, keys: string[]): number | 
     const value = record[key];
     if (typeof value === "number" && Number.isFinite(value)) return value;
     if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value);
+  }
+  return undefined;
+}
+
+function firstBoolean(record: Record<string, unknown>, keys: string[]): boolean | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "boolean") return value;
+    if (typeof value === "number" && Number.isFinite(value)) return value !== 0;
+    if (typeof value === "string" && value.trim()) {
+      const normalized = value.trim().toLowerCase();
+      if (["true", "yes", "y", "1"].includes(normalized)) return true;
+      if (["false", "no", "n", "0"].includes(normalized)) return false;
+    }
   }
   return undefined;
 }
