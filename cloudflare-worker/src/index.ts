@@ -114,7 +114,7 @@ type AvinorFlight = {
   airport: string;
   time: string;
   sortTime: number;
-  status: "scheduled" | "newTime" | "canceled";
+  status: "scheduled" | "newTime" | "canceled" | "done";
   gate?: string;
   gateMessage?: string;
 };
@@ -200,7 +200,7 @@ type IdleRow = {
   flightId: string;
   airport: string;
   time: string;
-  status: "scheduled" | "newTime" | "canceled";
+  status: "scheduled" | "newTime" | "canceled" | "done";
   gate?: string;
   gateMessage?: string;
 };
@@ -353,16 +353,22 @@ function filterAvinorRawFlights(flights: AvinorRawFlight[], direction: "A" | "D"
   const doneStatus = direction === "D" ? "D" : "A";
   return flights
     .filter((flight) => {
-      const bestTime = flight.status?.code === "E" && flight.status?.time ? flight.status.time : flight.fields.schedule_time;
+      const bestTime = avinorRelevantTime(flight);
       const timestamp = Date.parse(bestTime || "");
       if (!Number.isFinite(timestamp)) return false;
-      if (flight.status?.code === doneStatus || flight.resolved.status === "done") return false;
+      if (direction === "D" && (flight.status?.code === doneStatus || flight.resolved.status === "done")) return false;
       if (timestamp < now - 10 * 60 * 1000) return false;
       if (timestamp > now + windowHours * 60 * 60 * 1000) return false;
       return true;
     })
-    .sort((a, b) => Date.parse(a.fields.schedule_time || "") - Date.parse(b.fields.schedule_time || ""))
+    .sort((a, b) => Date.parse(avinorRelevantTime(a) || "") - Date.parse(avinorRelevantTime(b) || ""))
     .slice(0, limit);
+}
+
+function avinorRelevantTime(flight: AvinorRawFlight): string {
+  const code = flight.status?.code || "";
+  if (["A", "D", "E"].includes(code) && flight.status?.time) return flight.status.time;
+  return flight.fields.schedule_time || flight.resolved.scheduledTime || "";
 }
 
 async function logoAssetResponse(request: Request, env: Env): Promise<Response> {
@@ -599,10 +605,10 @@ async function getAvinorFlights(env: Env, airport: string, direction: "A" | "D",
     .map((raw): AvinorFlight | null => {
       const flightId = raw.resolved.flightId;
       const airportCode = raw.resolved.airportCode || "";
-      const bestTime = raw.status?.code === "E" && raw.status?.time ? raw.status.time : raw.fields.schedule_time;
+      const bestTime = avinorRelevantTime(raw);
       const timestamp = Date.parse(bestTime || "");
       if (!flightId || !airportCode || !Number.isFinite(timestamp)) return null;
-      if (raw.status?.code === doneStatus) return null;
+      if (direction === "D" && raw.status?.code === doneStatus) return null;
       if (timestamp < now - 10 * 60 * 1000) return null;
       if (timestamp > now + windowHours * 60 * 60 * 1000) return null;
       return {
@@ -610,7 +616,7 @@ async function getAvinorFlights(env: Env, airport: string, direction: "A" | "D",
         airport: airportCode,
         time: formatLocalTime(bestTime || raw.fields.schedule_time || "", timezone),
         sortTime: timestamp,
-        status: raw.resolved.status === "canceled" ? "canceled" : raw.resolved.status === "newTime" ? "newTime" : "scheduled",
+        status: raw.resolved.status === "canceled" ? "canceled" : raw.resolved.status === "newTime" ? "newTime" : raw.resolved.status === "done" ? "done" : "scheduled",
         ...(raw.resolved.gate ? { gate: raw.resolved.gate } : {}),
         ...(raw.resolved.gateMessage ? { gateMessage: raw.resolved.gateMessage } : {})
       };
@@ -706,10 +712,15 @@ function parseAvinorApiFlights(json: AvinorApiResponse, direction: "A" | "D"): A
     const isCanceled = statusCode === "C" || /kansell|cancel/i.test(flightStatusText);
     const isDone = statusCode === "A" || statusCode === "D" || /avreist|landet|departed|arrived/i.test(flightStatusText);
     const isNewTime = statusCode === "E" || leg.isDelayed || ownSide?.isDelayed || /ny .*tid|new .*time/i.test(flightStatusText);
-    const bestTime = statusCode === "E" && statusTime ? statusTime : scheduledTime || "";
-    const displayTime = statusCode === "E" && statusTimeLocal
+    const bestTime = ["A", "D", "E"].includes(statusCode) && statusTime ? statusTime : scheduledTime || "";
+    const displayTime = ["A", "D", "E"].includes(statusCode) && statusTimeLocal
       ? formatLocalTimeFromLocal(statusTimeLocal)
       : formatLocalTimeFromLocal(scheduledTimeLocal || "") || formatLocalTime(bestTime, "Europe/Oslo");
+    const resolvedGateMessage = direction === "D"
+      ? gateStatusDescription
+      : isDone
+        ? "Landed"
+        : "";
     const fields: Record<string, string> = {
       source: "avinor-json",
       airline: airlineCode,
@@ -751,7 +762,7 @@ function parseAvinorApiFlights(json: AvinorApiResponse, direction: "A" | "D"): A
         scheduledTime: scheduledTime || "",
         displayTime,
         ...(gate ? { gate } : {}),
-        ...(gateStatusDescription ? { gateMessage: gateStatusDescription } : {}),
+        ...(resolvedGateMessage ? { gateMessage: resolvedGateMessage } : {}),
         status: isCanceled ? "canceled" : isNewTime ? "newTime" : isDone ? "done" : "scheduled"
       }
     };
@@ -782,9 +793,13 @@ async function parseAvinorRawFlights(env: Env, xml: string, direction: "A" | "D"
     const flightId = fields.flight_id || "";
     const airlineCode = (fields.airline || airlineIataFromFlightNumber(flightId) || "").toUpperCase();
     const airportCode = (fields.airport || "").toUpperCase();
-    const bestTime = status?.code === "E" && status?.time ? status.time : fields.schedule_time;
-    const gateMessage = direction === "D" ? extractGateMessage(block, status?.text || status?.status || "") : undefined;
     const statusCode = status?.code || "";
+    const bestTime = ["A", "D", "E"].includes(statusCode) && status?.time ? status.time : fields.schedule_time;
+    const gateMessage = direction === "D"
+      ? extractGateMessage(block, status?.text || status?.status || "")
+      : statusCode === "A"
+        ? "Landed"
+        : undefined;
 
     return {
       direction,
@@ -2942,12 +2957,14 @@ function renderIndexHtml(): string {
       const status = row && row.status ? row.status : "scheduled";
       const gateBlinkOn = Math.floor(performance.now() / 1200) % 2 === 0;
       const gateStatusText = kind === "departures" ? normalizeGateStatusForDisplay(row.gateMessage) : "";
+      const arrivalStatusText = kind === "arrivals" && status === "done" ? "Landed" : "";
       const gateText = kind === "departures" && row.gate ? row.gate : "";
       const airportText = kind === "departures" && gateText && !gateBlinkOn ? gateText : row.airport || "";
       const timeColor = status === "canceled" ? colors.canceled : status === "newTime" ? colors.newTime : colors.data;
       const rowColor = status === "canceled" ? colors.canceled : colors.data;
-      const timeText = gateStatusText && !gateBlinkOn ? gateStatusText : row.time || "";
-      const activeTimeColor = gateStatusText && !gateBlinkOn ? colors.data : timeColor;
+      const alternateTimeText = gateStatusText || arrivalStatusText;
+      const timeText = alternateTimeText && !gateBlinkOn ? alternateTimeText : row.time || "";
+      const activeTimeColor = alternateTimeText && !gateBlinkOn ? colors.data : timeColor;
       drawDotText(ctx, row.flightId || "", x, y, rowColor, { maxWidth: 43 });
       drawDotText(ctx, airportText, x + 48, y, rowColor, { maxWidth: 24 });
       drawDotTextRight(ctx, timeText, 125, y, activeTimeColor, 60);
