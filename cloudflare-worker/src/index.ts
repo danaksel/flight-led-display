@@ -13,6 +13,7 @@ export interface Env {
   CACHE_TTL_SECONDS?: string;
   DISPLAY_LIMIT?: string;
   AVINOR_XML_BASE_URL?: string;
+  AVINOR_FLIGHTS_BASE_URL?: string;
   AVINOR_AIRPORT_NAMES_BASE_URL?: string;
   AVINOR_AIRLINE_NAMES_BASE_URL?: string;
   LOGO_BASE_URL?: string;
@@ -23,9 +24,15 @@ type Config = {
   lon: number;
   radiusKm: number;
   homeAirportIata?: string;
+  follow?: FollowSettings;
   label?: string;
   device?: DeviceSettings;
   updatedAt?: string;
+};
+
+type FollowSettings = {
+  enabled: boolean;
+  flights: string[];
 };
 
 type DeviceSettings = {
@@ -78,6 +85,12 @@ type DisplayFlight = {
   headingDeg?: number;
   distanceKm: number;
   bearingDeg: number;
+  source?: "fr24" | "avinor";
+  status?: string;
+  gate?: string;
+  gateMessage?: string;
+  scheduledTime?: string;
+  displayTime?: string;
 };
 
 type AvinorFlight = {
@@ -106,6 +119,65 @@ type AvinorRawFlight = {
     gateMessage?: string;
     status: "scheduled" | "newTime" | "canceled" | "done";
   };
+};
+
+type AvinorApiResponse = {
+  lastUpdated?: string;
+  flightLegs?: AvinorApiFlightLeg[];
+};
+
+type AvinorApiFlightLeg = {
+  id?: string;
+  flightIds?: Array<{
+    flightId?: string;
+    unformattedFlightId?: string;
+    airlineIata?: string;
+    airlineName?: string;
+  }>;
+  departure?: {
+    gate?: {
+      gate?: string | null;
+      status?: string | null;
+      statusDescription?: string | null;
+    };
+    checkInZones?: string[];
+    flightDepartureDate?: string;
+    flightDepartureDateLocal?: string;
+    isDepartured?: boolean;
+    airportIata?: string;
+    airportName?: string;
+    statusCode?: string | null;
+    statusCodeDescription?: string | null;
+    statusTime?: string | null;
+    statusTimeLocal?: string | null;
+    isDelayed?: boolean;
+  };
+  arrival?: {
+    belt?: {
+      belt?: string | null;
+      status?: string | null;
+      statusDescription?: string | null;
+      start?: string | null;
+      startLocal?: string | null;
+      stop?: string | null;
+      stopLocal?: string | null;
+    };
+    flightArrivalDate?: string;
+    flightArrivalDateLocal?: string;
+    isArrived?: boolean;
+    airportIata?: string;
+    airportName?: string;
+    statusCode?: string | null;
+    statusCodeDescription?: string | null;
+    statusTime?: string | null;
+    statusTimeLocal?: string | null;
+    isDelayed?: boolean;
+  };
+  flightStatus?: string;
+  flightStatusTime?: string | null;
+  flightStatusTimeLocal?: string | null;
+  isDelayed?: boolean;
+  isDomestic?: boolean;
 };
 
 type IdleRow = {
@@ -197,6 +269,7 @@ async function saveConfig(request: Request, env: Env): Promise<Response> {
     lon: clamp(body.lon, -180, 180),
     radiusKm: clamp(body.radiusKm, 1, 250),
     homeAirportIata: normalizeAirportCode(body.homeAirportIata, env.HOME_AIRPORT_IATA || "OSL"),
+    follow: normalizeFollowSettings((body as { follow?: unknown }).follow),
     label: typeof body.label === "string" ? body.label.slice(0, 80) : undefined,
     device: normalizeDeviceSettings(body.device),
     updatedAt: new Date().toISOString()
@@ -211,6 +284,7 @@ async function deviceConfigResponse(env: Env): Promise<Response> {
   return jsonResponse({
     updatedAt: config.updatedAt || null,
     homeAirportIata: config.homeAirportIata,
+    follow: config.follow,
     device: config.device
   }, 200, {
     "Cache-Control": "no-store"
@@ -266,8 +340,29 @@ function withConfigDefaults(config: Config, env: Env): Config {
   return {
     ...config,
     homeAirportIata: normalizeAirportCode(config.homeAirportIata, env.HOME_AIRPORT_IATA || "OSL"),
+    follow: normalizeFollowSettings(config.follow),
     device: normalizeDeviceSettings(config.device)
   };
+}
+
+function normalizeFollowSettings(value: unknown): FollowSettings {
+  const v = value && typeof value === "object" ? value as Partial<FollowSettings> : {};
+  const flights = Array.isArray(v.flights)
+    ? v.flights
+        .map(normalizeFollowToken)
+        .filter((token): token is string => Boolean(token))
+        .slice(0, 3)
+    : [];
+  return {
+    enabled: typeof v.enabled === "boolean" ? v.enabled : false,
+    flights
+  };
+}
+
+function normalizeFollowToken(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const token = value.trim().toUpperCase().replace(/\s+/g, "");
+  return /^[A-Z0-9-]{2,12}$/.test(token) ? token : undefined;
 }
 
 function normalizeDeviceSettings(value: unknown): DeviceSettings {
@@ -371,7 +466,7 @@ function toIdleRow(flight: AvinorFlight): IdleRow {
 }
 
 async function getAvinorFlights(env: Env, airport: string, direction: "A" | "D", timezone: string): Promise<AvinorFlight[]> {
-  const cacheKey = `avinor:board:v1:${airport}:${direction}`;
+  const cacheKey = `avinor:board:v2:${airport}:${direction}`;
   const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
   if (Array.isArray(cached)) return cached as AvinorFlight[];
 
@@ -381,15 +476,15 @@ async function getAvinorFlights(env: Env, airport: string, direction: "A" | "D",
   const flights = rawFlights
     .map((raw): AvinorFlight | null => {
       const flightId = raw.resolved.flightId;
-      const airportName = raw.resolved.airportName || raw.resolved.airportCode || "";
+      const airportCode = raw.resolved.airportCode || "";
       const bestTime = raw.status?.code === "E" && raw.status?.time ? raw.status.time : raw.fields.schedule_time;
       const timestamp = Date.parse(bestTime || "");
-      if (!flightId || !airportName || !Number.isFinite(timestamp)) return null;
+      if (!flightId || !airportCode || !Number.isFinite(timestamp)) return null;
       if (raw.status?.code === doneStatus) return null;
       if (timestamp < now - 10 * 60 * 1000) return null;
       return {
         flightId,
-        airport: airportName,
+        airport: airportCode,
         time: formatLocalTime(bestTime || raw.fields.schedule_time || "", timezone),
         sortTime: timestamp,
         status: raw.resolved.status === "canceled" ? "canceled" : raw.resolved.status === "newTime" ? "newTime" : "scheduled",
@@ -406,26 +501,24 @@ async function getAvinorFlights(env: Env, airport: string, direction: "A" | "D",
 }
 
 async function getAvinorRawFlights(env: Env, airport: string, direction: "A" | "D", timezone: string): Promise<AvinorRawFlight[]> {
-  const cacheKey = `avinor:raw:v1:${airport}:${direction}`;
+  const cacheKey = `avinor:raw:v2:${airport}:${direction}`;
   const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
   if (Array.isArray(cached)) return cached as AvinorRawFlight[];
 
-  const baseUrl = env.AVINOR_XML_BASE_URL || "https://asrv.avinor.no/XmlFeed/v1.0";
-  const url = new URL(baseUrl);
-  url.searchParams.set("airport", airport);
-  url.searchParams.set("TimeFrom", "0");
-  url.searchParams.set("TimeTo", "12");
-  url.searchParams.set("direction", direction);
+  const directionPath = direction === "D" ? "departure" : "arrival";
+  const baseUrl = env.AVINOR_FLIGHTS_BASE_URL || "https://www.avinor.no/api/v1/flights";
+  const url = new URL(`${baseUrl.replace(/\/+$/, "")}/${directionPath}/${airport}`);
+  url.searchParams.set("dateTime", localDateString(new Date(), timezone));
 
   const response = await fetch(url.toString(), {
     headers: {
-      Accept: "application/xml,text/xml"
+      Accept: "application/json"
     }
   });
   if (!response.ok) return [];
 
-  const xml = await responseText(response);
-  const flights = await parseAvinorRawFlights(env, xml, direction, timezone);
+  const json = await response.json() as AvinorApiResponse;
+  const flights = parseAvinorApiFlights(json, direction);
   await env.FLIGHT_DISPLAY_KV.put(cacheKey, JSON.stringify(flights), { expirationTtl: 180 });
   return flights;
 }
@@ -463,6 +556,83 @@ function parseAvinorFlights(xml: string, direction: "A" | "D", timezone: string)
     .filter((flight): flight is AvinorFlight => Boolean(flight))
     .sort((a, b) => a.sortTime - b.sortTime)
     .slice(0, 8);
+}
+
+function parseAvinorApiFlights(json: AvinorApiResponse, direction: "A" | "D"): AvinorRawFlight[] {
+  const legs = Array.isArray(json.flightLegs) ? json.flightLegs : [];
+  return legs.map((leg): AvinorRawFlight => {
+    const primaryFlight = Array.isArray(leg.flightIds) ? leg.flightIds[0] : undefined;
+    const flightId = primaryFlight?.flightId || primaryFlight?.unformattedFlightId || "";
+    const airlineCode = (primaryFlight?.airlineIata || airlineIataFromFlightNumber(flightId) || "").toUpperCase();
+    const otherSide = direction === "D" ? leg.arrival : leg.departure;
+    const ownSide = direction === "D" ? leg.departure : leg.arrival;
+    const statusCode = ownSide?.statusCode || "";
+    const statusTime = ownSide?.statusTime || "";
+    const statusTimeLocal = ownSide?.statusTimeLocal || "";
+    const scheduledTime = direction === "D" ? leg.departure?.flightDepartureDate : leg.arrival?.flightArrivalDate;
+    const scheduledTimeLocal = direction === "D" ? leg.departure?.flightDepartureDateLocal : leg.arrival?.flightArrivalDateLocal;
+    const airportCode = otherSide?.airportIata?.toUpperCase() || "";
+    const airportName = otherSide?.airportName || "";
+    const gate = leg.departure?.gate?.gate || "";
+    const gateStatus = leg.departure?.gate?.status || "";
+    const gateStatusDescription = leg.departure?.gate?.statusDescription || "";
+    const belt = leg.arrival?.belt?.belt || "";
+    const beltStatus = leg.arrival?.belt?.status || "";
+    const beltStatusDescription = leg.arrival?.belt?.statusDescription || "";
+    const bestTime = statusCode === "E" && statusTime ? statusTime : scheduledTime || "";
+    const displayTime = statusCode === "E" && statusTimeLocal
+      ? formatLocalTimeFromLocal(statusTimeLocal)
+      : formatLocalTimeFromLocal(scheduledTimeLocal || "") || formatLocalTime(bestTime, "Europe/Oslo");
+    const fields: Record<string, string> = {
+      source: "avinor-json",
+      airline: airlineCode,
+      airline_name: primaryFlight?.airlineName || "",
+      flight_id: flightId,
+      dom_int: leg.isDomestic ? "D" : "I",
+      schedule_time: scheduledTime || "",
+      schedule_time_local: scheduledTimeLocal || "",
+      arr_dep: direction,
+      airport: airportCode,
+      airport_name: airportName,
+      check_in: (leg.departure?.checkInZones || []).join(","),
+      gate,
+      gate_status: gateStatus,
+      gate_status_description: gateStatusDescription,
+      belt,
+      belt_status: beltStatus,
+      belt_status_description: beltStatusDescription,
+      flight_status: leg.flightStatus || "",
+      delayed: leg.isDelayed || ownSide?.isDelayed ? "Y" : ""
+    };
+    const status: Record<string, string> | undefined = statusCode ? {
+      code: statusCode,
+      description: ownSide?.statusCodeDescription || "",
+      time: statusTime,
+      timeLocal: statusTimeLocal
+    } : undefined;
+
+    return {
+      direction,
+      fields: stripEmptyValues(fields),
+      ...(status ? { status } : {}),
+      resolved: {
+        flightId,
+        ...(airlineCode ? { airlineCode } : {}),
+        ...(primaryFlight?.airlineName ? { airlineName: primaryFlight.airlineName } : {}),
+        ...(airportCode ? { airportCode } : {}),
+        ...(airportName ? { airportName } : {}),
+        scheduledTime: scheduledTime || "",
+        displayTime,
+        ...(gate ? { gate } : {}),
+        ...(gateStatusDescription ? { gateMessage: gateStatusDescription } : {}),
+        status: statusCode === "C" ? "canceled" : statusCode === "E" || leg.isDelayed || ownSide?.isDelayed ? "newTime" : statusCode === "A" || statusCode === "D" ? "done" : "scheduled"
+      }
+    };
+  });
+}
+
+function stripEmptyValues(values: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(values).filter(([, value]) => value !== ""));
 }
 
 async function parseAvinorRawFlights(env: Env, xml: string, direction: "A" | "D", timezone: string): Promise<AvinorRawFlight[]> {
@@ -609,51 +779,51 @@ function formatLocalTime(value: string, timezone: string): string {
   }).format(date);
 }
 
+function formatLocalTimeFromLocal(value: string): string {
+  const match = value.match(/T(\d{2}):(\d{2})/);
+  return match ? `${match[1]}:${match[2]}` : "";
+}
+
+function localDateString(date: Date, timezone: string): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone || "Europe/Oslo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(date);
+  const year = parts.find((part) => part.type === "year")?.value || "1970";
+  const month = parts.find((part) => part.type === "month")?.value || "01";
+  const day = parts.find((part) => part.type === "day")?.value || "01";
+  return `${year}-${month}-${day}`;
+}
+
 async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
   const config = await getConfig(env);
-  const flights = await getFlights(env, config);
+  const nearbyFlights = await getFlights(env, config);
+  const followFlights = await getFollowFlights(env, config, nearbyFlights);
   const limit = Math.max(1, Math.min(50, parseNumber(env.DISPLAY_LIMIT, 8)));
-  const displayFlights = flights.slice(0, limit);
+  const mode = followFlights.length ? "follow" : nearbyFlights.length ? "nearby" : "idle";
+  const displayFlights = (followFlights.length ? followFlights : nearbyFlights).slice(0, limit);
   const idleScreens = displayFlights.length ? [] : await getIdleScreens(env, config);
 
   const payload = compact
     ? {
         updatedAt: new Date().toISOString(),
+        mode,
         lat: config.lat,
         lon: config.lon,
         radiusKm: config.radiusKm,
+        follow: config.follow,
         device: config.device,
         idleScreens,
-        flights: displayFlights.map((f) => {
-          const route = [f.origin, f.destination].filter(Boolean).join("-");
-          const context = [f.contextLabel, f.contextValue].filter(Boolean).join(" ");
-          return {
-            cs: f.callsign || f.flight || "",
-            flt: f.flight || "",
-            air: f.airline || "",
-            airCode: f.airlineCode || "",
-            logoUrl: logoUrlFor(displayLogoCodeFor(f)),
-            ac: f.aircraft || "",
-            reg: f.registration || "",
-            from: f.origin || "",
-            to: f.destination || "",
-            ctxLabel: f.contextLabel || "",
-            ctxValue: f.contextValue || "",
-            lines: {
-              airline: f.airline || f.airlineCode || "",
-              route,
-              aircraft: f.aircraft || f.registration || "",
-              context
-            },
-            b: Math.round(f.bearingDeg),
-            alt: f.altitudeFt ?? null,
-            spd: f.speedKts ?? null
-          };
-        })
+        flights: displayFlights.map(toCompactDisplayFlight)
       }
     : {
         updatedAt: new Date().toISOString(),
+        mode,
         config,
+        followFlights,
+        nearbyFlights,
         flights: displayFlights,
         idleScreens
       };
@@ -661,6 +831,37 @@ async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
   return jsonResponse(payload, 200, {
     "Cache-Control": "public, max-age=15"
   });
+}
+
+function toCompactDisplayFlight(f: DisplayFlight): Record<string, unknown> {
+  const route = [f.origin, f.destination].filter(Boolean).join("-");
+  const context = [f.contextLabel, f.contextValue].filter(Boolean).join(" ");
+  return {
+    cs: f.callsign || f.flight || "",
+    flt: f.flight || "",
+    air: f.airline || "",
+    airCode: f.airlineCode || "",
+    logoUrl: logoUrlFor(displayLogoCodeFor(f)),
+    ac: f.aircraft || "",
+    reg: f.registration || "",
+    from: f.origin || "",
+    to: f.destination || "",
+    ctxLabel: f.contextLabel || "",
+    ctxValue: f.contextValue || "",
+    status: f.status || "",
+    gate: f.gate || "",
+    gateMessage: f.gateMessage || "",
+    source: f.source || "",
+    lines: {
+      airline: f.airline || f.airlineCode || "",
+      route,
+      aircraft: f.aircraft || f.registration || "",
+      context
+    },
+    b: Math.round(f.bearingDeg),
+    alt: f.altitudeFt ?? null,
+    spd: f.speedKts ?? null
+  };
 }
 
 function logoUrlFor(airlineCode: string | undefined): string {
@@ -730,6 +931,117 @@ async function getFlights(env: Env, config: Config): Promise<DisplayFlight[]> {
   await enrichAirportContext(env, config, flights);
   await env.FLIGHT_DISPLAY_KV.put(cacheKey, JSON.stringify(flights), { expirationTtl: cacheTtl });
   return flights;
+}
+
+async function getFollowFlights(env: Env, config: Config, liveFlights: DisplayFlight[]): Promise<DisplayFlight[]> {
+  const follow = normalizeFollowSettings(config.follow);
+  if (!follow.enabled || !follow.flights.length) return [];
+
+  const airport = normalizeAirportCode(config.homeAirportIata, env.HOME_AIRPORT_IATA || "OSL");
+  const timezone = config.device?.timezone || "Europe/Oslo";
+  const [departures, arrivals] = await Promise.all([
+    getAvinorRawFlights(env, airport, "D", timezone),
+    getAvinorRawFlights(env, airport, "A", timezone)
+  ]);
+  const scheduled = [...departures, ...arrivals];
+
+  return follow.flights
+    .map((token) => {
+      const live = liveFlights.find((flight) => flightMatchesFollowToken(flight, token));
+      const raw = scheduled.find((flight) => avinorFlightMatchesFollowToken(flight, token));
+      if (live) return mergeFollowLiveFlight(live, raw, config);
+      return raw ? displayFlightFromAvinor(raw, config) : undefined;
+    })
+    .filter((flight): flight is DisplayFlight => Boolean(flight));
+}
+
+function flightMatchesFollowToken(flight: DisplayFlight, token: string): boolean {
+  const normalized = normalizeFollowToken(token);
+  if (!normalized) return false;
+  return [flight.flight, flight.callsign, flight.registration]
+    .map((value) => value?.toUpperCase().replace(/\s+/g, ""))
+    .some((value) => value === normalized);
+}
+
+function avinorFlightMatchesFollowToken(flight: AvinorRawFlight, token: string): boolean {
+  const normalized = normalizeFollowToken(token);
+  if (!normalized) return false;
+  const flightIds = [
+    flight.resolved.flightId,
+    flight.fields.flight_id
+  ].map((value) => value?.toUpperCase().replace(/\s+/g, ""));
+  return flightIds.includes(normalized);
+}
+
+function mergeFollowLiveFlight(live: DisplayFlight, raw: AvinorRawFlight | undefined, config: Config): DisplayFlight {
+  if (!raw) return { ...live, source: "fr24" };
+  const avinor = displayFlightFromAvinor(raw, config);
+  return {
+    ...avinor,
+    ...live,
+    source: "fr24",
+    airline: avinor.airline || live.airline,
+    airlineCode: avinor.airlineCode || normalizeLogoCode(live.airlineCode),
+    origin: avinor.origin || live.origin,
+    destination: avinor.destination || live.destination,
+    contextLabel: avinor.contextLabel,
+    contextValue: avinor.contextValue,
+    status: avinor.status,
+    gate: avinor.gate,
+    gateMessage: avinor.gateMessage,
+    scheduledTime: avinor.scheduledTime,
+    displayTime: avinor.displayTime
+  };
+}
+
+function displayFlightFromAvinor(raw: AvinorRawFlight, config: Pick<Config, "lat" | "lon" | "radiusKm" | "homeAirportIata">): DisplayFlight {
+  const isDeparture = raw.direction === "D";
+  const home = config.homeAirportIata || "OSL";
+  const origin = isDeparture ? home : raw.resolved.airportCode;
+  const destination = isDeparture ? raw.resolved.airportCode : home;
+  return {
+    flight: raw.resolved.flightId,
+    callsign: raw.resolved.flightId,
+    airline: raw.resolved.airlineName || raw.resolved.airlineCode,
+    airlineCode: airlineIataToLogoCode(raw.resolved.airlineCode),
+    origin,
+    destination,
+    contextLabel: isDeparture ? "Departing to" : "Arriving from",
+    contextValue: raw.resolved.airportName || raw.resolved.airportCode || "",
+    distanceKm: config.radiusKm,
+    bearingDeg: 0,
+    source: "avinor",
+    status: raw.resolved.status,
+    gate: raw.resolved.gate,
+    gateMessage: raw.resolved.gateMessage,
+    scheduledTime: raw.resolved.scheduledTime,
+    displayTime: raw.resolved.displayTime
+  };
+}
+
+function airlineIataToLogoCode(iata: string | undefined): string | undefined {
+  if (!iata) return undefined;
+  const aliases: Record<string, string> = {
+    DY: "NOZ",
+    D8: "NOZ",
+    SK: "SAS",
+    WF: "WIF",
+    KL: "KLM",
+    LH: "DLH",
+    AF: "AFR",
+    BA: "BAW",
+    FR: "RYR",
+    AY: "FIN",
+    BT: "BTI",
+    LX: "SWR",
+    QR: "QTR",
+    EK: "UAE",
+    TK: "THY",
+    TP: "TAP",
+    TG: "THA",
+    LO: "LOT"
+  };
+  return aliases[iata.toUpperCase()] || iata.toUpperCase();
 }
 
 function isAirborneFlight(flight: DisplayFlight): boolean {
@@ -1248,6 +1560,12 @@ function renderIndexHtml(): string {
           </div>
         </div>
         <h2 style="margin-top:16px">Fly</h2>
+        <div class="toggle-row">
+          <label for="followEnabled">Følg flightnummer</label>
+          <input id="followEnabled" type="checkbox">
+        </div>
+        <label for="followFlights">Flightnummer / callsign</label>
+        <input id="followFlights" autocomplete="off" placeholder="SK4673, DY1304, DOC45">
         <div class="row">
           <div>
             <label for="cycleSeconds">Flight sek</label>
@@ -1369,6 +1687,8 @@ function renderIndexHtml(): string {
       lon: document.querySelector("#lon"),
       radius: document.querySelector("#radius"),
       homeAirport: document.querySelector("#homeAirport"),
+      followEnabled: document.querySelector("#followEnabled"),
+      followFlights: document.querySelector("#followFlights"),
       deviceEnabled: document.querySelector("#deviceEnabled"),
       deviceBrightness: document.querySelector("#deviceBrightness"),
       nightBrightness: document.querySelector("#nightBrightness"),
@@ -1468,6 +1788,9 @@ function renderIndexHtml(): string {
       els.lon.value = Number(config.lon).toFixed(6);
       els.radius.value = config.radiusKm || 10;
       els.homeAirport.value = config.homeAirportIata || "OSL";
+      const follow = config.follow || {};
+      els.followEnabled.checked = follow.enabled === true;
+      els.followFlights.value = Array.isArray(follow.flights) ? follow.flights.join(", ") : "";
       els.deviceEnabled.checked = device.enabled !== false;
       els.deviceBrightness.value = device.brightness ?? 80;
       els.nightBrightness.value = night.brightness ?? 0;
@@ -1501,6 +1824,14 @@ function renderIndexHtml(): string {
         lon: Number(els.lon.value),
         radiusKm: Number(els.radius.value),
         homeAirportIata: els.homeAirport.value.trim().toUpperCase(),
+        follow: {
+          enabled: els.followEnabled.checked,
+          flights: els.followFlights.value
+            .split(/[,\s]+/)
+            .map((value) => value.trim().toUpperCase())
+            .filter(Boolean)
+            .slice(0, 3)
+        },
         device: {
           enabled: els.deviceEnabled.checked,
           brightness: Number(els.deviceBrightness.value),
@@ -1631,7 +1962,8 @@ function renderIndexHtml(): string {
         currentIdleScreenIndex = 0;
         resetFlightCycle();
         renderEmulator();
-        els.previewMeta.textContent = "Oppdatert " + new Date(data.updatedAt).toLocaleTimeString() + " · " + flights.length + " treff";
+        const mode = data.mode || (flights.length ? "nearby" : "idle");
+        els.previewMeta.textContent = "Oppdatert " + new Date(data.updatedAt).toLocaleTimeString() + " · " + flights.length + " treff · " + mode;
         if (!flights.length) {
           if (idleScreens.length) {
             els.flightList.innerHTML = idleScreens.map((screen) => {
@@ -1651,6 +1983,10 @@ function renderIndexHtml(): string {
             flight.ac,
             route,
             [flight.ctxLabel, flight.ctxValue].filter(Boolean).join(" "),
+            flight.gate ? "Gate " + flight.gate : "",
+            flight.gateMessage || "",
+            flight.status && flight.status !== "scheduled" ? flight.status : "",
+            flight.source || "",
             flight.alt ? flight.alt + " ft" : ""
           ].filter(Boolean).join(" · ");
         const logo = flight.logoUrl
