@@ -213,25 +213,55 @@ type IdleScreen = {
 
 const CONFIG_KEY = "config:v1";
 const AIRPORT_CITY_OVERRIDES: Record<string, string> = {
+  AAL: "Aalborg",
+  AAR: "Aarhus",
+  AES: "Alesund",
+  AGP: "Malaga",
+  ALC: "Alicante",
+  AMS: "Amsterdam",
   ARN: "Stockholm",
+  BCN: "Barcelona",
   BGY: "Milan",
+  BGO: "Bergen",
+  BER: "Berlin",
+  BLL: "Billund",
+  BOO: "Bodo",
+  BRS: "Bristol",
+  BRU: "Brussels",
   CDG: "Paris",
   CIA: "Rome",
   CPH: "Copenhagen",
+  DUB: "Dublin",
+  DUS: "Dusseldorf",
+  EDI: "Edinburgh",
   FCO: "Rome",
   FLL: "Fort Lauderdale",
+  FRA: "Frankfurt",
+  GDN: "Gdansk",
+  GLA: "Glasgow",
+  HEL: "Helsinki",
   HND: "Tokyo",
   JFK: "New York",
+  KEF: "Reykjavik",
   LGA: "New York",
   LGW: "London",
+  LHR: "London",
+  LIS: "Lisbon",
   LTN: "London",
+  MAN: "Manchester",
   MXP: "Milan",
+  MUC: "Munich",
+  NCE: "Nice",
   NRT: "Tokyo",
   OSL: "Oslo",
   ORY: "Paris",
+  RRS: "Roros",
   STN: "London",
   SWF: "New York",
+  SVG: "Stavanger",
+  TRD: "Trondheim",
   TRF: "Oslo",
+  VIE: "Vienna",
   WAW: "Warsaw"
 };
 
@@ -1712,20 +1742,23 @@ async function enrichAirportContext(env: Env, config: Config, flights: DisplayFl
 
 async function getAirportDisplayName(env: Env, code: string): Promise<string | undefined> {
   const normalized = code.toUpperCase();
-  const cacheKey = `airport:v2:${normalized}`;
+  const cacheKey = `airport:v4:${normalized}`;
   const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey);
   if (cached) return cached;
-
-  const avinorName = await getAvinorAirportName(env, normalized);
-  if (avinorName) {
-    await env.FLIGHT_DISPLAY_KV.put(cacheKey, avinorName);
-    return avinorName;
-  }
 
   const override = AIRPORT_CITY_OVERRIDES[normalized];
   if (override) {
     await env.FLIGHT_DISPLAY_KV.put(cacheKey, override);
     return override;
+  }
+
+  const avinorName = await getAvinorAirportName(env, normalized);
+  if (avinorName) {
+    const displayName = cleanAirportName(avinorName);
+    if (displayName) {
+      await env.FLIGHT_DISPLAY_KV.put(cacheKey, displayName);
+      return displayName;
+    }
   }
 
   const baseUrl = env.FR24_API_BASE_URL || "https://fr24api.flightradar24.com/api";
@@ -1767,7 +1800,7 @@ async function enrichAvinorAirportNames(env: Env, flights: AvinorFlight[]): Prom
 async function getAvinorAirportName(env: Env, code: string): Promise<string | undefined> {
   const normalized = code.toUpperCase();
   if (!/^[A-Z0-9]{3,4}$/.test(normalized)) return undefined;
-  const cacheKey = `airport:avinor:v1:${normalized}`;
+  const cacheKey = `airport:avinor:v2:${normalized}`;
   const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey);
   if (cached) return cached;
 
@@ -1789,7 +1822,6 @@ async function getAvinorAirportName(env: Env, code: string): Promise<string | un
 
   const attributes = match[1];
   const name =
-    xmlAttribute(attributes, "shortname8") ||
     xmlAttribute(attributes, "shortname15") ||
     xmlAttribute(attributes, "name");
   if (!name) return undefined;
@@ -1833,7 +1865,19 @@ function cleanAirportName(name: string | undefined): string | undefined {
     .replace(/\s+/g, " ")
     .replace(/\s*[-–—]\s*$/g, "")
     .trim();
-  return withoutDecorators || name;
+  return normalizeDisplayText(withoutDecorators || name);
+}
+
+function normalizeDisplayText(value: string): string {
+  return value
+    .replace(/[æÆåÅ]/g, "a")
+    .replace(/[øØöÖóÓòÒôÔ]/g, "o")
+    .replace(/[üÜúÚùÙûÛ]/g, "u")
+    .replace(/[äÄáÁàÀâÂ]/g, "a")
+    .replace(/[éÉèÈêÊëË]/g, "e")
+    .replace(/[íÍìÌîÎïÏ]/g, "i")
+    .replace(/[çÇ]/g, "c")
+    .replace(/[ñÑ]/g, "n");
 }
 
 function renderIndexHtml(): string {
@@ -3273,7 +3317,13 @@ function renderIndexHtml(): string {
     function normalizeLedText(value) {
       return String(value || "")
         .replace(/[æÆåÅ]/g, "a")
-        .replace(/[øØ]/g, "o");
+        .replace(/[øØöÖóÓòÒôÔ]/g, "o")
+        .replace(/[üÜúÚùÙûÛ]/g, "u")
+        .replace(/[äÄáÁàÀâÂ]/g, "a")
+        .replace(/[éÉèÈêÊëË]/g, "e")
+        .replace(/[íÍìÌîÎïÏ]/g, "i")
+        .replace(/[çÇ]/g, "c")
+        .replace(/[ñÑ]/g, "n");
     }
 
     renderEmulator();
