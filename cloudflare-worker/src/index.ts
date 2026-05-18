@@ -1824,9 +1824,11 @@ function renderIndexHtml(): string {
     .emulator { padding: 18px 22px 22px; background: #0c121a; color: #e8edf4; border-top: 1px solid #263242; }
     .emulator h2 { margin: 0 0 6px; font-size: 18px; }
     .emulator p { color: #aeb8c5; margin-bottom: 14px; }
-    .emu-controls { display: grid; grid-template-columns: 170px minmax(220px, 420px); gap: 12px; align-items: end; margin-bottom: 14px; }
+    .emu-controls { display: grid; grid-template-columns: 170px minmax(220px, 420px) 150px; gap: 12px; align-items: end; margin-bottom: 14px; }
     .emu-controls label { color: #dce4ee; margin-top: 0; }
     .emu-controls input, .emu-controls select { width: 100%; box-sizing: border-box; border: 1px solid #3b4859; border-radius: 6px; padding: 9px 10px; background: #182232; color: #f8fafc; font: inherit; }
+    .emu-controls button { width: 100%; margin: 0; padding: 10px; font-size: 12px; background: #1d2938; color: #f3f6fb; border: 1px solid #354457; }
+    .emu-controls button.active { background: var(--amber); color: #111; border-color: var(--amber); }
     .emu-stage { overflow: auto; padding: 12px; background: #070a0e; border: 1px solid #2c3849; border-radius: 8px; }
     .emu-wrap { position: relative; width: min(100%, 1024px); aspect-ratio: 2 / 1; background: #000; }
     #ledCanvas { width: 100%; height: 100%; display: block; background: #000; }
@@ -2092,6 +2094,10 @@ function renderIndexHtml(): string {
             <label for="imageUpload">Logo 42 x 42 PNG</label>
             <input id="imageUpload" type="file" accept="image/*">
           </div>
+          <div>
+            <label for="emuPolling">Display-test</label>
+            <button id="emuPolling" type="button">Start polling</button>
+          </div>
         </div>
         <div class="emu-stage">
           <div class="emu-wrap">
@@ -2150,6 +2156,7 @@ function renderIndexHtml(): string {
       flightList: document.querySelector("#flightList"),
       avinorRaw: document.querySelector("#avinorRaw"),
       emuSource: document.querySelector("#emuSource"),
+      emuPolling: document.querySelector("#emuPolling"),
       imageUpload: document.querySelector("#imageUpload"),
       ledCanvas: document.querySelector("#ledCanvas"),
       emuMeta: document.querySelector("#emuMeta")
@@ -2168,6 +2175,9 @@ function renderIndexHtml(): string {
     let flightCycleStartedAt = performance.now();
     let tickerAnimationFrame = null;
     let tickerStartedAt = performance.now();
+    let emulatorPollTimer = null;
+    let emulatorPolling = false;
+    let emulatorPollInFlight = false;
     let formIsDirty = false;
     const logoCache = new Map();
 
@@ -2358,6 +2368,7 @@ function renderIndexHtml(): string {
 
     els.refresh.addEventListener("click", loadPreview);
     els.refreshAvinor.addEventListener("click", loadAvinorRawOnly);
+    els.emuPolling.addEventListener("click", () => setEmulatorPolling(!emulatorPolling));
     els.emuSource.addEventListener("change", () => {
       resetFlightCycle();
       renderEmulator();
@@ -2391,6 +2402,35 @@ function renderIndexHtml(): string {
       resetFlightCycle();
       renderEmulator();
     });
+
+    function setEmulatorPolling(enabled) {
+      emulatorPolling = enabled;
+      if (emulatorPollTimer) {
+        clearTimeout(emulatorPollTimer);
+        emulatorPollTimer = null;
+      }
+      els.emuPolling.classList.toggle("active", enabled);
+      els.emuPolling.textContent = enabled ? "Stopp polling" : "Start polling";
+      if (enabled) {
+        els.emuSource.value = "live";
+        runEmulatorPoll();
+      }
+    }
+
+    async function runEmulatorPoll() {
+      if (!emulatorPolling || emulatorPollInFlight) return;
+      emulatorPollInFlight = true;
+      els.emuPolling.textContent = "Henter...";
+      try {
+        await loadPreview();
+      } finally {
+        emulatorPollInFlight = false;
+        if (!emulatorPolling) return;
+        els.emuPolling.textContent = "Stopp polling";
+        const seconds = Math.max(30, Number(els.pollSeconds.value || 90));
+        emulatorPollTimer = setTimeout(runEmulatorPoll, seconds * 1000);
+      }
+    }
 
     async function loadPreview() {
       els.previewMeta.textContent = "Henter...";
