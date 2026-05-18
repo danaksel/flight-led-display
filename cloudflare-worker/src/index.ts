@@ -2907,11 +2907,11 @@ function renderIndexHtml(): string {
     }
 
     function measureDotText(text) {
-      return String(text || "").length * 6;
+      return normalizeLedText(text).length * 6;
     }
 
     function drawDotTextRight(ctx, text, rightX, y, color, maxWidth) {
-      const value = String(text || "");
+      const value = normalizeLedText(text);
       const width = Math.min(measureDotText(value), maxWidth);
       drawDotText(ctx, value, rightX - width, y, color, { maxWidth });
     }
@@ -2963,7 +2963,7 @@ function renderIndexHtml(): string {
       const maxChars = typeof options === "number" ? options : options.maxChars || 999;
       const maxWidth = typeof options === "object" ? options.maxWidth || 999 : 999;
       ctx.fillStyle = color;
-      for (const char of String(text || "").toUpperCase().slice(0, maxChars)) {
+      for (const char of normalizeLedText(text).toUpperCase().slice(0, maxChars)) {
         const rows = glyphs[char] || glyphs[" "];
         if (cursor + rows[0].length > x + maxWidth) break;
         for (let row = 0; row < rows.length; row++) {
@@ -2973,6 +2973,12 @@ function renderIndexHtml(): string {
         }
         cursor += 6;
       }
+    }
+
+    function normalizeLedText(value) {
+      return String(value || "")
+        .replace(/[æÆåÅ]/g, "a")
+        .replace(/[øØ]/g, "o");
     }
 
     renderEmulator();
