@@ -49,7 +49,7 @@ type DeviceSettings = {
   configRefreshSeconds: number;
   timezone: string;
   followUnits: {
-    altitude: "ft" | "m" | "km" | "nmi";
+    altitude: "ft" | "fl" | "m" | "km" | "nmi";
     speed: "kn" | "mph" | "kmh" | "ms" | "mach";
     track: "deg" | "cardinal";
     verticalRate: "fpm" | "fts" | "ms" | "mph" | "kmh";
@@ -470,7 +470,7 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
 function normalizeFollowUnits(value: unknown): DeviceSettings["followUnits"] {
   const v = value && typeof value === "object" ? value as Partial<DeviceSettings["followUnits"]> : {};
   return {
-    altitude: oneOf(v.altitude, ["ft", "m", "km", "nmi"], "ft"),
+    altitude: oneOf(v.altitude, ["ft", "fl", "m", "km", "nmi"], "ft"),
     speed: oneOf(v.speed, ["kn", "mph", "kmh", "ms", "mach"], "kn"),
     track: oneOf(v.track, ["deg", "cardinal"], "deg"),
     verticalRate: oneOf(v.verticalRate, ["fpm", "fts", "ms", "mph", "kmh"], "fpm")
@@ -988,6 +988,7 @@ function formatFollowMetrics(f: DisplayFlight, units: DeviceSettings["followUnit
 
 function formatAltitude(value: number | undefined, unit: DeviceSettings["followUnits"]["altitude"]): string {
   if (value === undefined) return "";
+  if (unit === "fl") return `FL${Math.round(value / 100)}`;
   if (unit === "m") return `${Math.round(value * 0.3048)}m`;
   if (unit === "km") return `${round1(value * 0.0003048)}km`;
   if (unit === "nmi") return `${round1(value / 6076.12)}nmi`;
@@ -1792,6 +1793,7 @@ function renderIndexHtml(): string {
             <label for="altitudeUnit">Altitude</label>
             <select id="altitudeUnit">
               <option value="ft">ft</option>
+              <option value="fl">FL</option>
               <option value="m">m</option>
               <option value="km">km</option>
               <option value="nmi">nmi</option>
@@ -2575,6 +2577,7 @@ function renderIndexHtml(): string {
 
     function formatAltitudeForEmulator(value, unit) {
       if (value === null || value === undefined || value === "") return "";
+      if (unit === "fl") return "FL" + Math.round(value / 100);
       if (unit === "m") return Math.round(value * 0.3048) + "m";
       if (unit === "km") return roundOne(value * 0.0003048) + "km";
       if (unit === "nmi") return roundOne(value / 6076.12) + "nmi";
