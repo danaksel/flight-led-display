@@ -579,6 +579,10 @@ function parseAvinorApiFlights(json: AvinorApiResponse, direction: "A" | "D"): A
     const belt = leg.arrival?.belt?.belt || "";
     const beltStatus = leg.arrival?.belt?.status || "";
     const beltStatusDescription = leg.arrival?.belt?.statusDescription || "";
+    const flightStatusText = leg.flightStatus || "";
+    const isCanceled = statusCode === "C" || /kansell|cancel/i.test(flightStatusText);
+    const isDone = statusCode === "A" || statusCode === "D" || /avreist|landet|departed|arrived/i.test(flightStatusText);
+    const isNewTime = statusCode === "E" || leg.isDelayed || ownSide?.isDelayed || /ny .*tid|new .*time/i.test(flightStatusText);
     const bestTime = statusCode === "E" && statusTime ? statusTime : scheduledTime || "";
     const displayTime = statusCode === "E" && statusTimeLocal
       ? formatLocalTimeFromLocal(statusTimeLocal)
@@ -601,7 +605,7 @@ function parseAvinorApiFlights(json: AvinorApiResponse, direction: "A" | "D"): A
       belt,
       belt_status: beltStatus,
       belt_status_description: beltStatusDescription,
-      flight_status: leg.flightStatus || "",
+      flight_status: flightStatusText,
       delayed: leg.isDelayed || ownSide?.isDelayed ? "Y" : ""
     };
     const status: Record<string, string> | undefined = statusCode ? {
@@ -625,7 +629,7 @@ function parseAvinorApiFlights(json: AvinorApiResponse, direction: "A" | "D"): A
         displayTime,
         ...(gate ? { gate } : {}),
         ...(gateStatusDescription ? { gateMessage: gateStatusDescription } : {}),
-        status: statusCode === "C" ? "canceled" : statusCode === "E" || leg.isDelayed || ownSide?.isDelayed ? "newTime" : statusCode === "A" || statusCode === "D" ? "done" : "scheduled"
+        status: isCanceled ? "canceled" : isNewTime ? "newTime" : isDone ? "done" : "scheduled"
       }
     };
   });
