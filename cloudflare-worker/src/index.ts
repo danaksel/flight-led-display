@@ -714,7 +714,7 @@ function normalizeGateMessage(value: string): string | undefined {
   if (!raw) return undefined;
   const normalized = raw.toLowerCase().replace(/[^a-z0-9]+/g, "");
   if (["boarding", "board"].includes(normalized) || normalized.includes("boarding")) return "Boarding";
-  if (["gotogate", "togate", "go", "g"].includes(normalized) || normalized.includes("gotogate")) return "Go to gate";
+  if (["gotogate", "togate", "go", "g"].includes(normalized) || normalized.includes("gotogate")) return "To gate";
   if (["gateclosing", "closing", "close", "gc"].includes(normalized) || normalized.includes("closing")) return "Closing";
   if (["gateclosed", "closed", "cl"].includes(normalized) || normalized.includes("closed")) return "Closed";
   return undefined;
@@ -2636,13 +2636,12 @@ function renderIndexHtml(): string {
       const status = row && row.status ? row.status : "scheduled";
       const gateBlinkOn = Math.floor(performance.now() / 1200) % 2 === 0;
       const gateStatusText = kind === "departures" ? normalizeGateStatusForDisplay(row.gateMessage) : "";
-      const gateStatusBlinkOn = Math.floor(performance.now() / 1400) % 2 === 1;
       const gateText = kind === "departures" && row.gate ? row.gate : "";
       const airportText = kind === "departures" && gateText && !gateBlinkOn ? gateText : row.airport || "";
       const timeColor = status === "canceled" ? colors.canceled : status === "newTime" ? colors.newTime : colors.data;
       const rowColor = status === "canceled" ? colors.canceled : colors.data;
-      const timeText = gateStatusText && gateStatusBlinkOn ? gateStatusText : row.time || "";
-      const activeTimeColor = gateStatusText && gateStatusBlinkOn ? colors.data : timeColor;
+      const timeText = gateStatusText && !gateBlinkOn ? gateStatusText : row.time || "";
+      const activeTimeColor = gateStatusText && !gateBlinkOn ? colors.data : timeColor;
       drawDotText(ctx, row.flightId || "", x, y, rowColor, { maxWidth: 43 });
       drawDotText(ctx, airportText, x + 48, y, rowColor, { maxWidth: 24 });
       drawDotTextRight(ctx, timeText, 125, y, activeTimeColor, 60);
@@ -2655,7 +2654,7 @@ function renderIndexHtml(): string {
     function normalizeGateStatusForDisplay(value) {
       const raw = String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
       if (!raw) return "";
-      if (raw.includes("gotogate")) return "Go to gate";
+      if (raw.includes("gotogate")) return "To gate";
       if (raw.includes("boarding")) return "Boarding";
       if (raw.includes("closing")) return "Closing";
       if (raw.includes("closed")) return "Closed";
