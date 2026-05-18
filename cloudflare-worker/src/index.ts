@@ -3004,8 +3004,8 @@ function renderIndexHtml(): string {
       }
       ensureTickerAnimation();
       const title = screen.title || "AIRPORT";
-      drawAirportBoardIcon(ctx, screen.kind, 3, 3, colors.header);
-      drawDotText(ctx, title, 23, 3, colors.header, { maxWidth: 102 });
+      drawDotText(ctx, title, 3, 3, colors.header, { maxWidth: 86 });
+      drawLocalClock(ctx, 125, 3, colors.data);
       ctx.fillStyle = colors.header;
       ctx.fillRect(3, 14, 122, 1);
       const transition = getTimetableTransition(screen);
@@ -3082,36 +3082,19 @@ function renderIndexHtml(): string {
       return "";
     }
 
-    function drawAirportBoardIcon(ctx, kind, x, y, color) {
-      const pattern = kind === "arrivals"
-        ? [
-            "00000011000000000",
-            "00000011100000000",
-            "00000010110000000",
-            "00000010011000000",
-            "11111111111110000",
-            "00111111111111000",
-            "00000010011000000",
-            "00000011001100000",
-            "00000000000110000"
-          ]
-        : [
-            "00000000000110000",
-            "00000011001100000",
-            "00000010011000000",
-            "00111111111111000",
-            "11111111111110000",
-            "00000010011000000",
-            "00000010110000000",
-            "00000011100000000",
-            "00000011000000000"
-          ];
-      ctx.fillStyle = color;
-      for (let row = 0; row < pattern.length; row++) {
-        for (let col = 0; col < pattern[row].length; col++) {
-          if (pattern[row][col] === "1") ctx.fillRect(x + col, y + row, 1, 1);
-        }
-      }
+    function drawLocalClock(ctx, rightX, y, color) {
+      const now = new Date();
+      const parts = new Intl.DateTimeFormat("en-GB", {
+        timeZone: els.timezone.value || "Europe/Oslo",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false
+      }).formatToParts(now);
+      const hour = parts.find((part) => part.type === "hour")?.value || "00";
+      const minute = parts.find((part) => part.type === "minute")?.value || "00";
+      const second = Number(parts.find((part) => part.type === "second")?.value || "0");
+      drawDotTextRight(ctx, hour + (second % 2 === 0 ? ":" : " ") + minute, rightX, y, color, 32);
     }
 
     function getTimetableColors() {
