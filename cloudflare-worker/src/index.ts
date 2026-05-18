@@ -305,10 +305,12 @@ async function avinorBoardResponse(env: Env): Promise<Response> {
   const config = await getConfig(env);
   const airport = normalizeAirportCode(config.homeAirportIata, env.HOME_AIRPORT_IATA || "OSL");
   const timezone = config.device?.timezone || "Europe/Oslo";
-  const [departures, arrivals] = await Promise.all([
+  const [rawDepartures, rawArrivals] = await Promise.all([
     getAvinorRawFlights(env, airport, "D", timezone),
     getAvinorRawFlights(env, airport, "A", timezone)
   ]);
+  const departures = filterAvinorRawFlights(rawDepartures, "D", config);
+  const arrivals = filterAvinorRawFlights(rawArrivals, "A", config);
 
   return jsonResponse({
     updatedAt: new Date().toISOString(),
@@ -319,6 +321,25 @@ async function avinorBoardResponse(env: Env): Promise<Response> {
   }, 200, {
     "Cache-Control": "public, max-age=15"
   });
+}
+
+function filterAvinorRawFlights(flights: AvinorRawFlight[], direction: "A" | "D", config: Config): AvinorRawFlight[] {
+  const now = Date.now();
+  const windowHours = config.device?.avinorWindowHours || 4;
+  const limit = config.device?.timetableItemCount || 8;
+  const doneStatus = direction === "D" ? "D" : "A";
+  return flights
+    .filter((flight) => {
+      const bestTime = flight.status?.code === "E" && flight.status?.time ? flight.status.time : flight.fields.schedule_time;
+      const timestamp = Date.parse(bestTime || "");
+      if (!Number.isFinite(timestamp)) return false;
+      if (flight.status?.code === doneStatus || flight.resolved.status === "done") return false;
+      if (timestamp < now - 10 * 60 * 1000) return false;
+      if (timestamp > now + windowHours * 60 * 60 * 1000) return false;
+      return true;
+    })
+    .sort((a, b) => Date.parse(a.fields.schedule_time || "") - Date.parse(b.fields.schedule_time || ""))
+    .slice(0, limit);
 }
 
 async function logoAssetResponse(request: Request, env: Env): Promise<Response> {
