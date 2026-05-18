@@ -15,6 +15,7 @@ export interface Env {
   AVINOR_XML_BASE_URL?: string;
   AVINOR_AIRPORT_NAMES_BASE_URL?: string;
   AVINOR_AIRLINE_NAMES_BASE_URL?: string;
+  LOGO_BASE_URL?: string;
 }
 
 type Config = {
@@ -89,6 +90,24 @@ type AvinorFlight = {
   gateMessage?: string;
 };
 
+type AvinorRawFlight = {
+  direction: "A" | "D";
+  fields: Record<string, string>;
+  status?: Record<string, string>;
+  resolved: {
+    flightId: string;
+    airlineCode?: string;
+    airlineName?: string;
+    airportCode?: string;
+    airportName?: string;
+    scheduledTime?: string;
+    displayTime?: string;
+    gate?: string;
+    gateMessage?: string;
+    status: "scheduled" | "newTime" | "canceled" | "done";
+  };
+};
+
 type IdleRow = {
   flightId: string;
   airport: string;
@@ -138,12 +157,13 @@ export default {
 
     try {
       if (url.pathname === "/") return htmlResponse(renderIndexHtml());
-      if (url.pathname.startsWith("/logos/")) return env.ASSETS.fetch(request);
+      if (url.pathname.startsWith("/logos/")) return logoAssetResponse(request, env);
       if (url.pathname === "/api/config" && request.method === "GET") return jsonResponse(await getConfig(env), 200, { "Cache-Control": "no-store" });
       if (url.pathname === "/api/config" && request.method === "POST") return saveConfig(request, env);
       if (url.pathname === "/api/device-config" && request.method === "GET") return deviceConfigResponse(env);
       if (url.pathname === "/api/flights" && request.method === "GET") return flightsResponse(env, false);
       if (url.pathname === "/api/display" && request.method === "GET") return flightsResponse(env, true);
+      if (url.pathname === "/api/avinor-board" && request.method === "GET") return avinorBoardResponse(env);
       if (url.pathname === "/api/health") return jsonResponse({ ok: true });
 
       return jsonResponse({ error: "Not found" }, 404);
@@ -194,6 +214,51 @@ async function deviceConfigResponse(env: Env): Promise<Response> {
     device: config.device
   }, 200, {
     "Cache-Control": "no-store"
+  });
+}
+
+async function avinorBoardResponse(env: Env): Promise<Response> {
+  const config = await getConfig(env);
+  const airport = normalizeAirportCode(config.homeAirportIata, env.HOME_AIRPORT_IATA || "OSL");
+  const timezone = config.device?.timezone || "Europe/Oslo";
+  const [departures, arrivals] = await Promise.all([
+    getAvinorRawFlights(env, airport, "D", timezone),
+    getAvinorRawFlights(env, airport, "A", timezone)
+  ]);
+
+  return jsonResponse({
+    updatedAt: new Date().toISOString(),
+    airport,
+    timezone,
+    departures,
+    arrivals
+  }, 200, {
+    "Cache-Control": "public, max-age=15"
+  });
+}
+
+async function logoAssetResponse(request: Request, env: Env): Promise<Response> {
+  const assetResponse = await env.ASSETS.fetch(request);
+  if (assetResponse.status !== 404 || !env.LOGO_BASE_URL) return assetResponse;
+
+  const url = new URL(request.url);
+  const filename = url.pathname.split("/").pop() || "";
+  if (!/^[A-Za-z0-9_-]+\.png$/.test(filename)) return assetResponse;
+
+  const logoUrl = new URL(env.LOGO_BASE_URL.replace(/\/+$/, "") + "/" + filename);
+  const response = await fetch(logoUrl.toString(), {
+    headers: {
+      Accept: "image/png,image/*"
+    }
+  });
+  if (!response.ok) return assetResponse;
+
+  return new Response(response.body, {
+    status: 200,
+    headers: {
+      "Content-Type": response.headers.get("Content-Type") || "image/png",
+      "Cache-Control": "public, max-age=86400"
+    }
   });
 }
 
@@ -310,6 +375,41 @@ async function getAvinorFlights(env: Env, airport: string, direction: "A" | "D",
   const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
   if (Array.isArray(cached)) return cached as AvinorFlight[];
 
+  const rawFlights = await getAvinorRawFlights(env, airport, direction, timezone);
+  const doneStatus = direction === "D" ? "D" : "A";
+  const now = Date.now();
+  const flights = rawFlights
+    .map((raw): AvinorFlight | null => {
+      const flightId = raw.resolved.flightId;
+      const airportName = raw.resolved.airportName || raw.resolved.airportCode || "";
+      const bestTime = raw.status?.code === "E" && raw.status?.time ? raw.status.time : raw.fields.schedule_time;
+      const timestamp = Date.parse(bestTime || "");
+      if (!flightId || !airportName || !Number.isFinite(timestamp)) return null;
+      if (raw.status?.code === doneStatus) return null;
+      if (timestamp < now - 10 * 60 * 1000) return null;
+      return {
+        flightId,
+        airport: airportName,
+        time: formatLocalTime(bestTime || raw.fields.schedule_time || "", timezone),
+        sortTime: timestamp,
+        status: raw.resolved.status === "canceled" ? "canceled" : raw.resolved.status === "newTime" ? "newTime" : "scheduled",
+        ...(raw.resolved.gate ? { gate: raw.resolved.gate } : {}),
+        ...(raw.resolved.gateMessage ? { gateMessage: raw.resolved.gateMessage } : {})
+      };
+    })
+    .filter((flight): flight is AvinorFlight => Boolean(flight))
+    .sort((a, b) => a.sortTime - b.sortTime)
+    .slice(0, 8);
+
+  await env.FLIGHT_DISPLAY_KV.put(cacheKey, JSON.stringify(flights), { expirationTtl: 180 });
+  return flights;
+}
+
+async function getAvinorRawFlights(env: Env, airport: string, direction: "A" | "D", timezone: string): Promise<AvinorRawFlight[]> {
+  const cacheKey = `avinor:raw:v1:${airport}:${direction}`;
+  const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
+  if (Array.isArray(cached)) return cached as AvinorRawFlight[];
+
   const baseUrl = env.AVINOR_XML_BASE_URL || "https://asrv.avinor.no/XmlFeed/v1.0";
   const url = new URL(baseUrl);
   url.searchParams.set("airport", airport);
@@ -325,8 +425,7 @@ async function getAvinorFlights(env: Env, airport: string, direction: "A" | "D",
   if (!response.ok) return [];
 
   const xml = await responseText(response);
-  const flights = parseAvinorFlights(xml, direction, timezone);
-  await enrichAvinorAirportNames(env, flights);
+  const flights = await parseAvinorRawFlights(env, xml, direction, timezone);
   await env.FLIGHT_DISPLAY_KV.put(cacheKey, JSON.stringify(flights), { expirationTtl: 180 });
   return flights;
 }
@@ -364,6 +463,79 @@ function parseAvinorFlights(xml: string, direction: "A" | "D", timezone: string)
     .filter((flight): flight is AvinorFlight => Boolean(flight))
     .sort((a, b) => a.sortTime - b.sortTime)
     .slice(0, 8);
+}
+
+async function parseAvinorRawFlights(env: Env, xml: string, direction: "A" | "D", timezone: string): Promise<AvinorRawFlight[]> {
+  const blocks = Array.from(xml.matchAll(/<flight\b[^>]*>([\s\S]*?)<\/flight>/g)).map((match) => match[1]);
+  const rows = blocks.map((block): AvinorRawFlight => {
+    const fields = xmlFields(block);
+    const statusMatch = block.match(/<status\b([^>]*)\/>/);
+    const status = statusMatch ? xmlAttributes(statusMatch[1]) : undefined;
+    const flightId = fields.flight_id || "";
+    const airlineCode = (fields.airline || airlineIataFromFlightNumber(flightId) || "").toUpperCase();
+    const airportCode = (fields.airport || "").toUpperCase();
+    const bestTime = status?.code === "E" && status?.time ? status.time : fields.schedule_time;
+    const gateMessage = direction === "D" ? extractGateMessage(block, status?.text || status?.status || "") : undefined;
+    const statusCode = status?.code || "";
+
+    return {
+      direction,
+      fields,
+      ...(status ? { status } : {}),
+      resolved: {
+        flightId,
+        ...(airlineCode ? { airlineCode } : {}),
+        ...(airportCode ? { airportCode } : {}),
+        scheduledTime: fields.schedule_time || "",
+        displayTime: formatLocalTime(bestTime || fields.schedule_time || "", timezone),
+        ...(fields.gate ? { gate: fields.gate } : {}),
+        ...(gateMessage ? { gateMessage } : {}),
+        status: statusCode === "C" ? "canceled" : statusCode === "E" || fields.delayed === "Y" ? "newTime" : statusCode === "A" || statusCode === "D" ? "done" : "scheduled"
+      }
+    };
+  });
+
+  const airportCodes = Array.from(new Set(rows.map((row) => row.resolved.airportCode).filter((code): code is string => Boolean(code))));
+  const airlineCodes = Array.from(new Set(rows.map((row) => row.resolved.airlineCode).filter((code): code is string => Boolean(code))));
+  const [airportNames, airlineNames] = await Promise.all([
+    Promise.all(airportCodes.map((code) => getAvinorAirportName(env, code))),
+    Promise.all(airlineCodes.map((code) => getAvinorAirlineName(env, code)))
+  ]);
+  const airportNameByCode = new Map<string, string>();
+  const airlineNameByCode = new Map<string, string>();
+  airportCodes.forEach((code, index) => {
+    if (airportNames[index]) airportNameByCode.set(code, airportNames[index]);
+  });
+  airlineCodes.forEach((code, index) => {
+    if (airlineNames[index]) airlineNameByCode.set(code, airlineNames[index]);
+  });
+
+  for (const row of rows) {
+    const airportName = row.resolved.airportCode ? airportNameByCode.get(row.resolved.airportCode) : undefined;
+    const airlineName = row.resolved.airlineCode ? airlineNameByCode.get(row.resolved.airlineCode) : undefined;
+    if (airportName) row.resolved.airportName = airportName;
+    if (airlineName) row.resolved.airlineName = airlineName;
+  }
+
+  return rows;
+}
+
+function xmlFields(xml: string): Record<string, string> {
+  const fields: Record<string, string> = {};
+  for (const match of xml.matchAll(/<([a-zA-Z0-9_:-]+)>([\s\S]*?)<\/\1>/g)) {
+    const key = match[1];
+    if (key === "status") continue;
+    fields[key] = decodeXml(match[2].trim());
+  }
+  return fields;
+}
+
+function xmlAttributes(attributes: string): Record<string, string> {
+  const values: Record<string, string> = {};
+  for (const match of attributes.matchAll(/([a-zA-Z0-9_:-]+)="([^"]*)"/g)) {
+    values[match[1]] = decodeXml(match[2].trim());
+  }
+  return values;
 }
 
 function extractGateMessage(xml: string, statusText: string): string | undefined {
@@ -484,44 +656,8 @@ async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
 
 function logoUrlFor(airlineCode: string | undefined): string {
   const code = normalizeLogoCode(airlineCode);
-  return code && KNOWN_LOGO_CODES.has(code) ? `/logos/${code}.png` : "/logos/UNKNOWN.png";
+  return code ? `/logos/${code}.png` : "/logos/UNKNOWN.png";
 }
-
-const KNOWN_LOGO_CODES = new Set([
-  "AFR",
-  "AUA",
-  "BAW",
-  "BEL",
-  "BTI",
-  "CHH",
-  "DLH",
-  "DOC",
-  "DTR",
-  "ETH",
-  "EWG",
-  "EZY",
-  "IBE",
-  "ICE",
-  "KLM",
-  "LOG",
-  "LOT",
-  "NOZ",
-  "PGT",
-  "QTR",
-  "RYR",
-  "SAS",
-  "SWR",
-  "TAP",
-  "THA",
-  "THY",
-  "TRA",
-  "UAE",
-  "VKG",
-  "VLG",
-  "VOE",
-  "WIF",
-  "WZZ"
-]);
 
 function displayLogoCodeFor(flight: DisplayFlight): string {
   const docCode = logoCodeFromCallsign(flight.callsign) || logoCodeFromCallsign(flight.flight) || logoCodeFromCallsign(flight.airline) || logoCodeFromCallsign(flight.airlineCode);
@@ -986,6 +1122,15 @@ function renderIndexHtml(): string {
     .flight strong { display: block; font-size: 15px; }
     .flight span { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; line-height: 1.35; }
     .empty { color: var(--muted); font-size: 13px; line-height: 1.4; }
+    .raw-board { margin-top: 10px; border-top: 1px solid #263345; padding-top: 10px; }
+    .raw-board h3 { margin: 12px 0 8px; color: var(--amber2); font-size: 12px; letter-spacing: .1em; text-transform: uppercase; }
+    .raw-card { margin-top: 8px; border: 1px solid #2e3a4c; border-radius: 6px; background: #070d13; overflow: hidden; }
+    .raw-card summary { cursor: pointer; padding: 9px 10px; color: #f4f7ff; font-weight: 800; }
+    .raw-card summary span { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; font-weight: 600; }
+    .field-grid { display: grid; grid-template-columns: 138px minmax(0, 1fr); gap: 1px; padding: 0 10px 10px; font-size: 11px; }
+    .field-grid dt, .field-grid dd { margin: 0; padding: 5px 6px; background: #0b1118; min-width: 0; overflow-wrap: anywhere; }
+    .field-grid dt { color: var(--amber2); font-weight: 800; }
+    .field-grid dd { color: #dce4ee; }
     .workbench { display: grid; grid-template-rows: minmax(330px, 42vh) auto; min-height: 100vh; align-self: stretch; }
     .emulator { padding: 18px 22px 22px; background: #0c121a; color: #e8edf4; border-top: 1px solid #263242; }
     .emulator h2 { margin: 0 0 6px; font-size: 18px; }
@@ -1164,6 +1309,7 @@ function renderIndexHtml(): string {
         <a href="/api/device-config" target="_blank">/api/device-config</a>
         <a href="/api/flights" target="_blank">/api/flights</a>
         <a href="/api/display" target="_blank">/api/display</a>
+        <a href="/api/avinor-board" target="_blank">/api/avinor-board</a>
       </div>
       <section class="preview card" aria-label="Display preview">
         <div class="preview-head">
@@ -1172,6 +1318,7 @@ function renderIndexHtml(): string {
         </div>
         <div id="previewMeta" class="meta"></div>
         <div id="flightList" class="flight-list"></div>
+        <div id="avinorRaw" class="raw-board"></div>
       </section>
     </aside>
     <div class="workbench">
@@ -1237,6 +1384,7 @@ function renderIndexHtml(): string {
       refresh: document.querySelector("#refresh"),
       previewMeta: document.querySelector("#previewMeta"),
       flightList: document.querySelector("#flightList"),
+      avinorRaw: document.querySelector("#avinorRaw"),
       emuSource: document.querySelector("#emuSource"),
       imageUpload: document.querySelector("#imageUpload"),
       ledCanvas: document.querySelector("#ledCanvas"),
@@ -1449,10 +1597,18 @@ function renderIndexHtml(): string {
     async function loadPreview() {
       els.previewMeta.textContent = "Henter...";
       els.flightList.innerHTML = "";
+      els.avinorRaw.innerHTML = "";
       try {
-        const res = await fetch("/api/display?ts=" + Date.now());
+        const [res, avinorRes] = await Promise.all([
+          fetch("/api/display?ts=" + Date.now()),
+          fetch("/api/avinor-board?ts=" + Date.now())
+        ]);
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Kunne ikke hente display-data");
+        const avinorData = await avinorRes.json();
+        if (avinorRes.ok) {
+          renderAvinorRaw(avinorData);
+        }
         const flights = Array.isArray(data.flights) ? data.flights : [];
         idleScreens = Array.isArray(data.idleScreens) ? data.idleScreens : [];
         displayFlights = flights;
@@ -1482,8 +1638,8 @@ function renderIndexHtml(): string {
             [flight.ctxLabel, flight.ctxValue].filter(Boolean).join(" "),
             flight.alt ? flight.alt + " ft" : ""
           ].filter(Boolean).join(" · ");
-          const logo = flight.logoUrl
-            ? '<img class="flight-logo" src="' + escapeHtml(flight.logoUrl) + '" alt="">'
+        const logo = flight.logoUrl
+            ? '<img class="flight-logo" src="' + escapeHtml(flight.logoUrl) + '" alt="" onerror="this.onerror=null;this.src=\\'/logos/UNKNOWN.png\\'">'
             : '<div class="flight-logo missing"></div>';
           return '<article class="flight"><div class="flight-row">' + logo + '<div><strong>' + title + '</strong><span>' + escapeHtml(line) + '</span></div></div></article>';
         }).join("");
@@ -1491,6 +1647,58 @@ function renderIndexHtml(): string {
         els.previewMeta.textContent = "";
         els.flightList.innerHTML = '<div class="empty error">' + escapeHtml(error.message || "Ukjent feil") + '</div>';
       }
+    }
+
+    function renderAvinorRaw(data) {
+      const departures = Array.isArray(data.departures) ? data.departures : [];
+      const arrivals = Array.isArray(data.arrivals) ? data.arrivals : [];
+      const parts = [
+        renderRawGroup("Avinor departures raw", departures),
+        renderRawGroup("Avinor arrivals raw", arrivals)
+      ].filter(Boolean);
+      els.avinorRaw.innerHTML = parts.join("");
+    }
+
+    function renderRawGroup(title, rows) {
+      if (!rows.length) return "";
+      return '<h3>' + escapeHtml(title) + '</h3>' + rows.slice(0, 8).map(renderRawFlight).join("");
+    }
+
+    function renderRawFlight(row, index) {
+      const resolved = row && row.resolved ? row.resolved : {};
+      const fields = row && row.fields ? row.fields : {};
+      const status = row && row.status ? row.status : {};
+      const title = [
+        resolved.flightId || fields.flight_id || "Flight " + (index + 1),
+        resolved.airportName || fields.airport,
+        resolved.displayTime || fields.schedule_time
+      ].filter(Boolean).join(" · ");
+      const subtitle = [
+        resolved.airlineName || resolved.airlineCode,
+        resolved.status,
+        resolved.gate ? "Gate " + resolved.gate : "",
+        resolved.gateMessage || ""
+      ].filter(Boolean).join(" · ");
+      const values = {
+        direction: row.direction || "",
+        ...prefixObject("resolved.", resolved),
+        ...prefixObject("status.", status),
+        ...prefixObject("xml.", fields)
+      };
+      const fieldsHtml = Object.entries(values)
+        .filter((entry) => entry[1] !== undefined && entry[1] !== null && entry[1] !== "")
+        .map(([key, value]) => '<dt>' + escapeHtml(key) + '</dt><dd>' + escapeHtml(value) + '</dd>')
+        .join("");
+      return '<details class="raw-card"><summary>' + escapeHtml(title) + '<span>' + escapeHtml(subtitle || "Raw Avinor fields") + '</span></summary><dl class="field-grid">' + fieldsHtml + '</dl></details>';
+    }
+
+    function prefixObject(prefix, value) {
+      const output = {};
+      if (!value || typeof value !== "object") return output;
+      Object.entries(value).forEach(([key, val]) => {
+        output[prefix + key] = val;
+      });
+      return output;
     }
 
     function formatIdleRow(row) {
@@ -1822,7 +2030,20 @@ function renderIndexHtml(): string {
         if (els.emuSource.value === "live") renderEmulator();
       };
       image.onerror = () => {
-        logoCache.set(flight.logoUrl, null);
+        if (image.src.endsWith("/logos/UNKNOWN.png")) {
+          logoCache.set(flight.logoUrl, null);
+          if (els.emuSource.value === "live") renderEmulator();
+          return;
+        }
+        image.src = "/logos/UNKNOWN.png";
+        image.onload = () => {
+          logoCache.set(flight.logoUrl, image);
+          if (els.emuSource.value === "live") renderEmulator();
+        };
+        image.onerror = () => {
+          logoCache.set(flight.logoUrl, null);
+          if (els.emuSource.value === "live") renderEmulator();
+        };
       };
       image.src = flight.logoUrl;
     }
