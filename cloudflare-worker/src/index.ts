@@ -1925,7 +1925,7 @@ function normalizeDisplayText(value: string): string {
 
 function renderIndexHtml(): string {
   return `<!doctype html>
-<html lang="en">
+<html lang="no">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1941,8 +1941,15 @@ function renderIndexHtml(): string {
     h1 { margin: 0; font-size: 25px; line-height: 1.05; letter-spacing: .02em; }
     p { margin: 7px 0 0; color: var(--muted); line-height: 1.45; font-size: 13px; }
     .card { margin-top: 12px; padding: 13px; border: 1px solid var(--line); border-radius: 6px; background: rgba(16,23,32,.88); box-shadow: 0 14px 36px rgba(0,0,0,.22); }
-    .card h2 { margin: 0 0 12px; color: var(--amber2); font-size: 13px; letter-spacing: .12em; text-transform: uppercase; }
+    .card h2 { margin: 0; color: var(--amber2); font-size: 13px; letter-spacing: .12em; text-transform: uppercase; }
+    .section-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 0 12px; }
+    .section-note { margin: -4px 0 10px; color: var(--muted); font-size: 12px; line-height: 1.4; }
+    .hint { position: relative; display: inline-grid; place-items: center; flex: 0 0 auto; width: 19px; height: 19px; border: 1px solid #405066; border-radius: 50%; color: #f8fafc; background: #182232; font-size: 12px; font-weight: 900; cursor: help; }
+    .hint::after { content: attr(data-tip); position: absolute; right: 0; top: 25px; z-index: 20; width: min(280px, 74vw); padding: 9px 10px; border: 1px solid #405066; border-radius: 6px; background: #05080d; color: #edf2f8; box-shadow: 0 10px 30px rgba(0,0,0,.35); font-size: 12px; font-weight: 650; line-height: 1.35; letter-spacing: 0; text-transform: none; opacity: 0; pointer-events: none; transform: translateY(-4px); transition: opacity .12s ease, transform .12s ease; }
+    .hint:hover::after, .hint:focus::after { opacity: 1; transform: translateY(0); }
+    .subhead { margin: 14px 0 8px; color: #f4f7ff; font-size: 12px; font-weight: 850; letter-spacing: .06em; text-transform: uppercase; }
     label { display: block; margin: 11px 0 5px; color: #d7deea; font-weight: 700; font-size: 12px; }
+    .field-help { margin: 4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.35; }
     input, select { width: 100%; box-sizing: border-box; border: 1px solid #334154; border-radius: 5px; padding: 9px 10px; font: inherit; background: var(--field); color: var(--ink); }
     input[type="checkbox"] { width: auto; }
     input:focus, select:focus { outline: 2px solid rgba(246,184,0,.35); border-color: var(--amber); }
@@ -1962,6 +1969,9 @@ function renderIndexHtml(): string {
     .error { color: var(--danger); }
     .links { margin-top: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 12px; }
     .links a { padding: 7px 8px; background: #0b1118; border: 1px solid #263345; border-radius: 5px; }
+    details.links-wrap { margin-top: 12px; border: 1px solid #263345; border-radius: 6px; background: #0b1118; }
+    details.links-wrap summary { cursor: pointer; padding: 9px 10px; color: var(--muted); font-size: 12px; font-weight: 800; }
+    details.links-wrap .links { margin: 0; padding: 0 10px 10px; }
     .preview { margin-top: 16px; }
     .preview-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
     .preview-head h2 { margin: 0; font-size: 13px; }
@@ -2017,97 +2027,113 @@ function renderIndexHtml(): string {
   <main class="shell">
     <aside>
       <header class="brand">
-        <div class="eyebrow">OSL local display control</div>
+        <div class="eyebrow">Display control</div>
         <h1>Flight Display</h1>
-        <p>Styr posisjon, skjermatferd, farger og preview fra Worker. Live-data hentes bare når du ber om det.</p>
+        <p>Velg område, lysstyrke og hvordan skjermen skal oppføre seg. Live-data hentes bare når du trykker på en hent-knapp eller starter display-test.</p>
       </header>
       <section class="card">
-        <h2>Område</h2>
-        <label for="label">Navn</label>
+        <div class="section-head">
+          <h2>Sted og flyplass</h2>
+          <span class="hint" tabindex="0" data-tip="Dette bestemmer hvor skjermen leter etter fly, og hvilken flyplass som brukes til avgangs- og ankomsttavlen.">i</span>
+        </div>
+        <p class="section-note">Sett nålen på kartet, velg radius rundt hjemmet ditt og hvilken flyplass tidstabellen skal vise.</p>
+        <label for="label">Navn på stedet</label>
         <input id="label" autocomplete="off" placeholder="Home">
         <div class="row">
           <div>
-            <label for="lat">Latitude</label>
+            <label for="homeAirport">Flyplass for tavle</label>
+            <input id="homeAirport" maxlength="4" placeholder="OSL">
+            <div class="field-help">Bruk IATA-kode, for eksempel OSL.</div>
+          </div>
+          <div>
+            <label for="timezone">Lokal tid</label>
+            <input id="timezone" placeholder="Europe/Oslo">
+            <div class="field-help">Brukes til klokke, nattmodus og rutetider.</div>
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label for="lat">Breddegrad</label>
             <input id="lat" inputmode="decimal">
           </div>
           <div>
-            <label for="lon">Longitude</label>
+            <label for="lon">Lengdegrad</label>
             <input id="lon" inputmode="decimal">
           </div>
         </div>
         <div class="row">
           <div>
-            <label for="radius">Radius km</label>
+            <label for="radius">Søkeområde i km</label>
             <input id="radius" type="number" min="1" max="250" step="1">
-          </div>
-          <div>
-            <label for="homeAirport">Home airport</label>
-            <input id="homeAirport" maxlength="4" placeholder="OSL">
           </div>
         </div>
         <button id="locate" class="secondary">Bruk min posisjon</button>
       </section>
       <section class="card">
-        <h2>Skjermstyring</h2>
+        <div class="section-head">
+          <h2>Skjerm</h2>
+          <span class="hint" tabindex="0" data-tip="Dette styrer selve panelet: om det er på, hvor sterkt det lyser, hvor ofte skjermen henter data, og når nattmodus stopper betalte FR24-kall.">i</span>
+        </div>
+        <p class="section-note">Nattmodus med 0% natt-lysstyrke stopper henting fra FR24, slik at displayet ikke bruker credits mens ingen ser på.</p>
         <div class="toggle-row">
-          <label for="deviceEnabled">Display aktiv</label>
+          <label for="deviceEnabled">Skjermen er på</label>
           <input id="deviceEnabled" type="checkbox">
         </div>
         <div class="row">
           <div>
-            <label for="deviceBrightness">Brightness %</label>
+            <label for="deviceBrightness">Lysstyrke</label>
             <input id="deviceBrightness" type="number" min="1" max="100" step="1">
           </div>
           <div>
-            <label for="nightBrightness">Natt-brightness %</label>
-            <input id="nightBrightness" type="number" min="0" max="100" step="1">
-          </div>
-        </div>
-        <div class="row">
-          <div>
-            <label for="pollSeconds">Poll sek</label>
+            <label for="pollSeconds">Hent nye flydata hvert</label>
             <input id="pollSeconds" type="number" min="30" max="900" step="5">
-          </div>
-          <div>
-            <label for="configRefreshSeconds">Config sek</label>
-            <input id="configRefreshSeconds" type="number" min="60" max="3600" step="30">
+            <div class="field-help">Sekunder mellom hver henting når skjermen er aktiv.</div>
           </div>
         </div>
         <div class="row">
           <div>
-            <label for="timezone">Timezone</label>
-            <input id="timezone" placeholder="Europe/Oslo">
+            <label for="configRefreshSeconds">Sjekk innstillinger hvert</label>
+            <input id="configRefreshSeconds" type="number" min="60" max="3600" step="30">
+            <div class="field-help">Hvor ofte skjermen spør Worker om nye innstillinger.</div>
+          </div>
+          <div>
+            <label for="nightBrightness">Lysstyrke om natten</label>
+            <input id="nightBrightness" type="number" min="0" max="100" step="1">
+            <div class="field-help">Sett 0 for å stoppe visning og FR24-henting om natten.</div>
           </div>
         </div>
         <div class="toggle-row">
-          <label for="nightEnabled">Nattmodus</label>
+          <label for="nightEnabled">Bruk nattmodus</label>
           <input id="nightEnabled" type="checkbox">
         </div>
         <div class="row">
           <div>
-            <label for="nightStart">Natt start</label>
+            <label for="nightStart">Natt starter</label>
             <input id="nightStart" type="time">
           </div>
           <div>
-            <label for="nightEnd">Natt slutt</label>
+            <label for="nightEnd">Natt slutter</label>
             <input id="nightEnd" type="time">
           </div>
         </div>
-        <h2 style="margin-top:16px">Fly</h2>
+      </section>
+      <section class="card">
+        <div class="section-head">
+          <h2>Fly</h2>
+          <span class="hint" tabindex="0" data-tip="Dette gjelder skjermen som viser fly i nærheten eller et flightnummer du følger. Follow-visningen bytter automatisk mellom live tall og Flying over.">i</span>
+        </div>
+        <p class="section-note">Når du følger et flightnummer, viser skjermen status før avgang, live-målinger i 10 sekunder, Flying over i 5 sekunder, og Landed når flyet har landet.</p>
         <div class="toggle-row">
           <label for="followEnabled">Følg flightnummer</label>
           <input id="followEnabled" type="checkbox">
         </div>
-        <label for="followFlights">Flightnummer / callsign</label>
+        <label for="followFlights">Flightnummer</label>
         <input id="followFlights" autocomplete="off" placeholder="SK4673, DY1304, DOC45">
-        <label for="followDetailMode">Follow-visning</label>
-        <select id="followDetailMode">
-          <option value="metrics">Metrics</option>
-          <option value="location">Flying over</option>
-        </select>
+        <div class="field-help">La stå av for å vise fly i området. Skru på for å følge bestemte fly.</div>
+        <div class="subhead">Live-målinger</div>
         <div class="row">
           <div>
-            <label for="altitudeUnit">Altitude</label>
+            <label for="altitudeUnit">Høyde vises som</label>
             <select id="altitudeUnit">
               <option value="ft">ft</option>
               <option value="fl">FL</option>
@@ -2117,7 +2143,7 @@ function renderIndexHtml(): string {
             </select>
           </div>
           <div>
-            <label for="speedUnit">Speed</label>
+            <label for="speedUnit">Fart vises som</label>
             <select id="speedUnit">
               <option value="kn">kn</option>
               <option value="mph">mph</option>
@@ -2129,14 +2155,14 @@ function renderIndexHtml(): string {
         </div>
         <div class="row">
           <div>
-            <label for="trackUnit">Direction</label>
+            <label for="trackUnit">Retning vises som</label>
             <select id="trackUnit">
               <option value="deg">degrees</option>
               <option value="cardinal">cardinal</option>
             </select>
           </div>
           <div>
-            <label for="verticalRateUnit">Vertical rate</label>
+            <label for="verticalRateUnit">Stigning/synk vises som</label>
             <select id="verticalRateUnit">
               <option value="fpm">fpm</option>
               <option value="fts">ft/s</option>
@@ -2146,16 +2172,20 @@ function renderIndexHtml(): string {
             </select>
           </div>
         </div>
+        <div class="subhead">Oppførsel</div>
         <div class="row">
           <div>
-            <label for="cycleSeconds">Flight sek</label>
+            <label for="cycleSeconds">Bytt fly etter sekunder</label>
             <input id="cycleSeconds" type="number" min="2" max="30" step="1">
+            <div class="field-help">Gjelder når flere fly vises samtidig.</div>
           </div>
           <div>
-            <label for="scrollSpeed">Scroll px/s</label>
+            <label for="scrollSpeed">Scrollhastighet</label>
             <input id="scrollSpeed" type="number" min="2" max="30" step="1">
+            <div class="field-help">Hvor fort lang tekst beveger seg.</div>
           </div>
         </div>
+        <div class="subhead">Farger for flyvisning</div>
         <div class="color-grid">
           <div>
             <label for="airlineColor">Flyselskap</label>
@@ -2174,46 +2204,54 @@ function renderIndexHtml(): string {
             <input id="contextColor" type="color">
           </div>
           <div>
-            <label for="progressColor">Progress</label>
+            <label for="progressColor">Bytte-linje</label>
             <input id="progressColor" type="color">
           </div>
         </div>
-        <h2 style="margin-top:16px">Tidstabell</h2>
+      </section>
+      <section class="card">
+        <div class="section-head">
+          <h2>Tidstabell</h2>
+          <span class="hint" tabindex="0" data-tip="Dette gjelder skjermen som vises når det ikke er fly i området. Data kommer fra Avinor og bruker ikke FR24-credits.">i</span>
+        </div>
+        <p class="section-note">Viser avganger og ankomster fra valgt flyplass. Tavlen ruller automatisk hvis det er mer enn fire rader.</p>
         <div class="row">
           <div>
-            <label for="timetableCycleSeconds">Tavle sek</label>
+            <label for="timetableCycleSeconds">Hold hver tavleside i sekunder</label>
             <input id="timetableCycleSeconds" type="number" min="2" max="60" step="1">
           </div>
           <div>
-            <label for="timetableScrollSpeed">Tavle scroll px/s</label>
+            <label for="timetableScrollSpeed">Rullehastighet</label>
             <input id="timetableScrollSpeed" type="number" min="4" max="40" step="1">
           </div>
         </div>
         <div class="row">
           <div>
-            <label for="timetableItemCount">Antall rader</label>
+            <label for="timetableItemCount">Antall fly på tavlen</label>
             <input id="timetableItemCount" type="number" min="4" max="40" step="4">
+            <div class="field-help">Skjermen viser fire rader om gangen.</div>
           </div>
           <div>
-            <label for="avinorWindowHours">Avinor timer frem</label>
+            <label for="avinorWindowHours">Se så mange timer frem</label>
             <input id="avinorWindowHours" type="number" min="1" max="24" step="1">
           </div>
         </div>
+        <div class="subhead">Farger for tidstabell</div>
         <div class="color-grid">
           <div>
             <label for="timetableHeaderColor">Overskrift</label>
             <input id="timetableHeaderColor" type="color">
           </div>
           <div>
-            <label for="timetableDataColor">Data</label>
+            <label for="timetableDataColor">Vanlig tekst</label>
             <input id="timetableDataColor" type="color">
           </div>
           <div>
-            <label for="timetableNewTimeColor">New time</label>
+            <label for="timetableNewTimeColor">Ny tid</label>
             <input id="timetableNewTimeColor" type="color">
           </div>
           <div>
-            <label for="timetableCanceledColor">Canceled</label>
+            <label for="timetableCanceledColor">Kansellert</label>
             <input id="timetableCanceledColor" type="color">
           </div>
         </div>
@@ -2222,13 +2260,16 @@ function renderIndexHtml(): string {
         <button id="save">Lagre alle innstillinger</button>
         <div id="status" class="status"></div>
       </div>
-      <div class="links">
-        <a href="/api/config" target="_blank">/api/config</a>
-        <a href="/api/device-config" target="_blank">/api/device-config</a>
-        <a href="/api/flights" target="_blank">/api/flights</a>
-        <a href="/api/display" target="_blank">/api/display</a>
-        <a href="/api/avinor-board" target="_blank">/api/avinor-board</a>
-      </div>
+      <details class="links-wrap">
+        <summary>Avansert: API-lenker</summary>
+        <div class="links">
+          <a href="/api/config" target="_blank">Config</a>
+          <a href="/api/device-config" target="_blank">Device config</a>
+          <a href="/api/flights" target="_blank">Flights</a>
+          <a href="/api/display" target="_blank">Display</a>
+          <a href="/api/avinor-board" target="_blank">Avinor board</a>
+        </div>
+      </details>
       <section class="preview card" aria-label="Display preview">
         <div class="preview-head">
           <h2>Display-data</h2>
@@ -2246,10 +2287,10 @@ function renderIndexHtml(): string {
       <section id="map" aria-label="Map"></section>
       <section class="emulator" aria-label="LED matrix emulator">
         <h2>128 x 64 emulator</h2>
-        <p>Forhåndsvis nøyaktig 128 x 64 LED-layout. Brightness, farger, rotasjon og scroll styres fra innstillingene til venstre.</p>
+        <p>Forhåndsvis nøyaktig 128 x 64 LED-layout. Lysstyrke, farger, rotasjon og scroll styres fra innstillingene til venstre.</p>
         <div class="emu-controls">
           <div>
-            <label for="emuSource">Source</label>
+            <label for="emuSource">Preview-kilde</label>
             <select id="emuSource">
               <option value="live">Live data</option>
               <option value="upload">Logo test</option>
@@ -2261,7 +2302,7 @@ function renderIndexHtml(): string {
           </div>
           <div>
             <label for="emuPolling">Display-test</label>
-            <button id="emuPolling" type="button">Start polling</button>
+            <button id="emuPolling" type="button">Start test</button>
           </div>
         </div>
         <div class="emu-stage">
@@ -2283,7 +2324,6 @@ function renderIndexHtml(): string {
       homeAirport: document.querySelector("#homeAirport"),
       followEnabled: document.querySelector("#followEnabled"),
       followFlights: document.querySelector("#followFlights"),
-      followDetailMode: document.querySelector("#followDetailMode"),
       altitudeUnit: document.querySelector("#altitudeUnit"),
       speedUnit: document.querySelector("#speedUnit"),
       trackUnit: document.querySelector("#trackUnit"),
@@ -2398,7 +2438,6 @@ function renderIndexHtml(): string {
       els.followEnabled.checked = follow.enabled === true;
       els.followFlights.value = Array.isArray(follow.flights) ? follow.flights.join(", ") : "";
       const followUnits = device.followUnits || {};
-      els.followDetailMode.value = device.followDetailMode || "metrics";
       els.altitudeUnit.value = followUnits.altitude || "ft";
       els.speedUnit.value = followUnits.speed || "kn";
       els.trackUnit.value = followUnits.track || "deg";
@@ -2458,7 +2497,7 @@ function renderIndexHtml(): string {
           scrollPixelsPerSecond: Number(els.scrollSpeed.value),
           configRefreshSeconds: Number(els.configRefreshSeconds.value),
           timezone: els.timezone.value.trim(),
-          followDetailMode: els.followDetailMode.value,
+          followDetailMode: "metrics",
           followUnits: {
             altitude: els.altitudeUnit.value,
             speed: els.speedUnit.value,
@@ -2575,7 +2614,7 @@ function renderIndexHtml(): string {
         emulatorPollTimer = null;
       }
       els.emuPolling.classList.toggle("active", enabled);
-      els.emuPolling.textContent = enabled ? "Stopp polling" : "Start polling";
+      els.emuPolling.textContent = enabled ? "Stopp test" : "Start test";
       if (enabled) {
         els.emuSource.value = "live";
         runEmulatorPoll();
@@ -2591,7 +2630,7 @@ function renderIndexHtml(): string {
       } finally {
         emulatorPollInFlight = false;
         if (!emulatorPolling) return;
-        els.emuPolling.textContent = "Stopp polling";
+        els.emuPolling.textContent = "Stopp test";
         const seconds = Math.max(30, Number(els.pollSeconds.value || 90));
         emulatorPollTimer = setTimeout(runEmulatorPoll, seconds * 1000);
       }
