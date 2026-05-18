@@ -19,3 +19,7 @@ DISPLAY_LIMIT = "8"
 [[kv_namespaces]]
 binding = "FLIGHT_DISPLAY_KV"
 id = "075d6ed547f64f1ab5129a88f48e25ca"
+
+[[r2_buckets]]
+binding = "AIRLINE_LOGOS"
+bucket_name = "flight-display-airline-logos"

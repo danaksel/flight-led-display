@@ -1,5 +1,6 @@
 export interface Env {
   FLIGHT_DISPLAY_KV: KVNamespace;
+  AIRLINE_LOGOS?: R2Bucket;
   ASSETS: Fetcher;
   FR24_API_KEY: string;
   FR24_API_BASE_URL?: string;
@@ -41,10 +42,18 @@ type DeviceSettings = {
   pollSeconds: number;
   displayCycleSeconds: number;
   timetableCycleSeconds: number;
+  timetableItemCount: number;
+  avinorWindowHours: number;
   timetableScrollPixelsPerSecond: number;
   scrollPixelsPerSecond: number;
   configRefreshSeconds: number;
   timezone: string;
+  followUnits: {
+    altitude: "ft" | "m" | "km" | "nmi";
+    speed: "kn" | "mph" | "kmh" | "ms" | "mach";
+    track: "deg" | "cardinal";
+    verticalRate: "fpm" | "fts" | "ms" | "mph" | "kmh";
+  };
   lineColors: {
     airline: string;
     route: string;
@@ -83,6 +92,7 @@ type DisplayFlight = {
   altitudeFt?: number;
   speedKts?: number;
   headingDeg?: number;
+  verticalRateFpm?: number;
   distanceKm: number;
   bearingDeg: number;
   source?: "fr24" | "avinor";
@@ -312,12 +322,27 @@ async function avinorBoardResponse(env: Env): Promise<Response> {
 }
 
 async function logoAssetResponse(request: Request, env: Env): Promise<Response> {
-  const assetResponse = await env.ASSETS.fetch(request);
-  if (assetResponse.status !== 404 || !env.LOGO_BASE_URL) return assetResponse;
-
   const url = new URL(request.url);
   const filename = url.pathname.split("/").pop() || "";
-  if (!/^[A-Za-z0-9_-]+\.png$/.test(filename)) return assetResponse;
+  if (!/^[A-Za-z0-9_-]+\.png$/.test(filename)) {
+    return env.ASSETS.fetch(request);
+  }
+
+  if (env.AIRLINE_LOGOS) {
+    const object = await env.AIRLINE_LOGOS.get(filename.toUpperCase());
+    if (object) {
+      return new Response(object.body, {
+        status: 200,
+        headers: {
+          "Content-Type": object.httpMetadata?.contentType || "image/png",
+          "Cache-Control": "public, max-age=3600"
+        }
+      });
+    }
+  }
+
+  const assetResponse = await env.ASSETS.fetch(request);
+  if (assetResponse.status !== 404 || !env.LOGO_BASE_URL) return assetResponse;
 
   const logoUrl = new URL(env.LOGO_BASE_URL.replace(/\/+$/, "") + "/" + filename);
   const response = await fetch(logoUrl.toString(), {
@@ -374,10 +399,13 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
     pollSeconds: clampNumber(v.pollSeconds, 30, 900, 90),
     displayCycleSeconds: clampNumber(v.displayCycleSeconds, 2, 30, 5),
     timetableCycleSeconds: clampNumber((v as { timetableCycleSeconds?: unknown }).timetableCycleSeconds, 2, 60, 7),
+    timetableItemCount: clampNumber((v as { timetableItemCount?: unknown }).timetableItemCount, 4, 40, 8),
+    avinorWindowHours: clampNumber((v as { avinorWindowHours?: unknown }).avinorWindowHours, 1, 24, 4),
     timetableScrollPixelsPerSecond: clampNumber((v as { timetableScrollPixelsPerSecond?: unknown }).timetableScrollPixelsPerSecond, 4, 40, 18),
     scrollPixelsPerSecond: clampNumber(v.scrollPixelsPerSecond, 2, 30, 9),
     configRefreshSeconds: clampNumber(v.configRefreshSeconds, 60, 3600, 300),
     timezone: typeof v.timezone === "string" && v.timezone.trim() ? v.timezone.slice(0, 64) : "Europe/Oslo",
+    followUnits: normalizeFollowUnits((v as { followUnits?: unknown }).followUnits),
     lineColors: normalizeLineColors((v as { lineColors?: unknown }).lineColors),
     timetableColors: normalizeTimetableColors((v as { timetableColors?: unknown }).timetableColors),
     nightMode: {
@@ -387,6 +415,20 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
       brightness: clampNumber(night.brightness, 0, 100, 0)
     }
   };
+}
+
+function normalizeFollowUnits(value: unknown): DeviceSettings["followUnits"] {
+  const v = value && typeof value === "object" ? value as Partial<DeviceSettings["followUnits"]> : {};
+  return {
+    altitude: oneOf(v.altitude, ["ft", "m", "km", "nmi"], "ft"),
+    speed: oneOf(v.speed, ["kn", "mph", "kmh", "ms", "mach"], "kn"),
+    track: oneOf(v.track, ["deg", "cardinal"], "deg"),
+    verticalRate: oneOf(v.verticalRate, ["fpm", "fts", "ms", "mph", "kmh"], "fpm")
+  };
+}
+
+function oneOf<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
+  return typeof value === "string" && (allowed as readonly string[]).includes(value) ? value as T : fallback;
 }
 
 function normalizeTimetableColors(value: unknown): DeviceSettings["timetableColors"] {
@@ -432,22 +474,25 @@ function clampNumber(value: unknown, min: number, max: number, fallback: number)
 
 async function getIdleScreens(env: Env, config: Config): Promise<IdleScreen[]> {
   const airport = normalizeAirportCode(config.homeAirportIata, env.HOME_AIRPORT_IATA || "OSL");
+  const limit = config.device?.timetableItemCount || 8;
   const [departures, arrivals] = await Promise.all([
-    getAvinorFlights(env, airport, "D", config.device?.timezone || "Europe/Oslo"),
-    getAvinorFlights(env, airport, "A", config.device?.timezone || "Europe/Oslo")
+    getAvinorFlights(env, airport, "D", config),
+    getAvinorFlights(env, airport, "A", config)
   ]);
 
   return [
-    ...toIdleScreens("DEPARTURES", "departures", departures),
-    ...toIdleScreens("ARRIVALS", "arrivals", arrivals)
+    ...toIdleScreens("DEPARTURES", "departures", departures.slice(0, limit)),
+    ...toIdleScreens("ARRIVALS", "arrivals", arrivals.slice(0, limit))
   ];
 }
 
 function toIdleScreens(title: IdleScreen["title"], kind: IdleScreen["kind"], flights: AvinorFlight[]): IdleScreen[] {
   const rows = flights.map(toIdleRow);
-  const firstPage = rows.slice(0, 4);
-  const secondPage = rows.slice(4, 8);
-  return [firstPage, secondPage].map((pageRows) => ({
+  const pages: IdleRow[][] = [];
+  for (let index = 0; index < rows.length; index += 4) {
+    pages.push(rows.slice(index, index + 4));
+  }
+  return (pages.length ? pages : [[]]).map((pageRows) => ({
     title,
     kind,
     rows: pageRows
@@ -465,8 +510,11 @@ function toIdleRow(flight: AvinorFlight): IdleRow {
   };
 }
 
-async function getAvinorFlights(env: Env, airport: string, direction: "A" | "D", timezone: string): Promise<AvinorFlight[]> {
-  const cacheKey = `avinor:board:v2:${airport}:${direction}`;
+async function getAvinorFlights(env: Env, airport: string, direction: "A" | "D", config: Config): Promise<AvinorFlight[]> {
+  const timezone = config.device?.timezone || "Europe/Oslo";
+  const windowHours = config.device?.avinorWindowHours || 4;
+  const itemCount = config.device?.timetableItemCount || 8;
+  const cacheKey = `avinor:board:v3:${airport}:${direction}:${windowHours}:${itemCount}`;
   const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
   if (Array.isArray(cached)) return cached as AvinorFlight[];
 
@@ -482,6 +530,7 @@ async function getAvinorFlights(env: Env, airport: string, direction: "A" | "D",
       if (!flightId || !airportCode || !Number.isFinite(timestamp)) return null;
       if (raw.status?.code === doneStatus) return null;
       if (timestamp < now - 10 * 60 * 1000) return null;
+      if (timestamp > now + windowHours * 60 * 60 * 1000) return null;
       return {
         flightId,
         airport: airportCode,
@@ -494,7 +543,7 @@ async function getAvinorFlights(env: Env, airport: string, direction: "A" | "D",
     })
     .filter((flight): flight is AvinorFlight => Boolean(flight))
     .sort((a, b) => a.sortTime - b.sortTime)
-    .slice(0, 8);
+    .slice(0, itemCount);
 
   await env.FLIGHT_DISPLAY_KV.put(cacheKey, JSON.stringify(flights), { expirationTtl: 180 });
   return flights;
@@ -820,7 +869,7 @@ async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
         follow: config.follow,
         device: config.device,
         idleScreens,
-        flights: displayFlights.map(toCompactDisplayFlight)
+        flights: displayFlights.map((flight) => toCompactDisplayFlight(flight, config))
       }
     : {
         updatedAt: new Date().toISOString(),
@@ -837,9 +886,10 @@ async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
   });
 }
 
-function toCompactDisplayFlight(f: DisplayFlight): Record<string, unknown> {
+function toCompactDisplayFlight(f: DisplayFlight, config: Config): Record<string, unknown> {
   const route = [f.origin, f.destination].filter(Boolean).join("-");
   const context = [f.contextLabel, f.contextValue].filter(Boolean).join(" ");
+  const metrics = formatFollowMetrics(f, config.device?.followUnits);
   return {
     cs: f.callsign || f.flight || "",
     flt: f.flight || "",
@@ -864,8 +914,67 @@ function toCompactDisplayFlight(f: DisplayFlight): Record<string, unknown> {
     },
     b: Math.round(f.bearingDeg),
     alt: f.altitudeFt ?? null,
-    spd: f.speedKts ?? null
+    spd: f.speedKts ?? null,
+    trk: f.headingDeg ?? null,
+    vr: f.verticalRateFpm ?? null,
+    metrics
   };
+}
+
+function formatFollowMetrics(f: DisplayFlight, units: DeviceSettings["followUnits"] | undefined): Record<string, string> {
+  const u = units || normalizeFollowUnits(undefined);
+  return {
+    altitude: formatAltitude(f.altitudeFt, u.altitude),
+    speed: formatSpeed(f.speedKts, u.speed),
+    track: formatTrack(f.headingDeg, u.track),
+    verticalRate: formatVerticalRate(f.verticalRateFpm, u.verticalRate)
+  };
+}
+
+function formatAltitude(value: number | undefined, unit: DeviceSettings["followUnits"]["altitude"]): string {
+  if (value === undefined) return "";
+  if (unit === "m") return `${Math.round(value * 0.3048)}m`;
+  if (unit === "km") return `${round1(value * 0.0003048)}km`;
+  if (unit === "nmi") return `${round1(value / 6076.12)}nmi`;
+  return `${Math.round(value)}ft`;
+}
+
+function formatSpeed(value: number | undefined, unit: DeviceSettings["followUnits"]["speed"]): string {
+  if (value === undefined) return "";
+  if (unit === "mph") return `${Math.round(value * 1.15078)}mph`;
+  if (unit === "kmh") return `${Math.round(value * 1.852)}kmh`;
+  if (unit === "ms") return `${Math.round(value * 0.514444)}m/s`;
+  if (unit === "mach") return `M${round2(value / 661.47)}`;
+  return `${Math.round(value)}kn`;
+}
+
+function formatTrack(value: number | undefined, unit: DeviceSettings["followUnits"]["track"]): string {
+  if (value === undefined) return "";
+  const heading = ((Math.round(value) % 360) + 360) % 360;
+  if (unit === "cardinal") return headingToCardinal(heading);
+  return `${heading}deg`;
+}
+
+function formatVerticalRate(value: number | undefined, unit: DeviceSettings["followUnits"]["verticalRate"]): string {
+  if (value === undefined) return "";
+  if (unit === "fts") return `${round1(value / 60)}ft/s`;
+  if (unit === "ms") return `${round1(value * 0.00508)}m/s`;
+  if (unit === "mph") return `${round1(value * 0.0113636)}mph`;
+  if (unit === "kmh") return `${round1(value * 0.018288)}kmh`;
+  return `${Math.round(value)}fpm`;
+}
+
+function headingToCardinal(heading: number): string {
+  const points = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"];
+  return points[Math.round(heading / 22.5) % 16];
+}
+
+function round1(value: number): string {
+  return (Math.round(value * 10) / 10).toString();
+}
+
+function round2(value: number): string {
+  return (Math.round(value * 100) / 100).toFixed(2);
 }
 
 function logoUrlFor(airlineCode: string | undefined): string {
@@ -1107,6 +1216,7 @@ function normalizeFlight(record: unknown, config: Config): DisplayFlight | null 
     altitudeFt: firstNumber(r, ["alt", "altitude", "altitude_ft"]),
     speedKts: firstNumber(r, ["gspeed", "ground_speed", "speed"]),
     headingDeg: firstNumber(r, ["track", "heading"]),
+    verticalRateFpm: firstNumber(r, ["vspeed", "vertical_speed", "vertical_rate", "vertical_speed_fpm"]),
     distanceKm,
     bearingDeg
   };
@@ -1572,6 +1682,46 @@ function renderIndexHtml(): string {
         <input id="followFlights" autocomplete="off" placeholder="SK4673, DY1304, DOC45">
         <div class="row">
           <div>
+            <label for="altitudeUnit">Altitude</label>
+            <select id="altitudeUnit">
+              <option value="ft">ft</option>
+              <option value="m">m</option>
+              <option value="km">km</option>
+              <option value="nmi">nmi</option>
+            </select>
+          </div>
+          <div>
+            <label for="speedUnit">Speed</label>
+            <select id="speedUnit">
+              <option value="kn">kn</option>
+              <option value="mph">mph</option>
+              <option value="kmh">km/h</option>
+              <option value="ms">m/s</option>
+              <option value="mach">mach</option>
+            </select>
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label for="trackUnit">Direction</label>
+            <select id="trackUnit">
+              <option value="deg">degrees</option>
+              <option value="cardinal">cardinal</option>
+            </select>
+          </div>
+          <div>
+            <label for="verticalRateUnit">Vertical rate</label>
+            <select id="verticalRateUnit">
+              <option value="fpm">fpm</option>
+              <option value="fts">ft/s</option>
+              <option value="ms">m/s</option>
+              <option value="mph">mph</option>
+              <option value="kmh">km/h</option>
+            </select>
+          </div>
+        </div>
+        <div class="row">
+          <div>
             <label for="cycleSeconds">Flight sek</label>
             <input id="cycleSeconds" type="number" min="2" max="30" step="1">
           </div>
@@ -1611,6 +1761,16 @@ function renderIndexHtml(): string {
           <div>
             <label for="timetableScrollSpeed">Tavle scroll px/s</label>
             <input id="timetableScrollSpeed" type="number" min="4" max="40" step="1">
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label for="timetableItemCount">Antall rader</label>
+            <input id="timetableItemCount" type="number" min="4" max="40" step="4">
+          </div>
+          <div>
+            <label for="avinorWindowHours">Avinor timer frem</label>
+            <input id="avinorWindowHours" type="number" min="1" max="24" step="1">
           </div>
         </div>
         <div class="color-grid">
@@ -1693,12 +1853,18 @@ function renderIndexHtml(): string {
       homeAirport: document.querySelector("#homeAirport"),
       followEnabled: document.querySelector("#followEnabled"),
       followFlights: document.querySelector("#followFlights"),
+      altitudeUnit: document.querySelector("#altitudeUnit"),
+      speedUnit: document.querySelector("#speedUnit"),
+      trackUnit: document.querySelector("#trackUnit"),
+      verticalRateUnit: document.querySelector("#verticalRateUnit"),
       deviceEnabled: document.querySelector("#deviceEnabled"),
       deviceBrightness: document.querySelector("#deviceBrightness"),
       nightBrightness: document.querySelector("#nightBrightness"),
       pollSeconds: document.querySelector("#pollSeconds"),
       cycleSeconds: document.querySelector("#cycleSeconds"),
       timetableCycleSeconds: document.querySelector("#timetableCycleSeconds"),
+      timetableItemCount: document.querySelector("#timetableItemCount"),
+      avinorWindowHours: document.querySelector("#avinorWindowHours"),
       timetableScrollSpeed: document.querySelector("#timetableScrollSpeed"),
       scrollSpeed: document.querySelector("#scrollSpeed"),
       configRefreshSeconds: document.querySelector("#configRefreshSeconds"),
@@ -1734,6 +1900,7 @@ function renderIndexHtml(): string {
     let circle;
     let uploadedImage = null;
     let displayFlights = [];
+    let displayMode = "idle";
     let idleScreens = [];
     let currentFlightIndex = 0;
     let currentIdleScreenIndex = 0;
@@ -1771,7 +1938,7 @@ function renderIndexHtml(): string {
         redraw();
       });
       ["lat", "lon", "radius"].forEach((id) => els[id].addEventListener("input", redraw));
-      document.querySelectorAll("aside input").forEach((input) => {
+      document.querySelectorAll("aside input, aside select").forEach((input) => {
         input.addEventListener("input", markDirty);
         input.addEventListener("change", markDirty);
       });
@@ -1795,12 +1962,19 @@ function renderIndexHtml(): string {
       const follow = config.follow || {};
       els.followEnabled.checked = follow.enabled === true;
       els.followFlights.value = Array.isArray(follow.flights) ? follow.flights.join(", ") : "";
+      const followUnits = device.followUnits || {};
+      els.altitudeUnit.value = followUnits.altitude || "ft";
+      els.speedUnit.value = followUnits.speed || "kn";
+      els.trackUnit.value = followUnits.track || "deg";
+      els.verticalRateUnit.value = followUnits.verticalRate || "fpm";
       els.deviceEnabled.checked = device.enabled !== false;
       els.deviceBrightness.value = device.brightness ?? 80;
       els.nightBrightness.value = night.brightness ?? 0;
       els.pollSeconds.value = device.pollSeconds ?? 90;
       els.cycleSeconds.value = device.displayCycleSeconds ?? 5;
       els.timetableCycleSeconds.value = device.timetableCycleSeconds ?? 7;
+      els.timetableItemCount.value = device.timetableItemCount ?? 8;
+      els.avinorWindowHours.value = device.avinorWindowHours ?? 4;
       els.timetableScrollSpeed.value = device.timetableScrollPixelsPerSecond ?? 18;
       els.scrollSpeed.value = device.scrollPixelsPerSecond ?? 9;
       els.configRefreshSeconds.value = device.configRefreshSeconds ?? 300;
@@ -1842,10 +2016,18 @@ function renderIndexHtml(): string {
           pollSeconds: Number(els.pollSeconds.value),
           displayCycleSeconds: Number(els.cycleSeconds.value),
           timetableCycleSeconds: Number(els.timetableCycleSeconds.value),
+          timetableItemCount: Number(els.timetableItemCount.value),
+          avinorWindowHours: Number(els.avinorWindowHours.value),
           timetableScrollPixelsPerSecond: Number(els.timetableScrollSpeed.value),
           scrollPixelsPerSecond: Number(els.scrollSpeed.value),
           configRefreshSeconds: Number(els.configRefreshSeconds.value),
           timezone: els.timezone.value.trim(),
+          followUnits: {
+            altitude: els.altitudeUnit.value,
+            speed: els.speedUnit.value,
+            track: els.trackUnit.value,
+            verticalRate: els.verticalRateUnit.value
+          },
           lineColors: {
             airline: els.airlineColor.value,
             route: els.routeColor.value,
@@ -1923,6 +2105,10 @@ function renderIndexHtml(): string {
       els.deviceBrightness,
       els.scrollSpeed,
       els.timetableScrollSpeed,
+      els.altitudeUnit,
+      els.speedUnit,
+      els.trackUnit,
+      els.verticalRateUnit,
       els.airlineColor,
       els.routeColor,
       els.aircraftColor,
@@ -1960,14 +2146,14 @@ function renderIndexHtml(): string {
           renderAvinorRaw(avinorData);
         }
         const flights = Array.isArray(data.flights) ? data.flights : [];
+        displayMode = data.mode || (flights.length ? "nearby" : "idle");
         idleScreens = Array.isArray(data.idleScreens) ? data.idleScreens : [];
         displayFlights = flights;
         currentFlightIndex = 0;
         currentIdleScreenIndex = 0;
         resetFlightCycle();
         renderEmulator();
-        const mode = data.mode || (flights.length ? "nearby" : "idle");
-        els.previewMeta.textContent = "Oppdatert " + new Date(data.updatedAt).toLocaleTimeString() + " · " + flights.length + " treff · " + mode;
+        els.previewMeta.textContent = "Oppdatert " + new Date(data.updatedAt).toLocaleTimeString() + " · " + flights.length + " treff · " + displayMode;
         if (!flights.length) {
           if (idleScreens.length) {
             els.flightList.innerHTML = idleScreens.map((screen) => {
@@ -2230,6 +2416,11 @@ function renderIndexHtml(): string {
       } else {
         drawPlaceholderLogo(ctx, 3, 3, 42);
       }
+      if (displayMode === "follow") {
+        drawFollowFlightText(ctx, flight);
+        els.emuMeta.textContent = "Follow layout: " + (flight.flt || flight.cs || "flight") + " · live metrics når FR24 har posisjon.";
+        return;
+      }
       const airline = (flight.lines && flight.lines.airline) || flight.air || flight.airCode || "";
       const route = (flight.lines && flight.lines.route) || [flight.from, flight.to].filter(Boolean).join("-");
       const aircraft = (flight.lines && flight.lines.aircraft) || flight.ac || flight.reg || "";
@@ -2242,6 +2433,79 @@ function renderIndexHtml(): string {
         context
       });
       els.emuMeta.textContent = "Live layout: " + (flight.flt || flight.cs || route || "flight") + " · 128 x 64 LEDs · 320 x 160 mm · P2.5 pitch.";
+    }
+
+    function drawFollowFlightText(ctx, flight) {
+      const colors = getLineColors();
+      const route = (flight.lines && flight.lines.route) || [flight.from, flight.to].filter(Boolean).join("-");
+      const topLine = flight.flt || flight.cs || "";
+      const secondLine = route || flight.air || flight.airCode || "";
+      const thirdLine = flight.ac || flight.reg || "";
+      drawDotText(ctx, topLine, 50, 5, colors.airline, { maxWidth: 75 });
+      drawDotText(ctx, secondLine, 50, 19, colors.route, { maxWidth: 75 });
+      drawDotText(ctx, thirdLine, 50, 33, colors.aircraft, { maxWidth: 75 });
+      const metrics = formatMetricsForEmulator(flight);
+      const firstMetricLine = [
+        metrics.altitude ? "ALT:" + metrics.altitude : "",
+        metrics.speed ? "SPD:" + metrics.speed : ""
+      ].filter(Boolean).join(" ");
+      const secondMetricLine = [
+        metrics.track ? "TRK:" + metrics.track : "",
+        metrics.verticalRate ? "VR:" + metrics.verticalRate : ""
+      ].filter(Boolean).join(" ");
+      drawTickerLine(ctx, firstMetricLine || "NO LIVE METRICS", 3, 47, colors.context, 122);
+      drawTickerLine(ctx, secondMetricLine, 3, 56, colors.context, 122);
+    }
+
+    function formatMetricsForEmulator(flight) {
+      return {
+        altitude: formatAltitudeForEmulator(flight.alt, els.altitudeUnit.value),
+        speed: formatSpeedForEmulator(flight.spd, els.speedUnit.value),
+        track: formatTrackForEmulator(flight.trk ?? flight.b, els.trackUnit.value),
+        verticalRate: formatVerticalRateForEmulator(flight.vr, els.verticalRateUnit.value)
+      };
+    }
+
+    function formatAltitudeForEmulator(value, unit) {
+      if (value === null || value === undefined || value === "") return "";
+      if (unit === "m") return Math.round(value * 0.3048) + "m";
+      if (unit === "km") return roundOne(value * 0.0003048) + "km";
+      if (unit === "nmi") return roundOne(value / 6076.12) + "nmi";
+      return Math.round(value) + "ft";
+    }
+
+    function formatSpeedForEmulator(value, unit) {
+      if (value === null || value === undefined || value === "") return "";
+      if (unit === "mph") return Math.round(value * 1.15078) + "mph";
+      if (unit === "kmh") return Math.round(value * 1.852) + "kmh";
+      if (unit === "ms") return Math.round(value * 0.514444) + "m/s";
+      if (unit === "mach") return "M" + (Math.round((value / 661.47) * 100) / 100).toFixed(2);
+      return Math.round(value) + "kn";
+    }
+
+    function formatTrackForEmulator(value, unit) {
+      if (value === null || value === undefined || value === "") return "";
+      const heading = ((Math.round(value) % 360) + 360) % 360;
+      if (unit === "cardinal") return headingToCardinalForEmulator(heading);
+      return heading + "deg";
+    }
+
+    function formatVerticalRateForEmulator(value, unit) {
+      if (value === null || value === undefined || value === "") return "";
+      if (unit === "fts") return roundOne(value / 60) + "ft/s";
+      if (unit === "ms") return roundOne(value * 0.00508) + "m/s";
+      if (unit === "mph") return roundOne(value * 0.0113636) + "mph";
+      if (unit === "kmh") return roundOne(value * 0.018288) + "kmh";
+      return Math.round(value) + "fpm";
+    }
+
+    function headingToCardinalForEmulator(heading) {
+      const points = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"];
+      return points[Math.round(heading / 22.5) % 16];
+    }
+
+    function roundOne(value) {
+      return (Math.round(value * 10) / 10).toString();
     }
 
     function drawIdleLayout(ctx, screen) {
