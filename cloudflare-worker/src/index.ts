@@ -1222,7 +1222,20 @@ function normalizeLogoCode(airlineCode: string | undefined): string {
     SZN: "SAS",
     TRA: "TRA",
     TVF: "TRA",
-    NOA: "DOC"
+    TVS: "TRA",
+    NOA: "DOC",
+    FDX: "FDX",
+    UPS: "UPS",
+    BCS: "DHK",
+    DHA: "DHK",
+    DHK: "DHK",
+    DHV: "DHV",
+    DHX: "DHX",
+    DAE: "DAE",
+    GEC: "DLH",
+    UAE: "UAE",
+    QTR: "QTR",
+    THY: "THY"
   };
 
   return aliases[code] || code;
@@ -1511,7 +1524,13 @@ function airlineIataToLogoCode(iata: string | undefined): string | undefined {
     TK: "THY",
     TP: "TAP",
     TG: "THA",
-    LO: "LOT"
+    LO: "LOT",
+    FX: "FDX",
+    "5X": "UPS",
+    D0: "DHK",
+    QY: "DHK",
+    ES: "DHX",
+    D5: "DAE"
   };
   return aliases[iata.toUpperCase()] || iata.toUpperCase();
 }
