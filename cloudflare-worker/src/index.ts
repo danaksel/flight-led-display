@@ -995,7 +995,7 @@ async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
 
   const mode = followFlights.length ? "follow" : nearbyFlights.length ? "nearby" : "idle";
   const displayFlights = (followFlights.length ? followFlights : nearbyFlights).slice(0, limit);
-  if (mode === "follow" && config.device?.followDetailMode === "location") {
+  if (mode === "follow") {
     await enrichFollowLocation(env, displayFlights);
   }
   const idleScreens = displayFlights.length ? [] : await getIdleScreens(env, config);
@@ -1080,6 +1080,7 @@ async function toCompactDisplayFlight(env: Env, f: DisplayFlight, config: Config
   const context = [f.contextLabel, f.contextValue].filter(Boolean).join(" ");
   const metrics = formatFollowMetrics(f, config.device?.followUnits);
   const logoCode = await displayLogoCodeFor(env, f);
+  const followStatus = followStatusFor(f);
   return {
     cs: f.callsign || f.flight || "",
     flt: f.flight || "",
@@ -1093,10 +1094,13 @@ async function toCompactDisplayFlight(env: Env, f: DisplayFlight, config: Config
     ctxLabel: f.contextLabel || "",
     ctxValue: f.contextValue || "",
     status: f.status || "",
+    displayTime: f.displayTime || "",
+    scheduledTime: f.scheduledTime || "",
     gate: f.gate || "",
     gateMessage: f.gateMessage || "",
     source: f.source || "",
-    layout: f.locationValue ? "follow_location" : "follow_metrics",
+    layout: followStatus ? "follow_status" : "follow_cycle",
+    followStatus,
     locationLabel: f.locationLabel || "",
     locationValue: f.locationValue || "",
     routeProgress: typeof f.routeProgress === "number" ? f.routeProgress : null,
@@ -1113,6 +1117,26 @@ async function toCompactDisplayFlight(env: Env, f: DisplayFlight, config: Config
     vr: f.verticalRateFpm ?? null,
     metrics
   };
+}
+
+function followStatusFor(f: DisplayFlight): Record<string, string> | null {
+  if (f.status === "done") {
+    return {
+      kind: "landed",
+      text: `Landed${f.displayTime ? ` ${f.displayTime}` : ""}`,
+      color: "landed"
+    };
+  }
+  if (f.source === "avinor") {
+    const detail = f.displayTime ? `Dep ${f.displayTime}` : "";
+    return {
+      kind: "not_departed",
+      text: f.gateMessage || "Not departed",
+      detail,
+      color: "preflight"
+    };
+  }
+  return null;
 }
 
 function formatFollowMetrics(f: DisplayFlight, units: DeviceSettings["followUnits"] | undefined): Record<string, string> {
@@ -2887,7 +2911,13 @@ function renderIndexHtml(): string {
       drawDotText(ctx, topLine, 50, 5, colors.airline, { maxWidth: 75 });
       drawDotText(ctx, secondLine, 50, 19, colors.route, { maxWidth: 75 });
       drawDotText(ctx, thirdLine, 50, 33, colors.aircraft, { maxWidth: 75 });
-      if (flight.layout === "follow_location") {
+      if (flight.followStatus) {
+        const statusColor = flight.followStatus.color === "landed" ? "#00d46a" : getTimetableColors().header;
+        drawTickerLine(ctx, flight.followStatus.text || "", 3, 47, statusColor, 122);
+        drawTickerLine(ctx, flight.followStatus.detail || "", 3, 56, statusColor, 122);
+        return;
+      }
+      if (getFollowDetailPhase() === "location") {
         drawDotText(ctx, flight.locationLabel || "Flying over", 3, 47, colors.context, { maxWidth: 122 });
         drawTickerLine(ctx, flight.locationValue || "Unknown area", 3, 56, colors.context, 122);
         return;
@@ -2903,6 +2933,11 @@ function renderIndexHtml(): string {
       ].filter(Boolean).join(" ");
       drawTickerLine(ctx, firstMetricLine || "NO LIVE METRICS", 3, 47, colors.context, 122);
       drawTickerLine(ctx, secondMetricLine, 3, 56, colors.context, 122);
+    }
+
+    function getFollowDetailPhase() {
+      const elapsed = Math.max(0, performance.now() - flightCycleStartedAt);
+      return elapsed % 15000 < 10000 ? "metrics" : "location";
     }
 
     function formatMetricsForEmulator(flight) {
@@ -3109,7 +3144,7 @@ function renderIndexHtml(): string {
     function drawFlightProgress(ctx, flight) {
       if (els.emuSource.value !== "live") return;
       ensureTickerAnimation();
-      if (flight && flight.layout === "follow_location" && typeof flight.routeProgress === "number") {
+      if (displayMode === "follow" && flight && !flight.followStatus && typeof flight.routeProgress === "number") {
         drawRouteProgressValue(ctx, flight.routeProgress);
         return;
       }
@@ -3125,19 +3160,19 @@ function renderIndexHtml(): string {
     }
 
     function drawProgressValue(ctx, progress) {
-      const width = Math.max(1, Math.min(128, Math.round(128 * progress)));
+      const width = Math.max(1, Math.min(122, Math.round(122 * progress)));
       ctx.fillStyle = "#07101c";
-      ctx.fillRect(0, 63, 128, 1);
+      ctx.fillRect(3, 0, 122, 1);
       ctx.fillStyle = getLineColors().progress;
-      ctx.fillRect(0, 63, width, 1);
+      ctx.fillRect(3, 0, width, 1);
     }
 
     function drawRouteProgressValue(ctx, progress) {
-      const width = Math.max(1, Math.min(128, Math.round(128 * progress)));
+      const width = Math.max(1, Math.min(122, Math.round(122 * progress)));
       ctx.fillStyle = "#3c3c3c";
-      ctx.fillRect(0, 63, 128, 1);
+      ctx.fillRect(3, 0, 122, 1);
       ctx.fillStyle = "#00d46a";
-      ctx.fillRect(0, 63, width, 1);
+      ctx.fillRect(3, 0, width, 1);
     }
 
     function loadLogoForFlight(flight) {
