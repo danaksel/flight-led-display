@@ -86,7 +86,7 @@ Originalprosjektet bruker OpenSky for live posisjon og AeroAPI/FlightAware for e
 
 FR24 er betalt datakilde, så dette prosjektet er lagt opp for å ikke brenne credits unødvendig.
 
-Når skjermen viser fly i valgt radius bruker Worker FR24 `full`, fordi den visningen trenger rute, flytype, operator og metadata for ukjente fly i området. Når du følger et konkret flightnummer bruker Worker FR24 `light` som førstevalg, fordi Avinor allerede kan gi rute/flyselskap og `light` gir live-posisjon, høyde, fart, track og vertical rate til follow-visningen.
+Når skjermen viser fly i valgt radius bruker Worker FR24 `full`, fordi den visningen trenger rute, flytype, operator og metadata for ukjente fly i området. Når du følger et konkret flightnummer bruker Worker FR24 `full` kun for å hente statiske felt som flytype, registrering, rute og operator første gang den aktuelle flygningen lastes. Disse feltene caches for dagen. Etterpå bruker follow-visningen FR24 `light`, som holder for live-posisjon, høyde, fart, track og vertical rate.
 
 Worker skal ikke hente FR24-data bare fordi adminwebben åpnes. FR24 brukes bare når:
 
@@ -230,7 +230,8 @@ Nøkler som skal beholdes:
 - `airport-coords:v1:*` - koordinater for flyplasser til route progress
 - `geocode:v2:*` - reverse geocode for `Flying over`
 - `avinor:raw:v2:*` og `avinor:board:v3:*` - kortlevd Avinor-cache
-- `flights:fr24:v1:*`, `flights:opensky:v1:*`, `follow:fr24:v3:*` og `follow:opensky:v1:*` - kortlevd live-cache
+- `flights:fr24:v1:*`, `flights:opensky:v1:*`, `follow:fr24:v4:*` og `follow:opensky:v1:*` - kortlevd live-cache
+- `follow:fr24:static:v1:*` - statiske FR24 follow-felt som flytype, registrering, rute og operator, cachet per dag
 - `opensky:token:v1` - kortlevd OAuth-token for OpenSky
 - `follow:landed:v1:*` - landed-status for fulgte fly, beholdes i to timer etter landing
 

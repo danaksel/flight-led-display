@@ -1400,25 +1400,101 @@ async function getTargetedFollowFlights(env: Env, config: Config, tokens: string
   if (!normalizedTokens.length) return [];
 
   const cacheTtl = Math.max(30, Math.min(300, parseNumber(env.CACHE_TTL_SECONDS, 60)));
-  const sourceVersion = liveDataSource === "fr24" ? "v3" : "v1";
+  const sourceVersion = liveDataSource === "fr24" ? "v4" : "v1";
   const areaPart = liveDataSource === "opensky" ? `:${config.lat.toFixed(3)}:${config.lon.toFixed(3)}:${Math.round(config.radiusKm)}` : "";
   const cacheKey = `follow:${liveDataSource}:${sourceVersion}:${normalizedTokens.slice().sort().join(",")}${areaPart}`;
   const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
   if (Array.isArray(cached)) return cached as DisplayFlight[];
 
-  const records = liveDataSource === "opensky"
-    ? await fetchOpenSky(env, config)
-    : await fetchFr24(env, undefined, { flights: normalizedTokens }, env.FR24_FOLLOW_ENDPOINT || "/live/flight-positions/light");
+  const [records, staticFlights] = liveDataSource === "opensky"
+    ? [await fetchOpenSky(env, config), [] as DisplayFlight[]]
+    : await Promise.all([
+        fetchFr24(env, undefined, { flights: normalizedTokens }, env.FR24_FOLLOW_ENDPOINT || "/live/flight-positions/light"),
+        getFr24FollowStaticFlights(env, config, normalizedTokens)
+      ]);
   const fallbackFlight = liveDataSource === "fr24" && normalizedTokens.length === 1 ? normalizedTokens[0] : undefined;
-  const flights = records
+  const liveFlights = records
     .map((record) => liveDataSource === "opensky" ? normalizeOpenSkyFlight(record, config) : normalizeFlight(record, config, fallbackFlight))
     .filter((flight): flight is DisplayFlight => Boolean(flight))
     .filter((flight) => liveDataSource === "opensky" ? normalizedTokens.some((token) => flightMatchesFollowToken(flight, token)) : true);
+  const flights = liveDataSource === "fr24" ? mergeFollowStaticFlights(liveFlights, staticFlights) : liveFlights;
 
   await enrichAirlineNames(env, flights);
   await enrichAirportContext(env, config, flights);
   await env.FLIGHT_DISPLAY_KV.put(cacheKey, JSON.stringify(flights), { expirationTtl: cacheTtl });
   return flights;
+}
+
+async function getFr24FollowStaticFlights(env: Env, config: Config, tokens: string[]): Promise<DisplayFlight[]> {
+  const timezone = config.device?.timezone || "Europe/Oslo";
+  const cacheDate = localDateString(new Date(), timezone);
+  const cacheTtl = 18 * 60 * 60;
+  const resultByToken = new Map<string, DisplayFlight>();
+  const missingTokens: string[] = [];
+
+  await Promise.all(tokens.map(async (token) => {
+    const cacheKey = fr24FollowStaticCacheKey(cacheDate, token);
+    const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
+    if (cached && typeof cached === "object" && !Array.isArray(cached)) {
+      resultByToken.set(token, cached as DisplayFlight);
+    } else {
+      missingTokens.push(token);
+    }
+  }));
+
+  if (missingTokens.length) {
+    try {
+      const records = await fetchFr24(env, undefined, { flights: missingTokens }, env.FR24_LIVE_ENDPOINT || "/live/flight-positions/full");
+      const fullFlights = records
+        .map((record) => normalizeFlight(record, config))
+        .filter((flight): flight is DisplayFlight => Boolean(flight));
+
+      await Promise.all(missingTokens.map(async (token) => {
+        const fullFlight = fullFlights.find((flight) => flightMatchesFollowToken(flight, token));
+        if (!fullFlight) return;
+        resultByToken.set(token, fullFlight);
+        await env.FLIGHT_DISPLAY_KV.put(fr24FollowStaticCacheKey(cacheDate, token), JSON.stringify(fullFlight), { expirationTtl: cacheTtl });
+      }));
+    } catch (error) {
+      console.warn(error instanceof Error ? error.message : "FR24 follow static fetch failed");
+    }
+  }
+
+  return Array.from(resultByToken.values());
+}
+
+function fr24FollowStaticCacheKey(cacheDate: string, token: string): string {
+  return `follow:fr24:static:v1:${cacheDate}:${token}`;
+}
+
+function mergeFollowStaticFlights(liveFlights: DisplayFlight[], staticFlights: DisplayFlight[]): DisplayFlight[] {
+  return liveFlights.map((live) => {
+    const staticFlight = staticFlights.find((candidate) => sameFlightIdentity(live, candidate));
+    if (!staticFlight) return live;
+    return {
+      ...live,
+      flight: live.flight || staticFlight.flight,
+      callsign: live.callsign || staticFlight.callsign,
+      airline: live.airline || staticFlight.airline,
+      airlineCode: live.airlineCode || staticFlight.airlineCode,
+      aircraft: live.aircraft || staticFlight.aircraft,
+      registration: live.registration || staticFlight.registration,
+      origin: live.origin || staticFlight.origin,
+      destination: live.destination || staticFlight.destination,
+      contextLabel: live.contextLabel || staticFlight.contextLabel,
+      contextValue: live.contextValue || staticFlight.contextValue
+    };
+  });
+}
+
+function sameFlightIdentity(a: DisplayFlight, b: DisplayFlight): boolean {
+  const aValues = [a.flight, a.callsign, a.registration, a.fr24Id].map(normalizedIdentityValue).filter(Boolean);
+  const bValues = [b.flight, b.callsign, b.registration, b.fr24Id].map(normalizedIdentityValue).filter(Boolean);
+  return aValues.some((value) => bValues.includes(value));
+}
+
+function normalizedIdentityValue(value: string | undefined): string {
+  return value?.toUpperCase().replace(/\s+/g, "") || "";
 }
 
 async function shouldTreatFollowAsLanded(env: Env, flight: DisplayFlight, raw: AvinorRawFlight | undefined, config: Config): Promise<boolean> {
