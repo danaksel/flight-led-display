@@ -115,6 +115,12 @@ type DisplayFlight = {
   routeProgress?: number;
 };
 
+type LiveSourceStatus = {
+  source: DeviceSettings["liveDataSource"];
+  ok: boolean;
+  error?: string;
+};
+
 type AvinorFlight = {
   flightId: string;
   airport: string;
@@ -985,8 +991,12 @@ function localDateString(date: Date, timezone: string): string {
 async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
   const config = await getConfig(env);
   const suspendedReason = displaySuspendedReason(config);
+  const liveSourceStatus: LiveSourceStatus = {
+    source: normalizeDeviceSettings(config.device).liveDataSource,
+    ok: true
+  };
   if (suspendedReason) {
-    return jsonResponse(await displayPayload(env, config, compact, suspendedReason, [], [], [], []), 200, {
+    return jsonResponse(await displayPayload(env, config, compact, suspendedReason, [], [], [], [], liveSourceStatus), 200, {
       "Cache-Control": "no-store"
     });
   }
@@ -998,10 +1008,16 @@ async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
 
   const airspaceMonitoringEnabled = config.device?.airspaceMonitoringEnabled !== false;
   if (airspaceMonitoringEnabled) {
-    if (follow.enabled && follow.flights.length) {
-      followFlights = await getFollowFlights(env, config);
-    } else {
-      nearbyFlights = await getFlights(env, config);
+    try {
+      if (follow.enabled && follow.flights.length) {
+        followFlights = await getFollowFlights(env, config);
+      } else {
+        nearbyFlights = await getFlights(env, config);
+      }
+    } catch (error) {
+      liveSourceStatus.ok = false;
+      liveSourceStatus.error = error instanceof Error ? error.message : "Live source request failed";
+      console.warn(liveSourceStatus.error);
     }
   }
 
@@ -1011,7 +1027,7 @@ async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
     await enrichFollowLocation(env, displayFlights);
   }
   const idleScreens = displayFlights.length ? [] : await getIdleScreens(env, config);
-  const payload = displayPayload(env, config, compact, mode, followFlights, nearbyFlights, displayFlights, idleScreens);
+  const payload = displayPayload(env, config, compact, mode, followFlights, nearbyFlights, displayFlights, idleScreens, liveSourceStatus);
 
   return jsonResponse(await payload, 200, {
     "Cache-Control": "public, max-age=15"
@@ -1026,7 +1042,8 @@ async function displayPayload(
   followFlights: DisplayFlight[],
   nearbyFlights: DisplayFlight[],
   displayFlights: DisplayFlight[],
-  idleScreens: IdleScreen[]
+  idleScreens: IdleScreen[],
+  liveSourceStatus: LiveSourceStatus
 ): Promise<Record<string, unknown>> {
   return compact
     ? {
@@ -1039,6 +1056,7 @@ async function displayPayload(
         radiusKm: config.radiusKm,
         follow: config.follow,
         device: config.device,
+        liveSourceStatus,
         idleScreens,
         flights: await Promise.all(displayFlights.map((flight) => toCompactDisplayFlight(env, flight, config)))
       }
@@ -1047,6 +1065,7 @@ async function displayPayload(
         mode,
         airspaceMonitoring: config.device?.airspaceMonitoringEnabled !== false,
         config,
+        liveSourceStatus,
         followFlights,
         nearbyFlights,
         flights: displayFlights,
@@ -1695,8 +1714,7 @@ async function fetchOpenSky(env: Env, config: Config): Promise<unknown[]> {
 
   if (!response.ok) {
     const text = await response.text();
-    console.warn(`OpenSky request failed (${response.status}): ${text.slice(0, 240)}`);
-    return [];
+    throw new Error(`OpenSky request failed (${response.status}): ${text.slice(0, 240)}`);
   }
 
   const json = await response.json();
@@ -2928,8 +2946,16 @@ function renderIndexHtml(): string {
         resetFlightCycle();
         renderEmulator();
         const liveSource = data.device?.liveDataSource === "opensky" ? "OpenSky" : "FR24";
-        const liveState = data.airspaceMonitoring === false ? "live av" : liveSource + " på";
+        const sourceError = data.liveSourceStatus && data.liveSourceStatus.ok === false ? data.liveSourceStatus.error : "";
+        const liveState = data.airspaceMonitoring === false
+          ? "live av"
+          : sourceError
+            ? liveSource + " feilet"
+            : liveSource + " på";
         els.previewMeta.textContent = "Oppdatert " + new Date(data.updatedAt).toLocaleTimeString() + " · " + flights.length + " treff · " + displayMode + " · " + liveState;
+        if (sourceError) {
+          els.previewMeta.textContent += " · " + sourceError;
+        }
         if (!flights.length) {
           if (idleScreens.length) {
             els.flightList.innerHTML = idleScreens.map((screen) => {
