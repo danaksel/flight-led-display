@@ -1153,7 +1153,7 @@ async function toCompactDisplayFlight(env: Env, f: DisplayFlight, config: Config
 }
 
 function followStatusFor(f: DisplayFlight): Record<string, string> | null {
-  if (f.status === "done") {
+  if (f.status === "done" && f.gateMessage === "Landed") {
     return {
       kind: "landed",
       text: `Landed${f.displayTime ? ` ${f.displayTime}` : ""}`,
@@ -1171,8 +1171,8 @@ function followStatusFor(f: DisplayFlight): Record<string, string> | null {
     }
     const detail = f.displayTime ? `Dep ${f.displayTime}` : "";
     return {
-      kind: "not_departed",
-      text: f.gateMessage || "Not departed",
+      kind: f.status === "departed" ? "departed" : "not_departed",
+      text: f.status === "departed" ? "Departed" : f.gateMessage || "Not departed",
       detail,
       color: "preflight"
     };
@@ -1632,6 +1632,7 @@ function displayFlightFromAvinor(raw: AvinorRawFlight, config: Pick<Config, "lat
   const home = config.homeAirportIata || "OSL";
   const origin = isDeparture ? home : raw.resolved.airportCode;
   const destination = isDeparture ? raw.resolved.airportCode : home;
+  const status = isDeparture && raw.resolved.status === "done" ? "departed" : raw.resolved.status;
   return {
     flight: raw.resolved.flightId,
     callsign: raw.resolved.flightId,
@@ -1644,7 +1645,7 @@ function displayFlightFromAvinor(raw: AvinorRawFlight, config: Pick<Config, "lat
     distanceKm: config.radiusKm,
     bearingDeg: 0,
     source: "avinor",
-    status: raw.resolved.status,
+    status,
     gate: raw.resolved.gate,
     gateMessage: raw.resolved.gateMessage,
     scheduledTime: raw.resolved.scheduledTime,
