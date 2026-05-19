@@ -1669,7 +1669,7 @@ function isAirborneFlight(flight: DisplayFlight): boolean {
 }
 
 async function fetchOpenSky(env: Env, config: Config): Promise<unknown[]> {
-  const token = await getOpenSkyAccessToken(env);
+  const token = await getOptionalOpenSkyAccessToken(env);
   const bbox = boundingBoxFromRadius(config.lat, config.lon, config.radiusKm);
   const baseUrl = env.OPENSKY_BASE_URL || "https://opensky-network.org";
   const url = new URL(`${baseUrl}/api/states/all`);
@@ -1677,17 +1677,18 @@ async function fetchOpenSky(env: Env, config: Config): Promise<unknown[]> {
   url.searchParams.set("lamax", bbox.north.toFixed(6));
   url.searchParams.set("lomin", bbox.west.toFixed(6));
   url.searchParams.set("lomax", bbox.east.toFixed(6));
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (token) headers.Authorization = `Bearer ${token}`;
 
-  const response = await fetch(url, {
-    headers: {
-      Accept: "application/json",
-      Authorization: `Bearer ${token}`
-    }
-  });
+  let response = await fetch(url, { headers });
+  if (!response.ok && token && (response.status === 401 || response.status === 403)) {
+    response = await fetch(url, { headers: { Accept: "application/json" } });
+  }
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`OpenSky request failed (${response.status}): ${text.slice(0, 240)}`);
+    console.warn(`OpenSky request failed (${response.status}): ${text.slice(0, 240)}`);
+    return [];
   }
 
   const json = await response.json();
@@ -1697,9 +1698,18 @@ async function fetchOpenSky(env: Env, config: Config): Promise<unknown[]> {
   return [];
 }
 
+async function getOptionalOpenSkyAccessToken(env: Env): Promise<string | undefined> {
+  try {
+    return await getOpenSkyAccessToken(env);
+  } catch (error) {
+    console.warn(error instanceof Error ? error.message : "OpenSky token request failed");
+    return undefined;
+  }
+}
+
 async function getOpenSkyAccessToken(env: Env): Promise<string> {
   if (!env.OPENSKY_CLIENT_ID || !env.OPENSKY_CLIENT_SECRET) {
-    throw new Error("OPENSKY_CLIENT_ID and OPENSKY_CLIENT_SECRET secrets are not configured");
+    throw new Error("OpenSky OAuth credentials are not configured; using anonymous OpenSky request");
   }
 
   const cacheKey = "opensky:token:v1";

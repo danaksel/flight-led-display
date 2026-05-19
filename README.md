@@ -109,6 +109,8 @@ npx wrangler secret put OPENSKY_CLIENT_ID
 npx wrangler secret put OPENSKY_CLIENT_SECRET
 ```
 
+Hvis OpenSky OAuth er midlertidig utilgjengelig, prøver Worker anonym OpenSky-henting i stedet for å feile hele displayet. Det gir lavere kvote, men er bedre enn at skjermen stopper.
+
 ## Avinor-data
 
 Avinor brukes til gratis rutetabell for valgt flyplass. Worker henter:
