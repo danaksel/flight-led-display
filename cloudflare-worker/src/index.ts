@@ -1172,7 +1172,7 @@ function followStatusFor(f: DisplayFlight): Record<string, string> | null {
     const detail = f.displayTime ? `Dep ${f.displayTime}` : "";
     return {
       kind: f.status === "departed" ? "departed" : "not_departed",
-      text: f.status === "departed" ? "Departed" : f.gateMessage || "Not departed",
+      text: f.status === "departed" ? "Departed gate" : f.gateMessage || "Not departed",
       detail,
       color: "preflight"
     };
