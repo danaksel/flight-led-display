@@ -1677,12 +1677,20 @@ async function fetchOpenSky(env: Env, config: Config): Promise<unknown[]> {
   url.searchParams.set("lamax", bbox.north.toFixed(6));
   url.searchParams.set("lomin", bbox.west.toFixed(6));
   url.searchParams.set("lomax", bbox.east.toFixed(6));
-  const headers: Record<string, string> = { Accept: "application/json" };
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+    "User-Agent": "flight-display-server/1.0"
+  };
   if (token) headers.Authorization = `Bearer ${token}`;
 
   let response = await fetch(url, { headers });
   if (!response.ok && token && (response.status === 401 || response.status === 403)) {
-    response = await fetch(url, { headers: { Accept: "application/json" } });
+    response = await fetch(url, {
+      headers: {
+        Accept: "application/json",
+        "User-Agent": "flight-display-server/1.0"
+      }
+    });
   }
 
   if (!response.ok) {
@@ -1726,7 +1734,8 @@ async function getOpenSkyAccessToken(env: Env): Promise<string> {
     method: "POST",
     headers: {
       Accept: "application/json",
-      "Content-Type": "application/x-www-form-urlencoded"
+      "Content-Type": "application/x-www-form-urlencoded",
+      "User-Agent": "flight-display-server/1.0"
     },
     body
   });
