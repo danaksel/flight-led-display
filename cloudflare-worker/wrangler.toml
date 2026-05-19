@@ -7,6 +7,7 @@ assets = { directory = "./public", binding = "ASSETS", run_worker_first = ["/log
 [vars]
 FR24_API_BASE_URL = "https://fr24api.flightradar24.com/api"
 FR24_LIVE_ENDPOINT = "/live/flight-positions/full"
+FR24_FOLLOW_ENDPOINT = "/live/flight-positions/light"
 FR24_AIRLINE_ENDPOINT_TEMPLATE = "/static/airlines/{icao}/light"
 FR24_AIRPORT_ENDPOINT_TEMPLATE = "/static/airports/{code}/light"
 OPENSKY_TOKEN_URL = "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token"

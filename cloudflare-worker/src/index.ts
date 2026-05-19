@@ -5,6 +5,7 @@ export interface Env {
   FR24_API_KEY: string;
   FR24_API_BASE_URL?: string;
   FR24_LIVE_ENDPOINT?: string;
+  FR24_FOLLOW_ENDPOINT?: string;
   FR24_AIRLINE_ENDPOINT_TEMPLATE?: string;
   FR24_AIRPORT_ENDPOINT_TEMPLATE?: string;
   OPENSKY_CLIENT_ID?: string;
@@ -1399,7 +1400,7 @@ async function getTargetedFollowFlights(env: Env, config: Config, tokens: string
   if (!normalizedTokens.length) return [];
 
   const cacheTtl = Math.max(30, Math.min(300, parseNumber(env.CACHE_TTL_SECONDS, 60)));
-  const sourceVersion = liveDataSource === "fr24" ? "v2" : "v1";
+  const sourceVersion = liveDataSource === "fr24" ? "v3" : "v1";
   const areaPart = liveDataSource === "opensky" ? `:${config.lat.toFixed(3)}:${config.lon.toFixed(3)}:${Math.round(config.radiusKm)}` : "";
   const cacheKey = `follow:${liveDataSource}:${sourceVersion}:${normalizedTokens.slice().sort().join(",")}${areaPart}`;
   const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
@@ -1407,9 +1408,10 @@ async function getTargetedFollowFlights(env: Env, config: Config, tokens: string
 
   const records = liveDataSource === "opensky"
     ? await fetchOpenSky(env, config)
-    : await fetchFr24(env, undefined, { flights: normalizedTokens });
+    : await fetchFr24(env, undefined, { flights: normalizedTokens }, env.FR24_FOLLOW_ENDPOINT || "/live/flight-positions/light");
+  const fallbackFlight = liveDataSource === "fr24" && normalizedTokens.length === 1 ? normalizedTokens[0] : undefined;
   const flights = records
-    .map((record) => liveDataSource === "opensky" ? normalizeOpenSkyFlight(record, config) : normalizeFlight(record, config))
+    .map((record) => liveDataSource === "opensky" ? normalizeOpenSkyFlight(record, config) : normalizeFlight(record, config, fallbackFlight))
     .filter((flight): flight is DisplayFlight => Boolean(flight))
     .filter((flight) => liveDataSource === "opensky" ? normalizedTokens.some((token) => flightMatchesFollowToken(flight, token)) : true);
 
@@ -1828,11 +1830,11 @@ function boundingBoxFromRadius(lat: number, lon: number, radiusKm: number): { no
   };
 }
 
-async function fetchFr24(env: Env, bounds?: string, filters: { flights?: string[]; callsigns?: string[] } = {}): Promise<unknown[]> {
+async function fetchFr24(env: Env, bounds?: string, filters: { flights?: string[]; callsigns?: string[] } = {}, endpointOverride?: string): Promise<unknown[]> {
   if (!env.FR24_API_KEY) throw new Error("FR24_API_KEY secret is not configured");
 
   const baseUrl = env.FR24_API_BASE_URL || "https://fr24api.flightradar24.com/api";
-  const endpoint = env.FR24_LIVE_ENDPOINT || "/live/flight-positions/full";
+  const endpoint = endpointOverride || env.FR24_LIVE_ENDPOINT || "/live/flight-positions/full";
   const url = new URL(`${baseUrl}${endpoint}`);
   if (bounds) url.searchParams.set("bounds", bounds);
   if (filters.flights?.length) url.searchParams.set("flights", filters.flights.join(","));
@@ -1860,7 +1862,7 @@ async function fetchFr24(env: Env, bounds?: string, filters: { flights?: string[
   return [];
 }
 
-function normalizeFlight(record: unknown, config: Config): DisplayFlight | null {
+function normalizeFlight(record: unknown, config: Config, fallbackFlight?: string): DisplayFlight | null {
   if (!record || typeof record !== "object") return null;
   const r = record as Record<string, unknown>;
   const lat = firstNumber(r, ["lat", "latitude"]);
@@ -1870,10 +1872,13 @@ function normalizeFlight(record: unknown, config: Config): DisplayFlight | null 
   const distanceKm = haversineKm(config.lat, config.lon, lat, lon);
   const bearingDeg = bearing(config.lat, config.lon, lat, lon);
 
+  const altitudeFt = firstNumber(r, ["alt", "altitude", "altitude_ft"]);
+  const explicitOnGround = firstBoolean(r, ["on_ground", "onground", "ground", "is_ground", "is_on_ground"]);
+
   return {
     fr24Id: firstString(r, ["fr24_id", "id"]),
     callsign: firstString(r, ["callsign"]),
-    flight: firstString(r, ["flight", "flight_number"]),
+    flight: firstString(r, ["flight", "flight_number"]) || fallbackFlight,
     airline: firstString(r, ["airline_name", "airline_full_name", "name"]),
     airlineCode: firstString(r, ["painted_as", "operated_as", "airline_icao", "airline"]),
     aircraft: firstString(r, ["type", "aircraft_code", "aircraft"]),
@@ -1882,11 +1887,11 @@ function normalizeFlight(record: unknown, config: Config): DisplayFlight | null 
     destination: firstString(r, ["dest_iata", "destination_iata", "destination_icao"]),
     lat,
     lon,
-    altitudeFt: firstNumber(r, ["alt", "altitude", "altitude_ft"]),
+    altitudeFt,
     speedKts: firstNumber(r, ["gspeed", "ground_speed", "speed"]),
     headingDeg: firstNumber(r, ["track", "heading"]),
     verticalRateFpm: firstNumber(r, ["vspeed", "vertical_speed", "vertical_rate", "vertical_speed_fpm"]),
-    onGround: firstBoolean(r, ["on_ground", "onground", "ground", "is_ground", "is_on_ground"]),
+    onGround: explicitOnGround ?? (altitudeFt !== undefined ? altitudeFt <= 0 : undefined),
     distanceKm,
     bearingDeg,
     source: "fr24"
