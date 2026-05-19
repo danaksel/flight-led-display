@@ -7,6 +7,10 @@ export interface Env {
   FR24_LIVE_ENDPOINT?: string;
   FR24_AIRLINE_ENDPOINT_TEMPLATE?: string;
   FR24_AIRPORT_ENDPOINT_TEMPLATE?: string;
+  OPENSKY_CLIENT_ID?: string;
+  OPENSKY_CLIENT_SECRET?: string;
+  OPENSKY_TOKEN_URL?: string;
+  OPENSKY_BASE_URL?: string;
   HOME_AIRPORT_IATA?: string;
   DEFAULT_LAT?: string;
   DEFAULT_LON?: string;
@@ -41,6 +45,7 @@ type FollowSettings = {
 type DeviceSettings = {
   enabled: boolean;
   airspaceMonitoringEnabled: boolean;
+  liveDataSource: "fr24" | "opensky";
   brightness: number;
   pollSeconds: number;
   displayCycleSeconds: number;
@@ -99,7 +104,7 @@ type DisplayFlight = {
   onGround?: boolean;
   distanceKm: number;
   bearingDeg: number;
-  source?: "fr24" | "avinor";
+  source?: "fr24" | "opensky" | "avinor";
   status?: string;
   gate?: string;
   gateMessage?: string;
@@ -508,6 +513,7 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
     airspaceMonitoringEnabled: typeof (v as { airspaceMonitoringEnabled?: unknown }).airspaceMonitoringEnabled === "boolean"
       ? Boolean((v as { airspaceMonitoringEnabled?: unknown }).airspaceMonitoringEnabled)
       : true,
+    liveDataSource: oneOf((v as { liveDataSource?: unknown }).liveDataSource, ["fr24", "opensky"], "fr24"),
     brightness: clampNumber(v.brightness, 1, 100, 80),
     pollSeconds: clampNumber(v.pollSeconds, 30, 900, 90),
     displayCycleSeconds: clampNumber(v.displayCycleSeconds, 2, 30, 5),
@@ -1300,8 +1306,9 @@ function normalizeLogoCode(airlineCode: string | undefined): string {
 }
 
 async function getFlights(env: Env, config: Config): Promise<DisplayFlight[]> {
+  const liveDataSource = normalizeDeviceSettings(config.device).liveDataSource;
   const cacheTtl = Math.max(60, parseNumber(env.CACHE_TTL_SECONDS, 60));
-  const cacheKey = `flights:v1:${config.lat.toFixed(3)}:${config.lon.toFixed(3)}:${Math.round(config.radiusKm)}`;
+  const cacheKey = `flights:${liveDataSource}:v1:${config.lat.toFixed(3)}:${config.lon.toFixed(3)}:${Math.round(config.radiusKm)}`;
   const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
   if (Array.isArray(cached)) {
     const flights = cached as DisplayFlight[];
@@ -1310,9 +1317,11 @@ async function getFlights(env: Env, config: Config): Promise<DisplayFlight[]> {
   }
 
   const bounds = boundsFromRadius(config.lat, config.lon, config.radiusKm);
-  const records = await fetchFr24(env, bounds);
+  const records = liveDataSource === "opensky"
+    ? await fetchOpenSky(env, config)
+    : await fetchFr24(env, bounds);
   const flights = records
-    .map((record) => normalizeFlight(record, config))
+    .map((record) => liveDataSource === "opensky" ? normalizeOpenSkyFlight(record, config) : normalizeFlight(record, config))
     .filter((flight): flight is DisplayFlight => Boolean(flight))
     .filter(isAirborneFlight)
     .filter((flight) => flight.distanceKm <= config.radiusKm)
@@ -1364,20 +1373,26 @@ async function getFollowFlights(env: Env, config: Config, liveFlights: DisplayFl
 }
 
 async function getTargetedFollowFlights(env: Env, config: Config, tokens: string[]): Promise<DisplayFlight[]> {
+  const liveDataSource = normalizeDeviceSettings(config.device).liveDataSource;
   const normalizedTokens = tokens
     .map(normalizeFollowToken)
     .filter((token): token is string => Boolean(token));
   if (!normalizedTokens.length) return [];
 
   const cacheTtl = Math.max(30, Math.min(300, parseNumber(env.CACHE_TTL_SECONDS, 60)));
-  const cacheKey = `follow:fr24:v2:${normalizedTokens.slice().sort().join(",")}`;
+  const sourceVersion = liveDataSource === "fr24" ? "v2" : "v1";
+  const areaPart = liveDataSource === "opensky" ? `:${config.lat.toFixed(3)}:${config.lon.toFixed(3)}:${Math.round(config.radiusKm)}` : "";
+  const cacheKey = `follow:${liveDataSource}:${sourceVersion}:${normalizedTokens.slice().sort().join(",")}${areaPart}`;
   const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
   if (Array.isArray(cached)) return cached as DisplayFlight[];
 
-  const records = await fetchFr24(env, undefined, { flights: normalizedTokens });
+  const records = liveDataSource === "opensky"
+    ? await fetchOpenSky(env, config)
+    : await fetchFr24(env, undefined, { flights: normalizedTokens });
   const flights = records
-    .map((record) => normalizeFlight(record, config))
-    .filter((flight): flight is DisplayFlight => Boolean(flight));
+    .map((record) => liveDataSource === "opensky" ? normalizeOpenSkyFlight(record, config) : normalizeFlight(record, config))
+    .filter((flight): flight is DisplayFlight => Boolean(flight))
+    .filter((flight) => liveDataSource === "opensky" ? normalizedTokens.some((token) => flightMatchesFollowToken(flight, token)) : true);
 
   await enrichAirlineNames(env, flights);
   await enrichAirportContext(env, config, flights);
@@ -1573,12 +1588,12 @@ function avinorFlightMatchesFollowToken(flight: AvinorRawFlight, token: string):
 }
 
 function mergeFollowLiveFlight(live: DisplayFlight, raw: AvinorRawFlight | undefined, config: Config): DisplayFlight {
-  if (!raw) return { ...live, source: "fr24" };
+  if (!raw) return { ...live, source: live.source || "fr24" };
   const avinor = displayFlightFromAvinor(raw, config);
   return {
     ...avinor,
     ...live,
-    source: "fr24",
+    source: live.source || "fr24",
     airline: avinor.airline || live.airline,
     airlineCode: avinor.airlineCode || normalizeLogoCode(live.airlineCode),
     origin: avinor.origin || live.origin,
@@ -1653,6 +1668,128 @@ function isAirborneFlight(flight: DisplayFlight): boolean {
   return typeof flight.altitudeFt === "number" && flight.altitudeFt > 0;
 }
 
+async function fetchOpenSky(env: Env, config: Config): Promise<unknown[]> {
+  const token = await getOpenSkyAccessToken(env);
+  const bbox = boundingBoxFromRadius(config.lat, config.lon, config.radiusKm);
+  const baseUrl = env.OPENSKY_BASE_URL || "https://opensky-network.org";
+  const url = new URL(`${baseUrl}/api/states/all`);
+  url.searchParams.set("lamin", bbox.south.toFixed(6));
+  url.searchParams.set("lamax", bbox.north.toFixed(6));
+  url.searchParams.set("lomin", bbox.west.toFixed(6));
+  url.searchParams.set("lomax", bbox.east.toFixed(6));
+
+  const response = await fetch(url, {
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${token}`
+    }
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`OpenSky request failed (${response.status}): ${text.slice(0, 240)}`);
+  }
+
+  const json = await response.json();
+  if (json && typeof json === "object" && Array.isArray((json as { states?: unknown[] }).states)) {
+    return (json as { states: unknown[] }).states;
+  }
+  return [];
+}
+
+async function getOpenSkyAccessToken(env: Env): Promise<string> {
+  if (!env.OPENSKY_CLIENT_ID || !env.OPENSKY_CLIENT_SECRET) {
+    throw new Error("OPENSKY_CLIENT_ID and OPENSKY_CLIENT_SECRET secrets are not configured");
+  }
+
+  const cacheKey = "opensky:token:v1";
+  const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey);
+  if (cached) return cached;
+
+  const tokenUrl = env.OPENSKY_TOKEN_URL || "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token";
+  const body = new URLSearchParams({
+    grant_type: "client_credentials",
+    client_id: env.OPENSKY_CLIENT_ID,
+    client_secret: env.OPENSKY_CLIENT_SECRET
+  });
+  const response = await fetch(tokenUrl, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`OpenSky token request failed (${response.status}): ${text.slice(0, 240)}`);
+  }
+
+  const json = await response.json() as { access_token?: unknown; expires_in?: unknown };
+  if (typeof json.access_token !== "string" || !json.access_token) {
+    throw new Error("OpenSky token response did not contain access_token");
+  }
+  const ttl = Math.max(60, Math.min(3600, Number(json.expires_in || 1800) - 60));
+  await env.FLIGHT_DISPLAY_KV.put(cacheKey, json.access_token, { expirationTtl: ttl });
+  return json.access_token;
+}
+
+function normalizeOpenSkyFlight(record: unknown, config: Config): DisplayFlight | null {
+  if (!Array.isArray(record) || record.length < 17) return null;
+  const callsign = typeof record[1] === "string" ? record[1].trim().toUpperCase() : "";
+  const originCountry = typeof record[2] === "string" ? record[2].trim() : "";
+  const lon = numberFromUnknown(record[5]);
+  const lat = numberFromUnknown(record[6]);
+  if (lat === undefined || lon === undefined) return null;
+
+  const baroAltitudeM = numberFromUnknown(record[7]);
+  const geoAltitudeM = numberFromUnknown(record[13]);
+  const velocityMs = numberFromUnknown(record[9]);
+  const trueTrack = numberFromUnknown(record[10]);
+  const verticalRateMs = numberFromUnknown(record[11]);
+  const onGround = typeof record[8] === "boolean" ? record[8] : undefined;
+  const distanceKm = haversineKm(config.lat, config.lon, lat, lon);
+  const bearingDeg = bearing(config.lat, config.lon, lat, lon);
+  const icaoPrefix = callsign.match(/^([A-Z]{3})\d/)?.[1];
+
+  return {
+    callsign,
+    flight: callsign,
+    airline: icaoPrefix || originCountry || undefined,
+    airlineCode: icaoPrefix,
+    lat,
+    lon,
+    altitudeFt: metersToFeet(baroAltitudeM ?? geoAltitudeM),
+    speedKts: velocityMs === undefined ? undefined : velocityMs * 1.94384,
+    headingDeg: trueTrack,
+    verticalRateFpm: verticalRateMs === undefined ? undefined : verticalRateMs * 196.850394,
+    onGround,
+    distanceKm,
+    bearingDeg,
+    source: "opensky"
+  };
+}
+
+function numberFromUnknown(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function metersToFeet(value: number | undefined): number | undefined {
+  return value === undefined ? undefined : value * 3.28084;
+}
+
+function boundingBoxFromRadius(lat: number, lon: number, radiusKm: number): { north: number; south: number; west: number; east: number } {
+  const latDelta = radiusKm / 111.32;
+  const lonDelta = radiusKm / (111.32 * Math.cos((lat * Math.PI) / 180));
+  return {
+    north: clamp(lat + latDelta, -90, 90),
+    south: clamp(lat - latDelta, -90, 90),
+    west: clamp(lon - lonDelta, -180, 180),
+    east: clamp(lon + lonDelta, -180, 180)
+  };
+}
+
 async function fetchFr24(env: Env, bounds?: string, filters: { flights?: string[]; callsigns?: string[] } = {}): Promise<unknown[]> {
   if (!env.FR24_API_KEY) throw new Error("FR24_API_KEY secret is not configured");
 
@@ -1713,7 +1850,8 @@ function normalizeFlight(record: unknown, config: Config): DisplayFlight | null 
     verticalRateFpm: firstNumber(r, ["vspeed", "vertical_speed", "vertical_rate", "vertical_speed_fpm"]),
     onGround: firstBoolean(r, ["on_ground", "onground", "ground", "is_ground", "is_on_ground"]),
     distanceKm,
-    bearingDeg
+    bearingDeg,
+    source: "fr24"
   };
 }
 
@@ -1734,6 +1872,7 @@ async function enrichAirlineNames(env: Env, flights: DisplayFlight[]): Promise<v
   const codes = Array.from(
     new Set(
       flights
+        .filter((flight) => flight.source !== "opensky")
         .map((flight) => flight.airlineCode)
         .filter((code): code is string => Boolean(code && /^[A-Z0-9]{2,4}$/.test(code)))
     )
@@ -2218,10 +2357,16 @@ function renderIndexHtml(): string {
         <div class="toggle-row">
           <div>
             <label for="airspaceMonitoringEnabled">Overvåk luftrommet</label>
-            <div class="field-help">Når denne er av, henter Worker ikke FR24-data. Tidstabell fra Avinor vises fortsatt.</div>
+            <div class="field-help">Når denne er av, henter Worker ikke live flydata. Tidstabell fra Avinor vises fortsatt.</div>
           </div>
           <input id="airspaceMonitoringEnabled" type="checkbox">
         </div>
+        <label for="liveDataSource">Kilde for live flydata</label>
+        <select id="liveDataSource">
+          <option value="fr24">Flightradar24</option>
+          <option value="opensky">OpenSky Network</option>
+        </select>
+        <div class="field-help">OpenSky er samme posisjonskilde som originalprosjektet. Den gir færre rute-/navnedata, men bruker ikke FR24-credits.</div>
         <div class="toggle-row">
           <label for="followEnabled">Følg flightnummer</label>
           <input id="followEnabled" type="checkbox">
@@ -2421,6 +2566,7 @@ function renderIndexHtml(): string {
       radius: document.querySelector("#radius"),
       homeAirport: document.querySelector("#homeAirport"),
       airspaceMonitoringEnabled: document.querySelector("#airspaceMonitoringEnabled"),
+      liveDataSource: document.querySelector("#liveDataSource"),
       followEnabled: document.querySelector("#followEnabled"),
       followFlights: document.querySelector("#followFlights"),
       altitudeUnit: document.querySelector("#altitudeUnit"),
@@ -2536,6 +2682,7 @@ function renderIndexHtml(): string {
       els.homeAirport.value = config.homeAirportIata || "OSL";
       const follow = config.follow || {};
       els.airspaceMonitoringEnabled.checked = device.airspaceMonitoringEnabled !== false;
+      els.liveDataSource.value = device.liveDataSource || "fr24";
       els.followEnabled.checked = follow.enabled === true;
       els.followFlights.value = Array.isArray(follow.flights) ? follow.flights.join(", ") : "";
       const followUnits = device.followUnits || {};
@@ -2589,6 +2736,7 @@ function renderIndexHtml(): string {
         device: {
           enabled: els.deviceEnabled.checked,
           airspaceMonitoringEnabled: els.airspaceMonitoringEnabled.checked,
+          liveDataSource: els.liveDataSource.value,
           brightness: Number(els.deviceBrightness.value),
           pollSeconds: Number(els.pollSeconds.value),
           displayCycleSeconds: Number(els.cycleSeconds.value),
@@ -2760,8 +2908,9 @@ function renderIndexHtml(): string {
         currentIdleScreenIndex = 0;
         resetFlightCycle();
         renderEmulator();
-        const fr24State = data.airspaceMonitoring === false ? "FR24 av" : "FR24 på";
-        els.previewMeta.textContent = "Oppdatert " + new Date(data.updatedAt).toLocaleTimeString() + " · " + flights.length + " treff · " + displayMode + " · " + fr24State;
+        const liveSource = data.device?.liveDataSource === "opensky" ? "OpenSky" : "FR24";
+        const liveState = data.airspaceMonitoring === false ? "live av" : liveSource + " på";
+        els.previewMeta.textContent = "Oppdatert " + new Date(data.updatedAt).toLocaleTimeString() + " · " + flights.length + " treff · " + displayMode + " · " + liveState;
         if (!flights.length) {
           if (idleScreens.length) {
             els.flightList.innerHTML = idleScreens.map((screen) => {
@@ -2769,7 +2918,7 @@ function renderIndexHtml(): string {
               return '<article class="flight"><strong>' + escapeHtml(screen.title || "Airport") + '</strong><span>' + rows.map(formatIdleRow).map(escapeHtml).join("<br>") + '</span></article>';
             }).join("");
           } else {
-            els.flightList.innerHTML = '<div class="empty">Ingen fly i valgt radius akkurat nå, eller FR24/Avinor svarte uten matchende data.</div>';
+            els.flightList.innerHTML = '<div class="empty">Ingen fly i valgt radius akkurat nå, eller live-kilde/Avinor svarte uten matchende data.</div>';
           }
           return;
         }
