@@ -253,6 +253,19 @@ type AviationstackFlight = {
   };
 };
 
+type AviationstackRawResponse = {
+  request: {
+    url: string;
+    flight: string;
+    flightParam: "flight_iata" | "flight_icao";
+    limit: string;
+  };
+  status: number;
+  ok: boolean;
+  contentType: string;
+  body: unknown;
+};
+
 type IdleRow = {
   flightId: string;
   airport: string;
@@ -356,6 +369,7 @@ export default {
       if (url.pathname === "/api/flights" && request.method === "GET") return flightsResponse(env, false);
       if (url.pathname === "/api/display" && request.method === "GET") return flightsResponse(env, true);
       if (url.pathname === "/api/avinor-board" && request.method === "GET") return avinorBoardResponse(env);
+      if (url.pathname === "/api/aviationstack" && request.method === "GET") return aviationstackDebugResponse(request, env);
       if (url.pathname === "/api/health") return jsonResponse({ ok: true });
 
       return jsonResponse({ error: "Not found" }, 404);
@@ -442,6 +456,26 @@ async function avinorBoardResponse(env: Env): Promise<Response> {
   }, 200, {
     "Cache-Control": "public, max-age=15"
   });
+}
+
+async function aviationstackDebugResponse(request: Request, env: Env): Promise<Response> {
+  const apiKey = getAviationstackApiKey(env);
+  if (!apiKey) return jsonResponse({ error: "AVIATIONSTACK_API_KEY secret is not configured" }, 500, { "Cache-Control": "no-store" });
+
+  const url = new URL(request.url);
+  const token = normalizeFollowToken(url.searchParams.get("flight") || url.searchParams.get("flight_iata") || url.searchParams.get("flight_icao") || "");
+  if (!token) {
+    return jsonResponse({
+      error: "Missing flight query parameter",
+      example: "/api/aviationstack?flight=TP764"
+    }, 400, { "Cache-Control": "no-store" });
+  }
+
+  const raw = await fetchAviationstackRaw(env, apiKey, token);
+  return jsonResponse({
+    fetchedAt: new Date().toISOString(),
+    ...raw
+  }, 200, { "Cache-Control": "no-store" });
 }
 
 function filterAvinorRawFlights(flights: AvinorRawFlight[], direction: "A" | "D", config: Config): AvinorRawFlight[] {
@@ -1656,27 +1690,12 @@ function getAviationstackApiKey(env: Env): string | undefined {
 }
 
 async function fetchAviationstackFlights(env: Env, apiKey: string, flightToken: string): Promise<AviationstackFlight[]> {
-  const baseUrl = env.AVIATIONSTACK_API_BASE_URL || "https://api.aviationstack.com/v1";
-  const url = new URL(`${baseUrl.replace(/\/+$/, "")}/flights`);
-  url.searchParams.set("access_key", apiKey);
-  if (/^[A-Z]{3}\d/.test(flightToken)) {
-    url.searchParams.set("flight_icao", flightToken);
-  } else {
-    url.searchParams.set("flight_iata", flightToken);
-  }
-  url.searchParams.set("limit", "10");
-
-  const response = await fetch(url.toString(), {
-    headers: {
-      Accept: "application/json"
-    }
-  });
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Aviationstack request failed (${response.status}): ${text.slice(0, 240)}`);
+  const raw = await fetchAviationstackRaw(env, apiKey, flightToken);
+  if (!raw.ok) {
+    throw new Error(`Aviationstack request failed (${raw.status}): ${safeJsonSnippet(raw.body)}`);
   }
 
-  const json = await response.json() as Record<string, unknown>;
+  const json = raw.body && typeof raw.body === "object" && !Array.isArray(raw.body) ? raw.body as Record<string, unknown> : {};
   if (json.error && typeof json.error === "object") {
     const error = json.error as Record<string, unknown>;
     const message = firstString(error, ["message", "info", "type"]) || "unknown error";
@@ -1684,6 +1703,47 @@ async function fetchAviationstackFlights(env: Env, apiKey: string, flightToken: 
   }
   const records = Array.isArray(json.data) ? json.data : Array.isArray(json.results) ? json.results : [];
   return records.filter((record): record is AviationstackFlight => Boolean(record && typeof record === "object"));
+}
+
+async function fetchAviationstackRaw(env: Env, apiKey: string, flightToken: string): Promise<AviationstackRawResponse> {
+  const baseUrl = env.AVIATIONSTACK_API_BASE_URL || "https://api.aviationstack.com/v1";
+  const url = new URL(`${baseUrl.replace(/\/+$/, "")}/flights`);
+  url.searchParams.set("access_key", apiKey);
+  const flightParam = /^[A-Z]{3}\d/.test(flightToken) ? "flight_icao" : "flight_iata";
+  url.searchParams.set(flightParam, flightToken);
+  url.searchParams.set("limit", "10");
+
+  const response = await fetch(url.toString(), {
+    headers: {
+      Accept: "application/json"
+    }
+  });
+
+  const contentType = response.headers.get("content-type") || "";
+  const text = await response.text();
+  let body: unknown = text;
+  if (/json/i.test(contentType)) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = text;
+    }
+  }
+
+  const safeUrl = new URL(url.toString());
+  safeUrl.searchParams.set("access_key", "REDACTED");
+  return {
+    request: {
+      url: safeUrl.toString(),
+      flight: flightToken,
+      flightParam,
+      limit: "10"
+    },
+    status: response.status,
+    ok: response.ok,
+    contentType,
+    body
+  };
 }
 
 function normalizeAviationstackFlight(record: AviationstackFlight, config: Config): DisplayFlight | undefined {
@@ -1750,6 +1810,14 @@ function formatAviationstackLocalTime(value: string | null | undefined): string 
 
 function normalizeSecretString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function safeJsonSnippet(value: unknown): string {
+  try {
+    return JSON.stringify(value).slice(0, 240);
+  } catch {
+    return String(value).slice(0, 240);
+  }
 }
 
 function mergeFlightsByIdentity(flights: DisplayFlight[]): DisplayFlight[] {
@@ -2923,6 +2991,7 @@ function renderIndexHtml(): string {
           <a href="/api/flights" target="_blank">Flights</a>
           <a href="/api/display" target="_blank">Display</a>
           <a href="/api/avinor-board" target="_blank">Avinor board</a>
+          <a href="/api/aviationstack?flight=TP764" target="_blank">Aviationstack raw</a>
         </div>
       </details>
       <section class="preview card" aria-label="Display preview">
