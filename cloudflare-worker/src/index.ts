@@ -1743,7 +1743,9 @@ function cleanNullableString(value: string | null | undefined): string | undefin
 }
 
 function formatAviationstackLocalTime(value: string | null | undefined): string {
-  return typeof value === "string" ? formatLocalTimeFromLocal(value) : "";
+  if (typeof value !== "string") return "";
+  const match = value.match(/[T ](\d{2}):(\d{2})/);
+  return match ? `${match[1]}:${match[2]}` : "";
 }
 
 function normalizeSecretString(value: unknown): string | undefined {
