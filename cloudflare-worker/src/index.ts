@@ -2708,12 +2708,20 @@ function renderIndexHtml(): string {
     :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; --ink:#f5f0df; --muted:#9fa8b8; --line:#273345; --panel:#101720; --panel2:#151f2b; --field:#0b1118; --amber:#f6b800; --amber2:#ffd761; --blue:#2f7fdd; --danger:#ff6d4a; --ok:#78d98f; }
     body { margin: 0; min-height: 100vh; background: #05080d; color: var(--ink); }
     .shell { min-height: 100vh; display: grid; grid-template-columns: minmax(390px, 450px) minmax(0, 1fr); align-items: stretch; background: linear-gradient(135deg, #05080d 0%, #0d141e 54%, #161205 100%); }
-    aside { padding: 18px; background: linear-gradient(180deg, rgba(9,14,20,.98), rgba(13,19,28,.96)); border-right: 1px solid #2c3542; box-shadow: 12px 0 30px rgba(0,0,0,.24); box-sizing: border-box; }
+    aside { padding: 18px; background: linear-gradient(180deg, rgba(9,14,20,.98), rgba(13,19,28,.96)); border-right: 1px solid #2c3542; box-shadow: 12px 0 30px rgba(0,0,0,.24); box-sizing: border-box; display: flex; flex-direction: column; }
     .brand { margin: 0 0 14px; padding: 14px 14px 12px; background: #05070a; border: 1px solid #293241; border-left: 5px solid var(--amber); border-radius: 6px; }
     .eyebrow { margin: 0 0 7px; color: var(--amber2); font-size: 11px; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; }
     h1 { margin: 0; font-size: 25px; line-height: 1.05; letter-spacing: .02em; }
     p { margin: 7px 0 0; color: var(--muted); line-height: 1.45; font-size: 13px; }
     .card { margin-top: 12px; padding: 13px; border: 1px solid var(--line); border-radius: 6px; background: rgba(16,23,32,.88); box-shadow: 0 14px 36px rgba(0,0,0,.22); }
+    .brand { order: 0; }
+    .savebar { order: 1; }
+    .flight-card { order: 2; }
+    .place-card { order: 3; }
+    .screen-card { order: 4; }
+    .timetable-card { order: 5; }
+    .links-wrap { order: 6; }
+    .preview { order: 7; }
     .card h2 { margin: 0; color: var(--amber2); font-size: 13px; letter-spacing: .12em; text-transform: uppercase; }
     .section-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 0 12px; }
     .section-note { margin: -4px 0 10px; color: var(--muted); font-size: 12px; line-height: 1.4; }
@@ -2735,7 +2743,7 @@ function renderIndexHtml(): string {
     button { margin-top: 14px; width: 100%; border: 0; border-radius: 5px; padding: 10px 13px; background: var(--amber); color: #111; font: inherit; font-weight: 850; cursor: pointer; }
     button.secondary { background: #1d2938; color: #f3f6fb; border: 1px solid #354457; margin-top: 9px; }
     button:hover { filter: brightness(1.05); }
-    .savebar { margin-top: 12px; padding: 12px; border: 1px solid #2e3a4c; border-radius: 6px; background: linear-gradient(180deg, #111a25, #0b1118); }
+    .savebar { position: sticky; top: 0; z-index: 12; margin-top: 12px; padding: 12px; border: 1px solid #3c4a5e; border-radius: 6px; background: linear-gradient(180deg, rgba(24,34,48,.98), rgba(9,14,20,.98)); box-shadow: 0 10px 22px rgba(0,0,0,.34); }
     .savebar button { margin: 0; }
     .status { min-height: 18px; margin-top: 9px; font-size: 12px; color: var(--ok); }
     .status.dirty { color: var(--amber2); }
@@ -2745,6 +2753,9 @@ function renderIndexHtml(): string {
     details.links-wrap { margin-top: 12px; border: 1px solid #263345; border-radius: 6px; background: #0b1118; }
     details.links-wrap summary { cursor: pointer; padding: 9px 10px; color: var(--muted); font-size: 12px; font-weight: 800; }
     details.links-wrap .links { margin: 0; padding: 0 10px 10px; }
+    details.settings-group { margin-top: 12px; border: 1px solid #263345; border-radius: 6px; background: rgba(11,17,24,.76); }
+    details.settings-group summary { cursor: pointer; padding: 9px 10px; color: #f4f7ff; font-size: 12px; font-weight: 850; letter-spacing: .06em; text-transform: uppercase; }
+    details.settings-group .settings-body { padding: 0 10px 10px; border-top: 1px solid #263345; }
     .preview { margin-top: 16px; }
     .preview-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
     .preview-head h2 { margin: 0; font-size: 13px; }
@@ -2804,7 +2815,11 @@ function renderIndexHtml(): string {
         <h1>Flight Display</h1>
         <p>Velg område, lysstyrke og hvordan skjermen skal oppføre seg. Live-data hentes bare når du trykker på en hent-knapp eller starter display-test.</p>
       </header>
-      <section class="card">
+      <div class="savebar">
+        <button id="save">Lagre alle innstillinger</button>
+        <div id="status" class="status"></div>
+      </div>
+      <section class="card place-card">
         <div class="section-head">
           <h2>Sted og flyplass</h2>
           <span class="hint" tabindex="0" data-tip="Dette bestemmer hvor skjermen leter etter fly, og hvilken flyplass som brukes til avgangs- og ankomsttavlen.">i</span>
@@ -2843,12 +2858,12 @@ function renderIndexHtml(): string {
         <button id="locate" class="secondary">Bruk min posisjon</button>
         <section id="map" aria-label="Kart"></section>
       </section>
-      <section class="card">
+      <section class="card screen-card">
         <div class="section-head">
           <h2>Skjerm</h2>
           <span class="hint" tabindex="0" data-tip="Dette styrer selve panelet: om det er på, hvor sterkt det lyser, hvor ofte skjermen henter data, og når nattmodus stopper betalte FR24-kall.">i</span>
         </div>
-        <p class="section-note">Nattmodus med 0% natt-lysstyrke stopper henting fra FR24, slik at displayet ikke bruker credits mens ingen ser på.</p>
+        <p class="section-note">De viktigste displayvalgene. Sjeldnere tidsvalg ligger under avansert.</p>
         <div class="toggle-row">
           <label for="deviceEnabled">Skjermen er på</label>
           <input id="deviceEnabled" type="checkbox">
@@ -2864,34 +2879,39 @@ function renderIndexHtml(): string {
             <div class="field-help">Sekunder mellom hver henting når skjermen er aktiv.</div>
           </div>
         </div>
-        <div class="row">
-          <div>
-            <label for="configRefreshSeconds">Sjekk innstillinger hvert</label>
-            <input id="configRefreshSeconds" type="number" min="60" max="3600" step="30">
-            <div class="field-help">Hvor ofte skjermen spør Worker om nye innstillinger.</div>
+        <details class="settings-group">
+          <summary>Avansert skjerm</summary>
+          <div class="settings-body">
+            <div class="row">
+              <div>
+                <label for="configRefreshSeconds">Sjekk innstillinger hvert</label>
+                <input id="configRefreshSeconds" type="number" min="60" max="3600" step="30">
+                <div class="field-help">Hvor ofte skjermen spør Worker om nye innstillinger.</div>
+              </div>
+              <div>
+                <label for="nightBrightness">Lysstyrke om natten</label>
+                <input id="nightBrightness" type="number" min="0" max="100" step="1">
+                <div class="field-help">Sett 0 for å stoppe visning og FR24-henting om natten.</div>
+              </div>
+            </div>
+            <div class="toggle-row">
+              <label for="nightEnabled">Bruk nattmodus</label>
+              <input id="nightEnabled" type="checkbox">
+            </div>
+            <div class="row">
+              <div>
+                <label for="nightStart">Natt starter</label>
+                <input id="nightStart" type="time">
+              </div>
+              <div>
+                <label for="nightEnd">Natt slutter</label>
+                <input id="nightEnd" type="time">
+              </div>
+            </div>
           </div>
-          <div>
-            <label for="nightBrightness">Lysstyrke om natten</label>
-            <input id="nightBrightness" type="number" min="0" max="100" step="1">
-            <div class="field-help">Sett 0 for å stoppe visning og FR24-henting om natten.</div>
-          </div>
-        </div>
-        <div class="toggle-row">
-          <label for="nightEnabled">Bruk nattmodus</label>
-          <input id="nightEnabled" type="checkbox">
-        </div>
-        <div class="row">
-          <div>
-            <label for="nightStart">Natt starter</label>
-            <input id="nightStart" type="time">
-          </div>
-          <div>
-            <label for="nightEnd">Natt slutter</label>
-            <input id="nightEnd" type="time">
-          </div>
-        </div>
+        </details>
       </section>
-      <section class="card">
+      <section class="card flight-card">
         <div class="section-head">
           <h2>Fly</h2>
           <span class="hint" tabindex="0" data-tip="Dette gjelder skjermen som viser fly i nærheten eller et flightnummer du følger. Follow-visningen bytter automatisk mellom live tall og Flying over.">i</span>
@@ -2917,88 +2937,93 @@ function renderIndexHtml(): string {
         <label for="followFlights">Flightnummer</label>
         <input id="followFlights" autocomplete="off" placeholder="SK4673, DY1304, DOC45">
         <div class="field-help">La stå av for å vise fly i området. Skru på for å følge bestemte fly.</div>
-        <div class="subhead">Integrasjoner</div>
-        <div class="field-help" id="aviationstackStatus">Aviationstack: sjekker secret...</div>
-        <div class="subhead">Live-målinger</div>
-        <div class="row">
-          <div>
-            <label for="altitudeUnit">Høyde vises som</label>
-            <select id="altitudeUnit">
-              <option value="ft">ft</option>
-              <option value="fl">FL</option>
-              <option value="m">m</option>
-              <option value="km">km</option>
-              <option value="nmi">nmi</option>
-            </select>
+        <details class="settings-group">
+          <summary>Avansert flyvisning</summary>
+          <div class="settings-body">
+            <div class="subhead">Integrasjoner</div>
+            <div class="field-help" id="aviationstackStatus">Aviationstack: sjekker secret...</div>
+            <div class="subhead">Live-målinger</div>
+            <div class="row">
+              <div>
+                <label for="altitudeUnit">Høyde vises som</label>
+                <select id="altitudeUnit">
+                  <option value="ft">ft</option>
+                  <option value="fl">FL</option>
+                  <option value="m">m</option>
+                  <option value="km">km</option>
+                  <option value="nmi">nmi</option>
+                </select>
+              </div>
+              <div>
+                <label for="speedUnit">Fart vises som</label>
+                <select id="speedUnit">
+                  <option value="kn">kn</option>
+                  <option value="mph">mph</option>
+                  <option value="kmh">km/h</option>
+                  <option value="ms">m/s</option>
+                  <option value="mach">mach</option>
+                </select>
+              </div>
+            </div>
+            <div class="row">
+              <div>
+                <label for="trackUnit">Retning vises som</label>
+                <select id="trackUnit">
+                  <option value="deg">degrees</option>
+                  <option value="cardinal">cardinal</option>
+                </select>
+              </div>
+              <div>
+                <label for="verticalRateUnit">Stigning/synk vises som</label>
+                <select id="verticalRateUnit">
+                  <option value="fpm">fpm</option>
+                  <option value="fts">ft/s</option>
+                  <option value="ms">m/s</option>
+                  <option value="mph">mph</option>
+                  <option value="kmh">km/h</option>
+                </select>
+              </div>
+            </div>
+            <div class="subhead">Oppførsel</div>
+            <div class="row">
+              <div>
+                <label for="cycleSeconds">Bytt fly etter sekunder</label>
+                <input id="cycleSeconds" type="number" min="2" max="30" step="1">
+                <div class="field-help">Gjelder når flere fly vises samtidig.</div>
+              </div>
+              <div>
+                <label for="scrollSpeed">Scrollhastighet</label>
+                <input id="scrollSpeed" type="number" min="2" max="30" step="1">
+                <div class="field-help">Hvor fort lang tekst beveger seg.</div>
+              </div>
+            </div>
+            <div class="subhead">Farger for flyvisning</div>
+            <div class="color-grid">
+              <div>
+                <label for="airlineColor">Flyselskap</label>
+                <input id="airlineColor" type="color">
+              </div>
+              <div>
+                <label for="routeColor">Rute</label>
+                <input id="routeColor" type="color">
+              </div>
+              <div>
+                <label for="aircraftColor">Flytype</label>
+                <input id="aircraftColor" type="color">
+              </div>
+              <div>
+                <label for="contextColor">Tekstscroll</label>
+                <input id="contextColor" type="color">
+              </div>
+              <div>
+                <label for="progressColor">Bytte-linje</label>
+                <input id="progressColor" type="color">
+              </div>
+            </div>
           </div>
-          <div>
-            <label for="speedUnit">Fart vises som</label>
-            <select id="speedUnit">
-              <option value="kn">kn</option>
-              <option value="mph">mph</option>
-              <option value="kmh">km/h</option>
-              <option value="ms">m/s</option>
-              <option value="mach">mach</option>
-            </select>
-          </div>
-        </div>
-        <div class="row">
-          <div>
-            <label for="trackUnit">Retning vises som</label>
-            <select id="trackUnit">
-              <option value="deg">degrees</option>
-              <option value="cardinal">cardinal</option>
-            </select>
-          </div>
-          <div>
-            <label for="verticalRateUnit">Stigning/synk vises som</label>
-            <select id="verticalRateUnit">
-              <option value="fpm">fpm</option>
-              <option value="fts">ft/s</option>
-              <option value="ms">m/s</option>
-              <option value="mph">mph</option>
-              <option value="kmh">km/h</option>
-            </select>
-          </div>
-        </div>
-        <div class="subhead">Oppførsel</div>
-        <div class="row">
-          <div>
-            <label for="cycleSeconds">Bytt fly etter sekunder</label>
-            <input id="cycleSeconds" type="number" min="2" max="30" step="1">
-            <div class="field-help">Gjelder når flere fly vises samtidig.</div>
-          </div>
-          <div>
-            <label for="scrollSpeed">Scrollhastighet</label>
-            <input id="scrollSpeed" type="number" min="2" max="30" step="1">
-            <div class="field-help">Hvor fort lang tekst beveger seg.</div>
-          </div>
-        </div>
-        <div class="subhead">Farger for flyvisning</div>
-        <div class="color-grid">
-          <div>
-            <label for="airlineColor">Flyselskap</label>
-            <input id="airlineColor" type="color">
-          </div>
-          <div>
-            <label for="routeColor">Rute</label>
-            <input id="routeColor" type="color">
-          </div>
-          <div>
-            <label for="aircraftColor">Flytype</label>
-            <input id="aircraftColor" type="color">
-          </div>
-          <div>
-            <label for="contextColor">Tekstscroll</label>
-            <input id="contextColor" type="color">
-          </div>
-          <div>
-            <label for="progressColor">Bytte-linje</label>
-            <input id="progressColor" type="color">
-          </div>
-        </div>
+        </details>
       </section>
-      <section class="card">
+      <section class="card timetable-card">
         <div class="section-head">
           <h2>Tidstabell</h2>
           <span class="hint" tabindex="0" data-tip="Dette gjelder skjermen som vises når det ikke er fly i området. Data kommer fra Avinor og bruker ikke FR24-credits.">i</span>
@@ -3045,10 +3070,6 @@ function renderIndexHtml(): string {
           </div>
         </div>
       </section>
-      <div class="savebar">
-        <button id="save">Lagre alle innstillinger</button>
-        <div id="status" class="status"></div>
-      </div>
       <details class="links-wrap">
         <summary>Avansert: API-lenker</summary>
         <div class="links">
