@@ -1661,7 +1661,7 @@ async function getAviationstackFollowFlight(env: Env, token: string, config: Con
 
   const timezone = config.device?.timezone || "Europe/Oslo";
   const cacheDate = localDateString(new Date(), timezone);
-  const cacheKey = `follow:aviationstack:v2:${cacheDate}:${normalized}`;
+  const cacheKey = `follow:aviationstack:v3:${cacheDate}:${normalized}`;
   const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
   if (cached && typeof cached === "object" && !Array.isArray(cached)) {
     const record = cached as { missing?: unknown };
@@ -1751,9 +1751,19 @@ function normalizeAviationstackFlight(record: AviationstackFlight, config: Confi
   const arrival = record.arrival || {};
   const flight = record.flight || {};
   const airline = record.airline || {};
-  const departureScheduledTime = parseDateValue(departure.scheduled) || parseDateValue(departure.estimated) || undefined;
-  const arrivalScheduledTime = parseDateValue(arrival.scheduled) || parseDateValue(arrival.estimated) || undefined;
-  const departureDisplayTime = formatAviationstackLocalTime(departure.scheduled) || formatAviationstackLocalTime(departure.estimated) || formatLocalTime(departureScheduledTime || "", config.device?.timezone || "Europe/Oslo");
+  const displayTimezone = config.device?.timezone || "Europe/Oslo";
+  const departureScheduledTime = parseAviationstackZonedDateTime(departure.scheduled, departure.timezone)
+    || parseAviationstackZonedDateTime(departure.estimated, departure.timezone)
+    || parseDateValue(departure.scheduled)
+    || parseDateValue(departure.estimated)
+    || undefined;
+  const arrivalScheduledTime = parseAviationstackZonedDateTime(arrival.scheduled, arrival.timezone)
+    || parseAviationstackZonedDateTime(arrival.estimated, arrival.timezone)
+    || parseDateValue(arrival.scheduled)
+    || parseDateValue(arrival.estimated)
+    || undefined;
+  const departureLocalTime = formatAviationstackLocalTime(departure.scheduled) || formatAviationstackLocalTime(departure.estimated);
+  const departureDisplayTime = formatAviationstackDisplayTime(departureScheduledTime, departureLocalTime, displayTimezone);
   const arrivalDisplayTime = formatAviationstackLocalTime(arrival.scheduled) || formatAviationstackLocalTime(arrival.estimated) || formatLocalTime(arrivalScheduledTime || "", config.device?.timezone || "Europe/Oslo");
   const flightId = cleanNullableString(flight.iata) || [
     cleanNullableString(airline.iata),
@@ -1806,6 +1816,62 @@ function formatAviationstackLocalTime(value: string | null | undefined): string 
   if (typeof value !== "string") return "";
   const match = value.match(/[T ](\d{2}):(\d{2})/);
   return match ? `${match[1]}:${match[2]}` : "";
+}
+
+function formatAviationstackDisplayTime(value: string | undefined, localTime: string, timezone: string): string {
+  const displayTime = formatLocalTime(value || "", timezone);
+  if (displayTime && localTime) return `${displayTime} (${localTime})`;
+  return displayTime || localTime;
+}
+
+function parseAviationstackZonedDateTime(value: string | null | undefined, timezone: string | null | undefined): string | undefined {
+  const parts = parseLocalDateTimeParts(value);
+  const normalizedTimezone = cleanNullableString(timezone);
+  if (!parts || !normalizedTimezone) return undefined;
+  try {
+    return new Date(zonedLocalTimeToUtcMillis(parts, normalizedTimezone)).toISOString();
+  } catch {
+    return undefined;
+  }
+}
+
+function parseLocalDateTimeParts(value: string | null | undefined): { year: number; month: number; day: number; hour: number; minute: number; second: number } | undefined {
+  if (typeof value !== "string") return undefined;
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?/);
+  if (!match) return undefined;
+  return {
+    year: Number(match[1]),
+    month: Number(match[2]),
+    day: Number(match[3]),
+    hour: Number(match[4]),
+    minute: Number(match[5]),
+    second: Number(match[6] || 0)
+  };
+}
+
+function zonedLocalTimeToUtcMillis(parts: { year: number; month: number; day: number; hour: number; minute: number; second: number }, timezone: string): number {
+  const localAsUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  let utc = localAsUtc;
+  for (let index = 0; index < 3; index += 1) {
+    utc = localAsUtc - timeZoneOffsetMillis(new Date(utc), timezone);
+  }
+  return utc;
+}
+
+function timeZoneOffsetMillis(date: Date, timezone: string): number {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  }).formatToParts(date);
+  const value = (type: Intl.DateTimeFormatPartTypes) => Number(parts.find((part) => part.type === type)?.value || 0);
+  const zonedAsUtc = Date.UTC(value("year"), value("month") - 1, value("day"), value("hour"), value("minute"), value("second"));
+  return zonedAsUtc - date.getTime();
 }
 
 function normalizeSecretString(value: unknown): string | undefined {
