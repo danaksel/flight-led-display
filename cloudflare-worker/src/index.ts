@@ -1113,7 +1113,7 @@ async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
 
   const mode = followFlights.length ? "follow" : nearbyFlights.length ? "nearby" : "idle";
   const displayFlights = (followFlights.length ? followFlights : nearbyFlights).slice(0, limit);
-  if (mode === "follow") {
+  if (mode === "follow" || mode === "nearby") {
     await enrichFollowLocation(env, displayFlights);
   }
   const idleScreens = displayFlights.length ? [] : await getIdleScreens(env, config);
@@ -2896,7 +2896,7 @@ function renderIndexHtml(): string {
           <h2>Fly</h2>
           <span class="hint" tabindex="0" data-tip="Dette gjelder skjermen som viser fly i nærheten eller et flightnummer du følger. Follow-visningen bytter automatisk mellom live tall og Flying over.">i</span>
         </div>
-        <p class="section-note">Når du følger et flightnummer, viser skjermen status før avgang, live-målinger i 10 sekunder, Flying over i 5 sekunder, og Landed når flyet har landet.</p>
+        <p class="section-note">Live flyvisning alternerer mellom målinger i 10 sekunder og Flying over i 5 sekunder. Follow-flight viser i tillegg status før avgang og Landed når flyet har landet.</p>
         <div class="toggle-row">
           <div>
             <label for="airspaceMonitoringEnabled">Overvåk luftrommet</label>
@@ -3731,9 +3731,9 @@ function renderIndexHtml(): string {
       } else {
         drawPlaceholderLogo(ctx, 3, 3, 42);
       }
-      if (displayMode === "follow") {
+      if (flight.layout === "follow_cycle" || flight.layout === "follow_status" || displayMode === "follow") {
         drawFollowFlightText(ctx, flight);
-        els.emuMeta.textContent = "Follow layout: " + (flight.flt || flight.cs || "flight") + " · live metrics når FR24 har posisjon.";
+        els.emuMeta.textContent = "Live cycle layout: " + (flight.flt || flight.cs || "flight") + " · live metrics og Flying over.";
         return;
       }
       const airline = (flight.lines && flight.lines.airline) || flight.air || flight.airCode || "";
@@ -3975,7 +3975,7 @@ function renderIndexHtml(): string {
     function drawFlightProgress(ctx, flight) {
       if (els.emuSource.value !== "live") return;
       ensureTickerAnimation();
-      if (displayMode === "follow" && flight && !flight.followStatus && typeof flight.routeProgress === "number") {
+      if ((flight.layout === "follow_cycle" || displayMode === "follow") && flight && !flight.followStatus && typeof flight.routeProgress === "number") {
         drawRouteProgressValue(ctx, flight.routeProgress);
         return;
       }
