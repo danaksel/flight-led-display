@@ -111,6 +111,11 @@ type DisplayFlight = {
   gateMessage?: string;
   scheduledTime?: string;
   displayTime?: string;
+  direction?: "A" | "D";
+  departureScheduledTime?: string;
+  departureDisplayTime?: string;
+  arrivalScheduledTime?: string;
+  arrivalDisplayTime?: string;
   locationLabel?: string;
   locationValue?: string;
   routeProgress?: number;
@@ -1130,6 +1135,11 @@ async function toCompactDisplayFlight(env: Env, f: DisplayFlight, config: Config
     status: f.status || "",
     displayTime: f.displayTime || "",
     scheduledTime: f.scheduledTime || "",
+    dir: f.direction || "",
+    depTime: f.departureDisplayTime || "",
+    depScheduledTime: f.departureScheduledTime || "",
+    arrTime: f.arrivalDisplayTime || "",
+    arrScheduledTime: f.arrivalScheduledTime || "",
     gate: f.gate || "",
     gateMessage: f.gateMessage || "",
     source: f.source || "",
@@ -1161,16 +1171,16 @@ function followStatusFor(f: DisplayFlight): Record<string, string> | null {
       color: "landed"
     };
   }
-  if (f.source === "avinor") {
+  if (f.source === "avinor" || (f.onGround && (f.status === "scheduled" || f.status === "departed"))) {
     if (f.status === "scheduled" && isFutureScheduledFlight(f.scheduledTime)) {
       return {
         kind: "scheduled",
         text: "Scheduled",
-        detail: formatScheduleDetail(f.scheduledTime, f.displayTime),
+        detail: formatFollowScheduleDetail(f),
         color: "preflight"
       };
     }
-    const detail = f.displayTime ? `Dep ${f.displayTime}` : "";
+    const detail = formatFollowEventTime(f);
     return {
       kind: f.status === "departed" ? "departed" : "not_departed",
       text: f.status === "departed" ? "Departed gate" : f.gateMessage || "Not departed",
@@ -1179,6 +1189,22 @@ function followStatusFor(f: DisplayFlight): Record<string, string> | null {
     };
   }
   return null;
+}
+
+function formatFollowScheduleDetail(f: DisplayFlight): string {
+  const departureTime = f.departureDisplayTime || formatLocalTime(f.departureScheduledTime || "", "Europe/Oslo");
+  if (departureTime) return `Dep ${departureTime}`;
+  if (f.direction === "A") return f.displayTime ? `Arr ${f.displayTime}` : formatScheduleDetail(f.scheduledTime, f.displayTime);
+  return f.displayTime ? `Dep ${f.displayTime}` : formatScheduleDetail(f.scheduledTime, f.displayTime);
+}
+
+function formatFollowEventTime(f: DisplayFlight): string {
+  const departureTime = f.departureDisplayTime || formatLocalTime(f.departureScheduledTime || "", "Europe/Oslo");
+  if (departureTime) return `Dep ${departureTime}`;
+  const arrivalTime = f.arrivalDisplayTime || formatLocalTime(f.arrivalScheduledTime || "", "Europe/Oslo");
+  if (f.direction === "A" && arrivalTime) return `Arr ${arrivalTime}`;
+  if (f.displayTime) return `${f.direction === "A" ? "Arr" : "Dep"} ${f.displayTime}`;
+  return "";
 }
 
 function isFutureScheduledFlight(value: string | undefined): boolean {
@@ -1482,7 +1508,11 @@ function mergeFollowStaticFlights(liveFlights: DisplayFlight[], staticFlights: D
       origin: live.origin || staticFlight.origin,
       destination: live.destination || staticFlight.destination,
       contextLabel: live.contextLabel || staticFlight.contextLabel,
-      contextValue: live.contextValue || staticFlight.contextValue
+      contextValue: live.contextValue || staticFlight.contextValue,
+      departureScheduledTime: live.departureScheduledTime || staticFlight.departureScheduledTime,
+      departureDisplayTime: live.departureDisplayTime || staticFlight.departureDisplayTime,
+      arrivalScheduledTime: live.arrivalScheduledTime || staticFlight.arrivalScheduledTime,
+      arrivalDisplayTime: live.arrivalDisplayTime || staticFlight.arrivalDisplayTime
     };
   });
 }
@@ -1701,7 +1731,12 @@ function mergeFollowLiveFlight(live: DisplayFlight, raw: AvinorRawFlight | undef
     gate: avinor.gate,
     gateMessage: avinor.gateMessage,
     scheduledTime: avinor.scheduledTime,
-    displayTime: avinor.displayTime
+    displayTime: avinor.displayTime,
+    direction: avinor.direction,
+    departureScheduledTime: live.departureScheduledTime || avinor.departureScheduledTime,
+    departureDisplayTime: live.departureDisplayTime || avinor.departureDisplayTime,
+    arrivalScheduledTime: live.arrivalScheduledTime || avinor.arrivalScheduledTime,
+    arrivalDisplayTime: live.arrivalDisplayTime || avinor.arrivalDisplayTime
   };
 }
 
@@ -1727,7 +1762,12 @@ function displayFlightFromAvinor(raw: AvinorRawFlight, config: Pick<Config, "lat
     gate: raw.resolved.gate,
     gateMessage: raw.resolved.gateMessage,
     scheduledTime: raw.resolved.scheduledTime,
-    displayTime: raw.resolved.displayTime
+    displayTime: raw.resolved.displayTime,
+    direction: raw.direction,
+    departureScheduledTime: isDeparture ? raw.resolved.scheduledTime : undefined,
+    departureDisplayTime: isDeparture ? raw.resolved.displayTime : undefined,
+    arrivalScheduledTime: isDeparture ? undefined : raw.resolved.scheduledTime,
+    arrivalDisplayTime: isDeparture ? undefined : raw.resolved.displayTime
   };
 }
 
@@ -1950,6 +1990,44 @@ function normalizeFlight(record: unknown, config: Config, fallbackFlight?: strin
 
   const altitudeFt = firstNumber(r, ["alt", "altitude", "altitude_ft"]);
   const explicitOnGround = firstBoolean(r, ["on_ground", "onground", "ground", "is_ground", "is_on_ground"]);
+  const departureScheduledTime = firstDateString(r, [
+    "scheduled_departure",
+    "departure_scheduled",
+    "dep_scheduled",
+    "dep_schd",
+    "scheduled_departure_time",
+    "std",
+    "etd",
+    "estimated_departure"
+  ], [
+    ["time", "scheduled", "departure"],
+    ["time", "estimated", "departure"],
+    ["time", "real", "departure"],
+    ["departure", "scheduled"],
+    ["departure", "scheduled_time"],
+    ["departure", "estimated"],
+    ["departure", "time", "scheduled"],
+    ["schedule", "departure"]
+  ]);
+  const arrivalScheduledTime = firstDateString(r, [
+    "scheduled_arrival",
+    "arrival_scheduled",
+    "arr_scheduled",
+    "arr_schd",
+    "scheduled_arrival_time",
+    "sta",
+    "eta",
+    "estimated_arrival"
+  ], [
+    ["time", "scheduled", "arrival"],
+    ["time", "estimated", "arrival"],
+    ["time", "real", "arrival"],
+    ["arrival", "scheduled"],
+    ["arrival", "scheduled_time"],
+    ["arrival", "estimated"],
+    ["arrival", "time", "scheduled"],
+    ["schedule", "arrival"]
+  ]);
 
   return {
     fr24Id: firstString(r, ["fr24_id", "id"]),
@@ -1968,6 +2046,10 @@ function normalizeFlight(record: unknown, config: Config, fallbackFlight?: strin
     headingDeg: firstNumber(r, ["track", "heading"]),
     verticalRateFpm: firstNumber(r, ["vspeed", "vertical_speed", "vertical_rate", "vertical_speed_fpm"]),
     onGround: explicitOnGround ?? (altitudeFt !== undefined ? altitudeFt <= 0 : undefined),
+    departureScheduledTime,
+    departureDisplayTime: formatLocalTime(departureScheduledTime || "", config.device?.timezone || "Europe/Oslo"),
+    arrivalScheduledTime,
+    arrivalDisplayTime: formatLocalTime(arrivalScheduledTime || "", config.device?.timezone || "Europe/Oslo"),
     distanceKm,
     bearingDeg,
     source: "fr24"
@@ -3831,6 +3913,41 @@ function firstBoolean(record: Record<string, unknown>, keys: string[]): boolean 
     }
   }
   return undefined;
+}
+
+function firstDateString(record: Record<string, unknown>, keys: string[], paths: string[][] = []): string | undefined {
+  for (const key of keys) {
+    const parsed = parseDateValue(record[key]);
+    if (parsed) return parsed;
+  }
+  for (const path of paths) {
+    const parsed = parseDateValue(nestedValue(record, path));
+    if (parsed) return parsed;
+  }
+  return undefined;
+}
+
+function nestedValue(record: Record<string, unknown>, path: string[]): unknown {
+  let current: unknown = record;
+  for (const part of path) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) return undefined;
+    current = (current as Record<string, unknown>)[part];
+  }
+  return current;
+}
+
+function parseDateValue(value: unknown): string | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const millis = value > 1_000_000_000_000 ? value : value * 1000;
+    const date = new Date(millis);
+    return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+  }
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  if (/^\d+$/.test(trimmed)) return parseDateValue(Number(trimmed));
+  const date = new Date(trimmed);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
 }
 
 function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
