@@ -1490,7 +1490,7 @@ async function getFr24FollowStaticFlights(env: Env, config: Config, tokens: stri
 }
 
 function fr24FollowStaticCacheKey(cacheDate: string, token: string): string {
-  return `follow:fr24:static:v1:${cacheDate}:${token}`;
+  return `follow:fr24:static:v2:${cacheDate}:${token}`;
 }
 
 function mergeFollowStaticFlights(liveFlights: DisplayFlight[], staticFlights: DisplayFlight[]): DisplayFlight[] {
