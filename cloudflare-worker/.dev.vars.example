@@ -1,3 +1,4 @@
 FR24_API_KEY="replace-with-your-fr24-api-key"
+AVIATIONSTACK_API_KEY="replace-with-your-aviationstack-api-key"
 OPENSKY_CLIENT_ID="replace-with-your-opensky-client-id"
 OPENSKY_CLIENT_SECRET="replace-with-your-opensky-client-secret"

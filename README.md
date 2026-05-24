@@ -173,6 +173,7 @@ Eksempel:
 
 ```text
 FR24_API_KEY=din_nokkel_her
+AVIATIONSTACK_API_KEY=din_aviationstack_nokkel_her
 OPENSKY_CLIENT_ID=din_opensky_client_id
 OPENSKY_CLIENT_SECRET=din_opensky_client_secret
 ```
@@ -195,6 +196,12 @@ FR24-nøkkelen skal ligge som Worker secret i Cloudflare:
 
 ```bash
 npx wrangler secret put FR24_API_KEY
+```
+
+Aviationstack-nøkkelen brukes som fallback for fulgte fremtidige flights når FR24 mangler avgangstid/gate:
+
+```bash
+npx wrangler secret put AVIATIONSTACK_API_KEY
 ```
 
 OpenSky-credentials skal ligge som Worker secrets hvis OpenSky brukes:

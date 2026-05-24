@@ -23,6 +23,12 @@ Set your FR24 API key as a secret:
 npx wrangler secret put FR24_API_KEY
 ```
 
+For followed flights that are scheduled but not yet available from FR24, set an Aviationstack key too. The Worker uses it to fill departure time and departure gate when available:
+
+```bash
+npx wrangler secret put AVIATIONSTACK_API_KEY
+```
+
 For FR24 sandbox testing, change this in `wrangler.toml`:
 
 ```toml

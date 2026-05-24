@@ -8,6 +8,8 @@ export interface Env {
   FR24_FOLLOW_ENDPOINT?: string;
   FR24_AIRLINE_ENDPOINT_TEMPLATE?: string;
   FR24_AIRPORT_ENDPOINT_TEMPLATE?: string;
+  AVIATIONSTACK_API_KEY?: string;
+  AVIATIONSTACK_API_BASE_URL?: string;
   OPENSKY_CLIENT_ID?: string;
   OPENSKY_CLIENT_SECRET?: string;
   OPENSKY_TOKEN_URL?: string;
@@ -105,7 +107,7 @@ type DisplayFlight = {
   onGround?: boolean;
   distanceKm: number;
   bearingDeg: number;
-  source?: "fr24" | "opensky" | "avinor";
+  source?: "fr24" | "opensky" | "avinor" | "aviationstack";
   status?: string;
   gate?: string;
   gateMessage?: string;
@@ -212,6 +214,43 @@ type AvinorApiFlightLeg = {
   flightStatusTimeLocal?: string | null;
   isDelayed?: boolean;
   isDomestic?: boolean;
+};
+
+type AviationstackFlight = {
+  flight_date?: string;
+  flight_status?: string;
+  departure?: {
+    airport?: string | null;
+    timezone?: string | null;
+    iata?: string | null;
+    icao?: string | null;
+    terminal?: string | null;
+    gate?: string | null;
+    scheduled?: string | null;
+    estimated?: string | null;
+    actual?: string | null;
+  };
+  arrival?: {
+    airport?: string | null;
+    timezone?: string | null;
+    iata?: string | null;
+    icao?: string | null;
+    terminal?: string | null;
+    gate?: string | null;
+    scheduled?: string | null;
+    estimated?: string | null;
+    actual?: string | null;
+  };
+  airline?: {
+    name?: string | null;
+    iata?: string | null;
+    icao?: string | null;
+  };
+  flight?: {
+    number?: string | null;
+    iata?: string | null;
+    icao?: string | null;
+  };
 };
 
 type IdleRow = {
@@ -1171,7 +1210,7 @@ function followStatusFor(f: DisplayFlight): Record<string, string> | null {
       color: "landed"
     };
   }
-  if (f.source === "avinor" || (f.onGround && (f.status === "scheduled" || f.status === "departed"))) {
+  if (f.source === "avinor" || f.source === "aviationstack" || (f.onGround && (f.status === "scheduled" || f.status === "departed"))) {
     if (f.status === "scheduled" && isFutureScheduledFlight(f.scheduledTime)) {
       return {
         kind: "scheduled",
@@ -1397,8 +1436,11 @@ async function getFollowFlights(env: Env, config: Config, liveFlights: DisplayFl
     .map(async (token) => {
       const live = liveCandidates.find((flight) => flightMatchesFollowToken(flight, token));
       const raw = scheduled.find((flight) => avinorFlightMatchesFollowToken(flight, token));
+      const cachedLanded = live ? undefined : await getCachedFollowLanded(env, token, raw, config);
+      if (cachedLanded) return cachedLanded;
+      const aviationstack = await getAviationstackFollowFlight(env, token, config);
       if (live) {
-        const merged = mergeFollowLiveFlight(live, raw, config);
+        const merged = mergeFollowLiveFlight(live, raw, config, aviationstack);
         if (await shouldTreatFollowAsLanded(env, merged, raw, config)) {
           const landed = {
             ...merged,
@@ -1411,9 +1453,7 @@ async function getFollowFlights(env: Env, config: Config, liveFlights: DisplayFl
         }
         return merged;
       }
-      const cachedLanded = await getCachedFollowLanded(env, token, raw, config);
-      if (cachedLanded) return cachedLanded;
-      return raw ? displayFlightFromAvinor(raw, config) : undefined;
+      return raw ? mergeScheduledFollowFlight(displayFlightFromAvinor(raw, config), aviationstack) : aviationstack;
     }));
   return flights.filter((flight): flight is DisplayFlight => Boolean(flight));
 }
@@ -1569,6 +1609,123 @@ async function getCachedFollowLanded(env: Env, token: string, raw: AvinorRawFlig
   };
 }
 
+async function getAviationstackFollowFlight(env: Env, token: string, config: Config): Promise<DisplayFlight | undefined> {
+  const normalized = normalizeFollowToken(token);
+  if (!normalized || !env.AVIATIONSTACK_API_KEY) return undefined;
+
+  const timezone = config.device?.timezone || "Europe/Oslo";
+  const cacheDate = localDateString(new Date(), timezone);
+  const cacheKey = `follow:aviationstack:v1:${cacheDate}:${normalized}`;
+  const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
+  if (cached && typeof cached === "object" && !Array.isArray(cached)) {
+    const record = cached as { missing?: unknown };
+    return record.missing === true ? undefined : record as DisplayFlight;
+  }
+
+  try {
+    const records = await fetchAviationstackFlights(env, normalized);
+    const flight = records
+      .map((record) => normalizeAviationstackFlight(record, config))
+      .find((candidate): candidate is DisplayFlight => Boolean(candidate && flightMatchesFollowToken(candidate, normalized)));
+    await env.FLIGHT_DISPLAY_KV.put(
+      cacheKey,
+      JSON.stringify(flight || { missing: true }),
+      { expirationTtl: flight ? 30 * 60 : 10 * 60 }
+    );
+    return flight;
+  } catch (error) {
+    console.warn(error instanceof Error ? error.message : "Aviationstack follow fetch failed");
+    return undefined;
+  }
+}
+
+async function fetchAviationstackFlights(env: Env, flightToken: string): Promise<AviationstackFlight[]> {
+  if (!env.AVIATIONSTACK_API_KEY) return [];
+
+  const baseUrl = env.AVIATIONSTACK_API_BASE_URL || "https://api.aviationstack.com/v1";
+  const url = new URL(`${baseUrl.replace(/\/+$/, "")}/flights`);
+  url.searchParams.set("access_key", env.AVIATIONSTACK_API_KEY);
+  if (/^[A-Z]{3}\d/.test(flightToken)) {
+    url.searchParams.set("flight_icao", flightToken);
+  } else {
+    url.searchParams.set("flight_iata", flightToken);
+  }
+  url.searchParams.set("limit", "10");
+
+  const response = await fetch(url.toString(), {
+    headers: {
+      Accept: "application/json"
+    }
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Aviationstack request failed (${response.status}): ${text.slice(0, 240)}`);
+  }
+
+  const json = await response.json() as Record<string, unknown>;
+  if (json.error && typeof json.error === "object") {
+    const error = json.error as Record<string, unknown>;
+    const message = firstString(error, ["message", "info", "type"]) || "unknown error";
+    throw new Error(`Aviationstack request failed: ${message}`);
+  }
+  const records = Array.isArray(json.data) ? json.data : Array.isArray(json.results) ? json.results : [];
+  return records.filter((record): record is AviationstackFlight => Boolean(record && typeof record === "object"));
+}
+
+function normalizeAviationstackFlight(record: AviationstackFlight, config: Config): DisplayFlight | undefined {
+  const departure = record.departure || {};
+  const arrival = record.arrival || {};
+  const flight = record.flight || {};
+  const airline = record.airline || {};
+  const departureScheduledTime = parseDateValue(departure.scheduled) || parseDateValue(departure.estimated) || undefined;
+  const arrivalScheduledTime = parseDateValue(arrival.scheduled) || parseDateValue(arrival.estimated) || undefined;
+  const flightId = cleanNullableString(flight.iata) || [
+    cleanNullableString(airline.iata),
+    cleanNullableString(flight.number)
+  ].filter(Boolean).join("");
+  if (!flightId) return undefined;
+
+  const origin = cleanNullableString(departure.iata) || cleanNullableString(departure.icao);
+  const destination = cleanNullableString(arrival.iata) || cleanNullableString(arrival.icao);
+  const status = normalizeAviationstackStatus(record.flight_status);
+  const gate = cleanNullableString(departure.gate);
+
+  return {
+    callsign: cleanNullableString(flight.icao) || flightId,
+    flight: flightId.toUpperCase(),
+    airline: cleanNullableString(airline.name) || cleanNullableString(airline.iata) || undefined,
+    airlineCode: airlineIataToLogoCode(cleanNullableString(airline.iata)) || normalizeLogoCode(cleanNullableString(airline.icao)),
+    origin,
+    destination,
+    contextLabel: "Departing to",
+    contextValue: cleanNullableString(arrival.airport) || destination || "",
+    distanceKm: config.radiusKm,
+    bearingDeg: 0,
+    source: "aviationstack",
+    status,
+    gate,
+    scheduledTime: departureScheduledTime,
+    displayTime: formatLocalTime(departureScheduledTime || "", config.device?.timezone || "Europe/Oslo"),
+    direction: "D",
+    departureScheduledTime,
+    departureDisplayTime: formatLocalTime(departureScheduledTime || "", config.device?.timezone || "Europe/Oslo"),
+    arrivalScheduledTime,
+    arrivalDisplayTime: formatLocalTime(arrivalScheduledTime || "", config.device?.timezone || "Europe/Oslo")
+  };
+}
+
+function normalizeAviationstackStatus(value: string | null | undefined): string {
+  const normalized = (value || "").toLowerCase();
+  if (normalized === "landed") return "done";
+  if (normalized === "active") return "departed";
+  if (normalized === "cancelled" || normalized === "canceled") return "canceled";
+  return "scheduled";
+}
+
+function cleanNullableString(value: string | null | undefined): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
 function mergeFlightsByIdentity(flights: DisplayFlight[]): DisplayFlight[] {
   const seen = new Set<string>();
   return flights.filter((flight) => {
@@ -1714,10 +1871,10 @@ function avinorFlightMatchesFollowToken(flight: AvinorRawFlight, token: string):
   return flightIds.includes(normalized);
 }
 
-function mergeFollowLiveFlight(live: DisplayFlight, raw: AvinorRawFlight | undefined, config: Config): DisplayFlight {
-  if (!raw) return { ...live, source: live.source || "fr24" };
+function mergeFollowLiveFlight(live: DisplayFlight, raw: AvinorRawFlight | undefined, config: Config, aviationstack?: DisplayFlight): DisplayFlight {
+  if (!raw) return mergeScheduledFollowFlight({ ...live, source: live.source || "fr24" }, aviationstack);
   const avinor = displayFlightFromAvinor(raw, config);
-  return {
+  return mergeScheduledFollowFlight({
     ...avinor,
     ...live,
     source: live.source || "fr24",
@@ -1737,6 +1894,31 @@ function mergeFollowLiveFlight(live: DisplayFlight, raw: AvinorRawFlight | undef
     departureDisplayTime: live.departureDisplayTime || avinor.departureDisplayTime,
     arrivalScheduledTime: live.arrivalScheduledTime || avinor.arrivalScheduledTime,
     arrivalDisplayTime: live.arrivalDisplayTime || avinor.arrivalDisplayTime
+  }, aviationstack);
+}
+
+function mergeScheduledFollowFlight(primary: DisplayFlight, aviationstack: DisplayFlight | undefined): DisplayFlight {
+  if (!aviationstack) return primary;
+  return {
+    ...primary,
+    flight: primary.flight || aviationstack.flight,
+    callsign: primary.callsign || aviationstack.callsign,
+    airline: primary.airline || aviationstack.airline,
+    airlineCode: primary.airlineCode || aviationstack.airlineCode,
+    origin: primary.origin || aviationstack.origin,
+    destination: primary.destination || aviationstack.destination,
+    contextLabel: primary.contextLabel || aviationstack.contextLabel,
+    contextValue: primary.contextValue || aviationstack.contextValue,
+    status: primary.status || aviationstack.status,
+    gate: primary.gate || aviationstack.gate,
+    gateMessage: primary.gateMessage || aviationstack.gateMessage,
+    scheduledTime: primary.scheduledTime || aviationstack.scheduledTime,
+    displayTime: primary.displayTime || aviationstack.displayTime,
+    direction: primary.direction || aviationstack.direction,
+    departureScheduledTime: primary.departureScheduledTime || aviationstack.departureScheduledTime,
+    departureDisplayTime: primary.departureDisplayTime || aviationstack.departureDisplayTime,
+    arrivalScheduledTime: primary.arrivalScheduledTime || aviationstack.arrivalScheduledTime,
+    arrivalDisplayTime: primary.arrivalDisplayTime || aviationstack.arrivalDisplayTime
   };
 }
 
