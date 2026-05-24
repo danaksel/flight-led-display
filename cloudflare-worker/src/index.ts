@@ -3753,7 +3753,9 @@ function renderIndexHtml(): string {
     function drawFollowFlightText(ctx, flight) {
       const colors = getLineColors();
       const route = (flight.lines && flight.lines.route) || [flight.from, flight.to].filter(Boolean).join("-");
-      const topLine = flight.flt || flight.cs || "";
+      const detailPhase = getFollowDetailPhase();
+      const etaLine = flight.arrTime ? "ETA:" + flight.arrTime : "";
+      const topLine = detailPhase === "location" && etaLine ? etaLine : flight.flt || flight.cs || "";
       const secondLine = route || flight.air || flight.airCode || "";
       const thirdLine = flight.ac || flight.reg || "";
       drawDotText(ctx, topLine, 50, 5, colors.airline, { maxWidth: 75 });
@@ -3765,7 +3767,7 @@ function renderIndexHtml(): string {
         drawTickerLine(ctx, flight.followStatus.detail || "", 3, 56, statusColor, 122);
         return;
       }
-      if (getFollowDetailPhase() === "location") {
+      if (detailPhase === "location") {
         drawDotText(ctx, flight.locationLabel || "Flying over", 3, 47, colors.context, { maxWidth: 122 });
         drawTickerLine(ctx, flight.locationValue || "Unknown area", 3, 56, colors.context, 122);
         return;
