@@ -350,7 +350,7 @@ export default {
     try {
       if (url.pathname === "/") return htmlResponse(renderIndexHtml());
       if (url.pathname.startsWith("/logos/")) return logoAssetResponse(request, env);
-      if (url.pathname === "/api/config" && request.method === "GET") return jsonResponse(await getConfig(env), 200, { "Cache-Control": "no-store" });
+      if (url.pathname === "/api/config" && request.method === "GET") return configResponse(env);
       if (url.pathname === "/api/config" && request.method === "POST") return saveConfig(request, env);
       if (url.pathname === "/api/device-config" && request.method === "GET") return deviceConfigResponse(env);
       if (url.pathname === "/api/flights" && request.method === "GET") return flightsResponse(env, false);
@@ -378,6 +378,17 @@ async function getConfig(env: Env): Promise<Config> {
   }, env);
 }
 
+async function configResponse(env: Env): Promise<Response> {
+  const [config, aviationstackApiKey] = await Promise.all([
+    getConfig(env),
+    getAviationstackApiKey(env)
+  ]);
+  return jsonResponse({
+    ...config,
+    aviationstackApiKeyConfigured: Boolean(aviationstackApiKey)
+  }, 200, { "Cache-Control": "no-store" });
+}
+
 async function saveConfig(request: Request, env: Env): Promise<Response> {
   const body = await request.json();
   if (!isConfig(body)) {
@@ -396,7 +407,7 @@ async function saveConfig(request: Request, env: Env): Promise<Response> {
   };
 
   await env.FLIGHT_DISPLAY_KV.put(CONFIG_KEY, JSON.stringify(config));
-  return jsonResponse(config, 200, { "Cache-Control": "no-store" });
+  return configResponse(env);
 }
 
 async function deviceConfigResponse(env: Env): Promise<Response> {
@@ -1611,7 +1622,8 @@ async function getCachedFollowLanded(env: Env, token: string, raw: AvinorRawFlig
 
 async function getAviationstackFollowFlight(env: Env, token: string, config: Config): Promise<DisplayFlight | undefined> {
   const normalized = normalizeFollowToken(token);
-  if (!normalized || !env.AVIATIONSTACK_API_KEY) return undefined;
+  const apiKey = getAviationstackApiKey(env);
+  if (!normalized || !apiKey) return undefined;
 
   const timezone = config.device?.timezone || "Europe/Oslo";
   const cacheDate = localDateString(new Date(), timezone);
@@ -1623,7 +1635,7 @@ async function getAviationstackFollowFlight(env: Env, token: string, config: Con
   }
 
   try {
-    const records = await fetchAviationstackFlights(env, normalized);
+    const records = await fetchAviationstackFlights(env, apiKey, normalized);
     const flight = records
       .map((record) => normalizeAviationstackFlight(record, config))
       .find((candidate): candidate is DisplayFlight => Boolean(candidate && flightMatchesFollowToken(candidate, normalized)));
@@ -1639,12 +1651,14 @@ async function getAviationstackFollowFlight(env: Env, token: string, config: Con
   }
 }
 
-async function fetchAviationstackFlights(env: Env, flightToken: string): Promise<AviationstackFlight[]> {
-  if (!env.AVIATIONSTACK_API_KEY) return [];
+function getAviationstackApiKey(env: Env): string | undefined {
+  return normalizeSecretString(env.AVIATIONSTACK_API_KEY);
+}
 
+async function fetchAviationstackFlights(env: Env, apiKey: string, flightToken: string): Promise<AviationstackFlight[]> {
   const baseUrl = env.AVIATIONSTACK_API_BASE_URL || "https://api.aviationstack.com/v1";
   const url = new URL(`${baseUrl.replace(/\/+$/, "")}/flights`);
-  url.searchParams.set("access_key", env.AVIATIONSTACK_API_KEY);
+  url.searchParams.set("access_key", apiKey);
   if (/^[A-Z]{3}\d/.test(flightToken)) {
     url.searchParams.set("flight_icao", flightToken);
   } else {
@@ -1723,6 +1737,10 @@ function normalizeAviationstackStatus(value: string | null | undefined): string 
 }
 
 function cleanNullableString(value: string | null | undefined): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function normalizeSecretString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
@@ -2757,6 +2775,8 @@ function renderIndexHtml(): string {
         <label for="followFlights">Flightnummer</label>
         <input id="followFlights" autocomplete="off" placeholder="SK4673, DY1304, DOC45">
         <div class="field-help">La stå av for å vise fly i området. Skru på for å følge bestemte fly.</div>
+        <div class="subhead">Integrasjoner</div>
+        <div class="field-help" id="aviationstackStatus">Aviationstack: sjekker secret...</div>
         <div class="subhead">Live-målinger</div>
         <div class="row">
           <div>
@@ -2952,6 +2972,7 @@ function renderIndexHtml(): string {
       liveDataSource: document.querySelector("#liveDataSource"),
       followEnabled: document.querySelector("#followEnabled"),
       followFlights: document.querySelector("#followFlights"),
+      aviationstackStatus: document.querySelector("#aviationstackStatus"),
       altitudeUnit: document.querySelector("#altitudeUnit"),
       speedUnit: document.querySelector("#speedUnit"),
       trackUnit: document.querySelector("#trackUnit"),
@@ -3068,6 +3089,9 @@ function renderIndexHtml(): string {
       els.liveDataSource.value = device.liveDataSource || "fr24";
       els.followEnabled.checked = follow.enabled === true;
       els.followFlights.value = Array.isArray(follow.flights) ? follow.flights.join(", ") : "";
+      els.aviationstackStatus.textContent = config.aviationstackApiKeyConfigured
+        ? "Aviationstack: Worker secret AVIATIONSTACK_API_KEY er satt"
+        : "Aviationstack: legg inn AVIATIONSTACK_API_KEY under Cloudflare Worker Secrets";
       const followUnits = device.followUnits || {};
       els.altitudeUnit.value = followUnits.altitude || "ft";
       els.speedUnit.value = followUnits.speed || "kn";
