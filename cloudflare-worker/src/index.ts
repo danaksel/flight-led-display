@@ -3978,34 +3978,33 @@ function renderIndexHtml(): string {
       if (els.emuSource.value !== "live") return;
       ensureTickerAnimation();
       if ((flight.layout === "follow_cycle" || displayMode === "follow") && flight && !flight.followStatus && typeof flight.routeProgress === "number") {
-        drawRouteProgressValue(ctx, flight.routeProgress);
-        return;
+        drawRouteProgressValue(ctx, flight.routeProgress, 0);
       }
       if (displayFlights.length <= 1) return;
       const cycleMs = Math.max(2000, Number(els.cycleSeconds.value || 5) * 1000);
-      drawCycleProgress(ctx, cycleMs);
+      drawCycleProgress(ctx, cycleMs, 63);
     }
 
-    function drawCycleProgress(ctx, cycleMs) {
+    function drawCycleProgress(ctx, cycleMs, y = 0) {
       const elapsed = Math.max(0, performance.now() - flightCycleStartedAt);
       const progress = Math.min(1, elapsed / cycleMs);
-      drawProgressValue(ctx, progress);
+      drawProgressValue(ctx, progress, y);
     }
 
-    function drawProgressValue(ctx, progress) {
+    function drawProgressValue(ctx, progress, y = 0) {
       const width = Math.max(1, Math.min(122, Math.round(122 * progress)));
       ctx.fillStyle = "#07101c";
-      ctx.fillRect(3, 0, 122, 1);
+      ctx.fillRect(3, y, 122, 1);
       ctx.fillStyle = getLineColors().progress;
-      ctx.fillRect(3, 0, width, 1);
+      ctx.fillRect(3, y, width, 1);
     }
 
-    function drawRouteProgressValue(ctx, progress) {
+    function drawRouteProgressValue(ctx, progress, y = 0) {
       const width = Math.max(1, Math.min(122, Math.round(122 * progress)));
       ctx.fillStyle = "#3c3c3c";
-      ctx.fillRect(3, 0, 122, 1);
+      ctx.fillRect(3, y, 122, 1);
       ctx.fillStyle = "#00d46a";
-      ctx.fillRect(3, 0, width, 1);
+      ctx.fillRect(3, y, width, 1);
     }
 
     function loadLogoForFlight(flight) {
