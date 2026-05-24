@@ -1627,7 +1627,7 @@ async function getAviationstackFollowFlight(env: Env, token: string, config: Con
 
   const timezone = config.device?.timezone || "Europe/Oslo";
   const cacheDate = localDateString(new Date(), timezone);
-  const cacheKey = `follow:aviationstack:v1:${cacheDate}:${normalized}`;
+  const cacheKey = `follow:aviationstack:v2:${cacheDate}:${normalized}`;
   const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
   if (cached && typeof cached === "object" && !Array.isArray(cached)) {
     const record = cached as { missing?: unknown };
@@ -1693,6 +1693,8 @@ function normalizeAviationstackFlight(record: AviationstackFlight, config: Confi
   const airline = record.airline || {};
   const departureScheduledTime = parseDateValue(departure.scheduled) || parseDateValue(departure.estimated) || undefined;
   const arrivalScheduledTime = parseDateValue(arrival.scheduled) || parseDateValue(arrival.estimated) || undefined;
+  const departureDisplayTime = formatAviationstackLocalTime(departure.scheduled) || formatAviationstackLocalTime(departure.estimated) || formatLocalTime(departureScheduledTime || "", config.device?.timezone || "Europe/Oslo");
+  const arrivalDisplayTime = formatAviationstackLocalTime(arrival.scheduled) || formatAviationstackLocalTime(arrival.estimated) || formatLocalTime(arrivalScheduledTime || "", config.device?.timezone || "Europe/Oslo");
   const flightId = cleanNullableString(flight.iata) || [
     cleanNullableString(airline.iata),
     cleanNullableString(flight.number)
@@ -1719,12 +1721,12 @@ function normalizeAviationstackFlight(record: AviationstackFlight, config: Confi
     status,
     gate,
     scheduledTime: departureScheduledTime,
-    displayTime: formatLocalTime(departureScheduledTime || "", config.device?.timezone || "Europe/Oslo"),
+    displayTime: departureDisplayTime,
     direction: "D",
     departureScheduledTime,
-    departureDisplayTime: formatLocalTime(departureScheduledTime || "", config.device?.timezone || "Europe/Oslo"),
+    departureDisplayTime,
     arrivalScheduledTime,
-    arrivalDisplayTime: formatLocalTime(arrivalScheduledTime || "", config.device?.timezone || "Europe/Oslo")
+    arrivalDisplayTime
   };
 }
 
@@ -1738,6 +1740,10 @@ function normalizeAviationstackStatus(value: string | null | undefined): string 
 
 function cleanNullableString(value: string | null | undefined): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function formatAviationstackLocalTime(value: string | null | undefined): string {
+  return typeof value === "string" ? formatLocalTimeFromLocal(value) : "";
 }
 
 function normalizeSecretString(value: unknown): string | undefined {
