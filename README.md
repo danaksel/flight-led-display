@@ -18,9 +18,11 @@ Cloudflare Worker
 
 ESP32-S3 + HUB75
   - Henter /public/device-config
+  - Henter /public/sound-state for rask lydtest uten å hente flydata
   - Henter /public/display etter polling-intervall
   - Henter RGB565-logoer fra /public/logos-rgb565/{CODE}.rgb565
   - Tegner payloaden uten egen API-logikk mot FR24/OpenSky/Avinor
+  - Spiller PA-lyd via ES8311/NS4150 når idle avbrytes av fly
 ```
 
 ## Prosjektstruktur
@@ -35,10 +37,11 @@ hardware/            Notater om skjerm, kort og hardwarevalg
 
 ## Dagens status
 
-Ferdig nok for web/server-delen frem til fysisk skjerm kommer:
+Fungerende ende-til-ende på Waveshare ESP32-S3-RGB-Matrix og 128 x 64 HUB75-panel:
 
 - Cloudflare Worker deployet som `flight-display-server.dan-aksel.workers.dev`
-- Adminside med kart, posisjon, radius, flyplass, nattmodus og display-oppsett
+- Adminside med kart, posisjon, radius, flyplass, display-oppsett og lydvolum
+- Ekstern skjermstyring via Homey-endepunkter for skjerm av/på og dag-/natt-lysstyrke
 - Tydelig bryter for `Overvåk luftrommet`, som styrer om Worker får lov til å bruke live flydata
 - Valgbar livekilde: `Flightradar24` eller `OpenSky Network`
 - 128 x 64 emulator med runde LED-piksler og 42 x 42 logo-felt
@@ -48,10 +51,16 @@ Ferdig nok for web/server-delen frem til fysisk skjerm kommer:
 - Topprad som progressbar ved follow-flight, med grønn fremdrift og grå rest
 - Idle-visning med Avinor departures/arrivals når live flydata er av eller ingen fly vises
 - Rullende tidstabell med lokal klokke i header
+- Tom tidstabell viser `No departures/arrivals the next X hours`, der X kommer fra Avinor-vinduet
 - Gate-status på departures: `To gate`, `Boarding`, `Closing`, `Closed`
 - Arrival-status kan vise `Landed`
-- R2-basert logooppslag via `/logos/{CODE}.png`
+- R2-basert logooppslag via `/logos/{CODE}.png` og ferdig RGB565-format til firmware
 - Fallback til `UNKNOWN.png` når logo mangler
+- Firmware matcher emulator-layouten for idle og live-visning
+- Firmware bruker config-styrt brightness, farger, polling, timezone og tidstabellinnstillinger
+- Når skjermen er av, er panelet svart og firmware henter ikke flydata, bare config/status
+- Lydtest og PA-varsel styres fra webpanelets lydvolum
+- PA-lyden spilles bare når skjermen går fra idle/ingen fly til live flyvisning, ikke for hvert fly i samme live-periode
 - KV-cache for config, airline-navn, airport-navn, Avinor-data, live flydata og geokoding
 
 ## Viktige endepunkter
@@ -63,13 +72,40 @@ Ferdig nok for web/server-delen frem til fysisk skjerm kommer:
   Leser og lagrer full konfigurasjon fra webpanelet.
 
 - `/api/device-config`
-  Lett konfigurasjon for fremtidig ESP32-firmware.
+  Lett konfigurasjon for ESP32-firmware. Inneholder blant annet brightness, polling, timezone, farger, skjermstatus og lydvolum.
+
+- `/api/sound-state`
+  Lett status for lydtest. ESP32 poller dette raskt slik at `Test lyd nå` ikke må vente på neste full config-henting.
+
+- `/api/sound-test`
+  POST-endepunkt som øker lydtest-`nonce`. ESP32 spiller testlyd når den ser en ny `nonce`. Testen bruker lydvolumet som er lagret i config.
+
+- `/api/screen-state`
+  GET/POST for skjerm av/på fra eksterne systemer. Når skjermen er av, skal ESP32 holde panelet svart og ikke hente live flydata.
+
+- `/api/screen-state/activate`
+  POST-endepunkt for Homey: slå skjermen på.
+
+- `/api/screen-state/deactivate`
+  POST-endepunkt for Homey: slå skjermen av.
+
+- `/api/brightness-mode`
+  GET/POST for aktiv lysmodus, `day` eller `night`.
+
+- `/api/brightness-mode/day`
+  POST-endepunkt for Homey: bruk vanlig/dag-brightness.
+
+- `/api/brightness-mode/night`
+  POST-endepunkt for Homey: bruk natt-brightness.
 
 - `/api/display`
   Payload som emulatoren bruker, og som ESP32 skal bruke senere. Dette endepunktet kan bruke valgt livekilde dersom skjerm og luftromsovervåking er aktiv.
 
 - `/public/device-config`
   Public/device alias for `/api/device-config`. Denne er ment for ESP32 og skal ligge under samme Cloudflare Access-regel som `/public/*`.
+
+- `/public/sound-state`
+  Public/device alias for `/api/sound-state`. ESP32 bruker denne for rask testlyd uten å hente flydata.
 
 - `/public/display`
   Public/device alias for `/api/display`. Denne er ment for ESP32 og skal ligge under samme Cloudflare Access-regel som `/public/*`.
@@ -105,9 +141,30 @@ ESP32 skal ikke bruke admin-URL-ene direkte. Den skal bruke:
 
 ```text
 /public/device-config
+/public/sound-state
 /public/display
 /public/logos-rgb565/{CODE}.rgb565
 ```
+
+## Homey-styring
+
+Skjermen styres eksternt fra Homey med POST-kall til Worker:
+
+```text
+POST /api/screen-state/activate
+POST /api/screen-state/deactivate
+POST /api/brightness-mode/day
+POST /api/brightness-mode/night
+```
+
+Alternativt kan generiske endepunkter brukes:
+
+```text
+POST /api/screen-state       {"active": true}
+POST /api/brightness-mode    {"brightnessMode": "night"}
+```
+
+Webpanelet viser siste aktivering/deaktivering og siste bytte mellom dag/natt. Når skjermen er deaktivert skal ESP32 vise svart skjerm, ikke hente `/public/display`, og bare hente config/status for å oppdage at skjermen skal på igjen.
 
 ## Livekilder og kredittkontroll
 
@@ -163,6 +220,22 @@ Avinor brukes til gratis rutetabell for valgt flyplass. Worker henter:
 - status og oppdatert tid
 
 Tidstabellen viser fire rader om gangen på 128 x 64-skjermen. Antall totale rader og rullehastighet styres fra webpanelet.
+
+Hvis Avinor ikke returnerer avganger eller ankomster i valgt tidsvindu, sender Worker en egen tomrad til firmware:
+
+```text
+No departures
+the next X hours
+```
+
+eller:
+
+```text
+No arrivals
+the next X hours
+```
+
+`X` er `avinorWindowHours` fra webpanelet.
 
 ## Logoer
 
@@ -309,6 +382,8 @@ KV brukes som liten database/cache.
 Nøkler som skal beholdes:
 
 - `config:v1` - gjeldende konfigurasjon
+- `screen-state:v1` - ekstern skjermstatus, lysmodus og siste Homey/API-endringer
+- `sound-state:v1` - testlyd-`nonce` og siste lydtest
 - `airline:v1:*` - airline-navn bygget opp over tid
 - `airlines:avinor:v1` - Avinor airline-register
 - `airport:v4:*` - gjeldende airport display-navn
@@ -325,58 +400,35 @@ Gamle versjoner som `airport:v1:*`, `airport:v2:*`, `airport:avinor:v1:*` og `ge
 
 Ikke slett hele KV uten grunn. Det vil ikke ødelegge systemet permanent, men vi mister nyttige navn/cache og Worker må bygge opp alt på nytt.
 
-## Kommende firmware
+## Firmware
 
-Når komponentene kommer skal `firmware-hub75/` inneholde koden som flashes til Waveshare ESP32-S3-RGB-Matrix.
+`firmware-hub75/` inneholder PlatformIO/Arduino-firmware for Waveshare ESP32-S3-RGB-Matrix. Kortet er verifisert med USB upload, serial monitor, Wi-Fi, HUB75-panel, Worker-config, display-payload, R2-logoer og lyd.
 
-Avtalt arbeidsform:
-
-- Hovedoppsett: VS Code + PlatformIO.
-- Start med Arduino framework i PlatformIO for raskest vei til fungerende skjerm.
-- ESP-IDF vurderes senere bare hvis vi trenger mer lavnivakontroll for HUB75, DMA, PSRAM eller Waveshare-spesifikk driverkode.
-- Waveshare-demoene ligger utenfor dette repoet, som søskenmappe til `firmware/`: `../ESP32-S3-RGB-Matrix-main/`.
-- Demoene brukes som referanse/fasit for pinout, panel-driver, init-kode og Waveshare-spesifikke detaljer.
-- Ikke kopier demo-kode ukritisk inn i prosjektet. Hent bare de delene vi faktisk trenger.
-- Ikke start med å skrive en egen HUB75-driver.
-- Bruk et eksisterende Arduino-kompatibelt HUB75-bibliotek, eller adapter kun minimal Waveshare-spesifikk init/pinout fra den offisielle demoen.
-- Første skjermmål er et stabilt testmønster, ikke endelig arkitektur.
-
-Må verifiseres før layout-implementasjon:
-
-- eksakt paneloppløsning
-- HUB75 scan rate
-- pin mapping fra Waveshare-demoen
-- nødvendig strømforsyning
-- om PSRAM er aktivert
-
-Første test når kortet kommer er "proof of life":
-
-- Brukeren kobler Waveshare ESP32-S3-RGB-Matrix til Mac-en med USB.
-- Codex lager et minimalt PlatformIO-prosjekt i `firmware-hub75/`.
-- Codex lager en enkel `main.cpp` som starter `Serial` og skriver en melding hvert sekund.
-- Codex bygger, laster opp og åpner serial monitor.
-- Når terminalen viser meldinger fra kortet, vet vi at kort, kabel, port, build og upload fungerer.
-
-Deretter tas firmware i smale steg:
+Gjennomført rekkefølge:
 
 1. Kortet lever: minimal serial/uptime-test.
-2. Skjermen lyser: HUB75 viser en farge eller et enkelt testmønster.
-3. Wi-Fi virker: ESP32 kobler seg på nett.
+2. Skjermen lyser: HUB75 viser testmønster.
+3. Wi-Fi virker: ESP32 kobler seg til `jacobsen-iot`.
 4. Device config virker: ESP32 henter `/public/device-config`.
 5. Display payload virker: ESP32 henter og parser `/public/display`.
-6. Enkel tekst virker: ESP32 viser tekst på panelet.
+6. Layout virker: ESP32 matcher 128 x 64-emulatoren for live- og idle-visning.
 7. Logo virker: ESP32 henter og tegner `/public/logos-rgb565/{CODE}.rgb565`.
-8. Full layout virker: ESP32 matcher 128 x 64-emulatoren med flightdata og logoer.
+8. Skjermstyring virker: Homey/API kan sette skjerm av/på og dag/natt-brightness.
+9. Lyd virker: testlyd og PA-varsel spiller via ES8311/NS4150.
 
-Plan for firmware:
+Firmware gjør dette:
 
 - koble til Wi-Fi
 - hente `/public/device-config`
-- respektere `enabled`, brightness, nattmodus og polling-intervall
+- hente `/public/sound-state` for rask testlyd uten flydatahenting
+- respektere skjerm av/på, brightness, dag/natt-modus, farger, timezone og polling-intervall
 - hente `/public/display`
 - laste logo fra `/public/logos-rgb565/{CODE}.rgb565`
 - tegne 128 x 64 layout lokalt på HUB75-panelet
 - rotere mellom fly basert på payload og Worker-innstillinger
+- vise gul blinkende pixel øverst til høyre når den henter config/status mens skjermen er av
+- la panelet være helt svart når skjermen er deaktivert
+- spille PA-lyd når idle avbrytes av et fly
 - ikke kalle FR24, Avinor eller geokoding direkte
 
 Skjermen skal altså ikke ha egen forretningslogikk. Den skal bare presentere Workerens ferdige svar.
@@ -398,6 +450,25 @@ Strøm og første oppkobling:
 - Kortets 5V power output kan brukes videre til LED-panelet slik Waveshare beskriver.
 - USB Type-C-porten brukes samtidig til programmering/debugging fra Mac.
 - Første paneltest skal kjøres med lav brightness og enkelt testmønster, ikke full hvit skjerm.
+
+### Lydpinout
+
+Waveshare-schematic og BSP er fasit for lyd. ES8311/NS4150-lydveien bruker:
+
+```text
+I2C_SDA    IO47
+I2C_SCL    IO48
+I2S_MCLK   IO12
+I2S_SCLK   IO43
+I2S_LRCK   IO38
+I2S_DSDOUT IO21
+I2S_DSDIN  IO39
+PA_CTRL    IO11
+```
+
+Viktig: Arduino `I2S`-wrapperen setter ikke MCLK på dette oppsettet. Firmware bruker derfor ESP-IDF I2S-driveren direkte for lyd, med I2S0 og eksplisitt `mck_io_num = 12`. HUB75-biblioteket bruker I2S1.
+
+Testlyd ved 5 % var praktisk talt uhørbar på denne lydveien. Første bekreftede hørbare nivå var 35 %, og lydvolumet styres nå fra webpanelet.
 
 ## Referanse
 

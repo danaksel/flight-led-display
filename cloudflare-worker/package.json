@@ -7,6 +7,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "logos:rgb565": "node scripts/convert-logos-rgb565.mjs",
+    "logos:backfill-r2": "node scripts/backfill-r2-rgb565.mjs",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

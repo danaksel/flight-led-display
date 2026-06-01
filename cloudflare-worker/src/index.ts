@@ -50,6 +50,7 @@ type DeviceSettings = {
   airspaceMonitoringEnabled: boolean;
   liveDataSource: "fr24" | "opensky";
   brightness: number;
+  audioVolumePercent: number;
   pollSeconds: number;
   displayCycleSeconds: number;
   timetableCycleSeconds: number;
@@ -75,6 +76,7 @@ type DeviceSettings = {
   timetableColors: {
     header: string;
     data: string;
+    time: string;
     newTime: string;
     canceled: string;
   };
@@ -84,6 +86,22 @@ type DeviceSettings = {
     end: string;
     brightness: number;
   };
+};
+
+type ScreenState = {
+  active: boolean;
+  brightnessMode: "day" | "night";
+  lastActivatedAt: string | null;
+  lastDeactivatedAt: string | null;
+  lastBrightnessModeChangedAt: string | null;
+  updatedAt: string | null;
+  source: string | null;
+};
+
+type SoundState = {
+  testNonce: number;
+  lastTriggeredAt: string | null;
+  source: string | null;
 };
 
 type DisplayFlight = {
@@ -270,9 +288,10 @@ type IdleRow = {
   flightId: string;
   airport: string;
   time: string;
-  status: "scheduled" | "newTime" | "canceled" | "done";
+  status: "scheduled" | "newTime" | "canceled" | "done" | "empty";
   gate?: string;
   gateMessage?: string;
+  message?: string;
 };
 
 type IdleScreen = {
@@ -282,6 +301,8 @@ type IdleScreen = {
 };
 
 const CONFIG_KEY = "config:v1";
+const SCREEN_STATE_KEY = "screen-state:v1";
+const SOUND_STATE_KEY = "sound-state:v1";
 const AIRPORT_CITY_OVERRIDES: Record<string, string> = {
   AAL: "Aalborg",
   AAR: "Aarhus",
@@ -363,6 +384,7 @@ export default {
     try {
       if (url.pathname === "/") return htmlResponse(renderIndexHtml());
       if (url.pathname === "/public/device-config" && request.method === "GET") return deviceConfigResponse(env);
+      if (url.pathname === "/public/sound-state" && request.method === "GET") return soundStateResponse(env);
       if (url.pathname === "/public/display" && request.method === "GET") return flightsResponse(env, true);
       if (url.pathname.startsWith("/public/logos-rgb565/")) return logoRgb565Response(request, env);
       if (url.pathname.startsWith("/public/logos/")) return logoAssetResponse(request, env);
@@ -371,6 +393,17 @@ export default {
       if (url.pathname === "/api/config" && request.method === "GET") return configResponse(env);
       if (url.pathname === "/api/config" && request.method === "POST") return saveConfig(request, env);
       if (url.pathname === "/api/device-config" && request.method === "GET") return deviceConfigResponse(env);
+      if (url.pathname === "/api/sound-state" && request.method === "GET") return soundStateResponse(env);
+      if (url.pathname === "/api/logo-status" && request.method === "GET") return logoStatusResponse(env);
+      if (url.pathname === "/api/screen-state" && request.method === "GET") return screenStateResponse(env);
+      if (url.pathname === "/api/screen-state" && request.method === "POST") return saveScreenState(request, env);
+      if (url.pathname === "/api/screen-state/activate" && request.method === "POST") return writeScreenState(env, { active: true }, "homey-api");
+      if (url.pathname === "/api/screen-state/deactivate" && request.method === "POST") return writeScreenState(env, { active: false }, "homey-api");
+      if (url.pathname === "/api/brightness-mode" && request.method === "GET") return brightnessModeResponse(env);
+      if (url.pathname === "/api/brightness-mode" && request.method === "POST") return saveBrightnessMode(request, env);
+      if (url.pathname === "/api/brightness-mode/day" && request.method === "POST") return writeScreenState(env, { brightnessMode: "day" }, "homey-api");
+      if (url.pathname === "/api/brightness-mode/night" && request.method === "POST") return writeScreenState(env, { brightnessMode: "night" }, "homey-api");
+      if (url.pathname === "/api/sound-test" && request.method === "POST") return triggerSoundTest(request, env);
       if (url.pathname === "/api/flights" && request.method === "GET") return flightsResponse(env, false);
       if (url.pathname === "/api/display" && request.method === "GET") return flightsResponse(env, true);
       if (url.pathname === "/api/avinor-board" && request.method === "GET") return avinorBoardResponse(env);
@@ -397,13 +430,107 @@ async function getConfig(env: Env): Promise<Config> {
   }, env);
 }
 
+function defaultScreenState(): ScreenState {
+  return {
+    active: true,
+    brightnessMode: "day",
+    lastActivatedAt: null,
+    lastDeactivatedAt: null,
+    lastBrightnessModeChangedAt: null,
+    updatedAt: null,
+    source: null
+  };
+}
+
+function normalizeScreenState(value: unknown): ScreenState {
+  const v = value && typeof value === "object" ? value as Partial<ScreenState> : {};
+  return {
+    active: typeof v.active === "boolean" ? v.active : true,
+    brightnessMode: v.brightnessMode === "night" ? "night" : "day",
+    lastActivatedAt: typeof v.lastActivatedAt === "string" && v.lastActivatedAt ? v.lastActivatedAt : null,
+    lastDeactivatedAt: typeof v.lastDeactivatedAt === "string" && v.lastDeactivatedAt ? v.lastDeactivatedAt : null,
+    lastBrightnessModeChangedAt: typeof v.lastBrightnessModeChangedAt === "string" && v.lastBrightnessModeChangedAt ? v.lastBrightnessModeChangedAt : null,
+    updatedAt: typeof v.updatedAt === "string" && v.updatedAt ? v.updatedAt : null,
+    source: typeof v.source === "string" && v.source ? v.source.slice(0, 80) : null
+  };
+}
+
+function defaultSoundState(): SoundState {
+  return {
+    testNonce: 0,
+    lastTriggeredAt: null,
+    source: null
+  };
+}
+
+function normalizeSoundState(value: unknown): SoundState {
+  const v = value && typeof value === "object" ? value as Partial<SoundState> : {};
+  return {
+    testNonce: typeof v.testNonce === "number" && Number.isFinite(v.testNonce) ? Math.max(0, Math.floor(v.testNonce)) : 0,
+    lastTriggeredAt: typeof v.lastTriggeredAt === "string" && v.lastTriggeredAt ? v.lastTriggeredAt : null,
+    source: typeof v.source === "string" && v.source ? v.source.slice(0, 80) : null
+  };
+}
+
+async function getScreenState(env: Env): Promise<ScreenState> {
+  const stored = await env.FLIGHT_DISPLAY_KV.get(SCREEN_STATE_KEY, "json");
+  return normalizeScreenState(stored);
+}
+
+async function getSoundState(env: Env): Promise<SoundState> {
+  const stored = await env.FLIGHT_DISPLAY_KV.get(SOUND_STATE_KEY, "json");
+  if (!stored) return defaultSoundState();
+  return normalizeSoundState(stored);
+}
+
+async function triggerSoundTestState(env: Env, source = "api"): Promise<SoundState> {
+  const previous = await getSoundState(env);
+  const next: SoundState = {
+    testNonce: previous.testNonce + 1,
+    lastTriggeredAt: new Date().toISOString(),
+    source: source.slice(0, 80)
+  };
+  await env.FLIGHT_DISPLAY_KV.put(SOUND_STATE_KEY, JSON.stringify(next));
+  return next;
+}
+
+async function writeScreenState(
+  env: Env,
+  patch: Partial<Pick<ScreenState, "active" | "brightnessMode">>,
+  source = "api"
+): Promise<Response> {
+  const previous = await getScreenState(env);
+  const now = new Date().toISOString();
+  const active = typeof patch.active === "boolean" ? patch.active : previous.active;
+  const brightnessMode = patch.brightnessMode === "night" ? "night" : patch.brightnessMode === "day" ? "day" : previous.brightnessMode;
+  const next: ScreenState = {
+    active,
+    brightnessMode,
+    lastActivatedAt: active && !previous.active ? now : previous.lastActivatedAt,
+    lastDeactivatedAt: !active && previous.active ? now : previous.lastDeactivatedAt,
+    lastBrightnessModeChangedAt: brightnessMode !== previous.brightnessMode ? now : previous.lastBrightnessModeChangedAt,
+    updatedAt: now,
+    source: source.slice(0, 80)
+  };
+  await env.FLIGHT_DISPLAY_KV.put(SCREEN_STATE_KEY, JSON.stringify(next));
+  return jsonResponse(next, 200, { "Cache-Control": "no-store" });
+}
+
 async function configResponse(env: Env): Promise<Response> {
-  const [config, aviationstackApiKey] = await Promise.all([
+  const [config, aviationstackApiKey, screenState, soundState] = await Promise.all([
     getConfig(env),
-    getAviationstackApiKey(env)
+    getAviationstackApiKey(env),
+    getScreenState(env),
+    getSoundState(env)
   ]);
+  const normalizedDevice = normalizeDeviceSettings(config.device);
   return jsonResponse({
     ...config,
+    screenState,
+    soundState: {
+      ...soundState,
+      volumePercent: normalizedDevice.audioVolumePercent
+    },
     aviationstackApiKeyConfigured: Boolean(aviationstackApiKey)
   }, 200, { "Cache-Control": "no-store" });
 }
@@ -430,15 +557,161 @@ async function saveConfig(request: Request, env: Env): Promise<Response> {
 }
 
 async function deviceConfigResponse(env: Env): Promise<Response> {
-  const config = await getConfig(env);
+  const [config, screenState, soundState] = await Promise.all([getConfig(env), getScreenState(env), getSoundState(env)]);
+  const normalizedDevice = normalizeDeviceSettings(config.device);
+  const effectiveBrightness = screenState.brightnessMode === "night"
+    ? normalizedDevice.nightMode.brightness
+    : normalizedDevice.brightness;
   return jsonResponse({
     updatedAt: config.updatedAt || null,
     homeAirportIata: config.homeAirportIata,
     follow: config.follow,
-    device: config.device
+    device: {
+      ...normalizedDevice,
+      effectiveBrightness,
+      effectiveBrightness8: scalePercentTo8Bit(effectiveBrightness),
+      brightnessMode: screenState.brightnessMode,
+      timezonePosix: timezonePosixForFirmware(config.device?.timezone || "Europe/Oslo")
+    },
+    screenState,
+    audio: {
+      testNonce: soundState.testNonce,
+      volumePercent: normalizedDevice.audioVolumePercent
+    }
   }, 200, {
     "Cache-Control": "no-store"
   });
+}
+
+async function soundStateResponse(env: Env): Promise<Response> {
+  const [soundState, config] = await Promise.all([getSoundState(env), getConfig(env)]);
+  const normalizedDevice = normalizeDeviceSettings(config.device);
+  return jsonResponse({
+    ...soundState,
+    volumePercent: normalizedDevice.audioVolumePercent
+  }, 200, {
+    "Cache-Control": "no-store"
+  });
+}
+
+async function screenStateResponse(env: Env): Promise<Response> {
+  const screenState = await getScreenState(env);
+  return jsonResponse(screenState, 200, {
+    "Cache-Control": "no-store"
+  });
+}
+
+async function brightnessModeResponse(env: Env): Promise<Response> {
+  const screenState = await getScreenState(env);
+  return jsonResponse({
+    brightnessMode: screenState.brightnessMode,
+    lastBrightnessModeChangedAt: screenState.lastBrightnessModeChangedAt,
+    updatedAt: screenState.updatedAt,
+    source: screenState.source
+  }, 200, {
+    "Cache-Control": "no-store"
+  });
+}
+
+async function logoStatusResponse(env: Env): Promise<Response> {
+  if (!env.AIRLINE_LOGOS) {
+    return jsonResponse({ error: "AIRLINE_LOGOS bucket is not configured" }, 500, {
+      "Cache-Control": "no-store"
+    });
+  }
+
+  const [pngKeys, rgb565Keys] = await Promise.all([
+    listR2Keys(env.AIRLINE_LOGOS, ["", "logos/", "airline-logos/"], ".png"),
+    listR2Keys(env.AIRLINE_LOGOS, ["rgb565/", "logos-rgb565/", "airline-logos-rgb565/", ""], ".rgb565")
+  ]);
+  const pngCodes = Array.from(new Set(pngKeys.map(codeFromKey).filter(Boolean))).sort();
+  const rgb565Codes = Array.from(new Set(rgb565Keys.map(codeFromKey).filter(Boolean))).sort();
+  const rgb565Set = new Set(rgb565Codes);
+  const missingRgb565Codes = pngCodes.filter((code) => !rgb565Set.has(code));
+
+  return jsonResponse({
+    updatedAt: new Date().toISOString(),
+    pngCount: pngCodes.length,
+    rgb565Count: rgb565Codes.length,
+    missingRgb565Count: missingRgb565Codes.length,
+    missingRgb565Codes,
+    pngCodes,
+    rgb565Codes
+  }, 200, {
+    "Cache-Control": "no-store"
+  });
+}
+
+async function listR2Keys(bucket: R2Bucket, prefixes: string[], suffix: string): Promise<string[]> {
+  const keys = new Set<string>();
+  for (const prefix of prefixes) {
+    let cursor: string | undefined;
+    do {
+      const listed = await bucket.list({ prefix, cursor });
+      for (const object of listed.objects) {
+        if (object.key.toLowerCase().endsWith(suffix.toLowerCase())) keys.add(object.key);
+      }
+      cursor = listed.truncated ? listed.cursor : undefined;
+    } while (cursor);
+  }
+  return Array.from(keys);
+}
+
+function codeFromKey(key: string): string | undefined {
+  const filename = key.split("/").pop() || "";
+  const dotIndex = filename.lastIndexOf(".");
+  const code = (dotIndex >= 0 ? filename.slice(0, dotIndex) : filename).trim().toUpperCase();
+  return /^[A-Z0-9_-]+$/.test(code) ? code : undefined;
+}
+
+async function saveScreenState(request: Request, env: Env): Promise<Response> {
+  let body: unknown = {};
+  try {
+    body = await request.json();
+  } catch {
+    return jsonResponse({ error: "Expected JSON body" }, 400, { "Cache-Control": "no-store" });
+  }
+
+  const active = firstBoolean(body && typeof body === "object" ? body as Record<string, unknown> : {}, ["active", "enabled", "on"]);
+  if (active === undefined) {
+    return jsonResponse({ error: "Expected boolean field active" }, 400, { "Cache-Control": "no-store" });
+  }
+
+  const source = firstString(body && typeof body === "object" ? body as Record<string, unknown> : {}, ["source"]) || "api";
+  return writeScreenState(env, { active }, source);
+}
+
+async function saveBrightnessMode(request: Request, env: Env): Promise<Response> {
+  let body: unknown = {};
+  try {
+    body = await request.json();
+  } catch {
+    return jsonResponse({ error: "Expected JSON body" }, 400, { "Cache-Control": "no-store" });
+  }
+
+  const mode = firstString(body && typeof body === "object" ? body as Record<string, unknown> : {}, ["brightnessMode", "mode"]);
+  if (mode !== "day" && mode !== "night") {
+    return jsonResponse({ error: "Expected brightnessMode or mode to be 'day' or 'night'" }, 400, { "Cache-Control": "no-store" });
+  }
+
+  const source = firstString(body && typeof body === "object" ? body as Record<string, unknown> : {}, ["source"]) || "api";
+  return writeScreenState(env, { brightnessMode: mode }, source);
+}
+
+async function triggerSoundTest(request: Request, env: Env): Promise<Response> {
+  let body: unknown = {};
+  try {
+    body = await request.json();
+  } catch {
+    body = {};
+  }
+  const source = firstString(body && typeof body === "object" ? body as Record<string, unknown> : {}, ["source"]) || "api";
+  const [soundState, config] = await Promise.all([triggerSoundTestState(env, source), getConfig(env)]);
+  const normalizedDevice = normalizeDeviceSettings(config.device);
+  return jsonResponse({
+    ...soundState,
+    volumePercent: normalizedDevice.audioVolumePercent
+  }, 200, { "Cache-Control": "no-store" });
 }
 
 async function avinorBoardResponse(env: Env): Promise<Response> {
@@ -681,6 +954,7 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
       : true,
     liveDataSource: oneOf((v as { liveDataSource?: unknown }).liveDataSource, ["fr24", "opensky"], "fr24"),
     brightness: clampNumber(v.brightness, 1, 100, 80),
+    audioVolumePercent: clampNumber((v as { audioVolumePercent?: unknown }).audioVolumePercent, 0, 100, 35),
     pollSeconds: clampNumber(v.pollSeconds, 30, 900, 90),
     displayCycleSeconds: clampNumber(v.displayCycleSeconds, 2, 30, 5),
     timetableCycleSeconds: clampNumber((v as { timetableCycleSeconds?: unknown }).timetableCycleSeconds, 2, 60, 7),
@@ -721,9 +995,34 @@ function normalizeTimetableColors(value: unknown): DeviceSettings["timetableColo
   return {
     header: normalizeHexColor(v.header, "#f7b500"),
     data: normalizeHexColor(v.data, "#f4f7ff"),
+    time: normalizeHexColor(v.time, "#f4f7ff"),
     newTime: normalizeHexColor(v.newTime, "#f7b500"),
     canceled: normalizeHexColor(v.canceled, "#ff3b30")
   };
+}
+
+function timezonePosixForFirmware(timezone: string): string {
+  const raw = (timezone || "").trim();
+  if (!raw) return "CET-1CEST,M3.5.0/2,M10.5.0/3";
+  if (/^[A-Z]{2,6}[+-]\d/.test(raw) || raw.includes(",")) return raw.slice(0, 64);
+
+  const known: Record<string, string> = {
+    "Etc/UTC": "UTC0",
+    "UTC": "UTC0",
+    "Europe/Oslo": "CET-1CEST,M3.5.0/2,M10.5.0/3",
+    "Europe/Stockholm": "CET-1CEST,M3.5.0/2,M10.5.0/3",
+    "Europe/Copenhagen": "CET-1CEST,M3.5.0/2,M10.5.0/3",
+    "Europe/Berlin": "CET-1CEST,M3.5.0/2,M10.5.0/3",
+    "Europe/Amsterdam": "CET-1CEST,M3.5.0/2,M10.5.0/3",
+    "Europe/Paris": "CET-1CEST,M3.5.0/2,M10.5.0/3",
+    "Europe/London": "GMT0BST,M3.5.0/1,M10.5.0/2",
+    "America/New_York": "EST5EDT,M3.2.0/2,M11.1.0/2",
+    "America/Chicago": "CST6CDT,M3.2.0/2,M11.1.0/2",
+    "America/Denver": "MST7MDT,M3.2.0/2,M11.1.0/2",
+    "America/Los_Angeles": "PST8PDT,M3.2.0/2,M11.1.0/2"
+  };
+
+  return known[raw] || known["Europe/Oslo"];
 }
 
 function normalizeLineColors(value: unknown): DeviceSettings["lineColors"] {
@@ -740,6 +1039,11 @@ function normalizeLineColors(value: unknown): DeviceSettings["lineColors"] {
 function normalizeHexColor(value: unknown, fallback: string): string {
   const raw = typeof value === "string" ? value.trim() : "";
   return /^#[0-9a-fA-F]{6}$/.test(raw) ? raw.toLowerCase() : fallback;
+}
+
+function scalePercentTo8Bit(value: number): number {
+  const clamped = clamp(value, 0, 100);
+  return Math.round((clamped / 100) * 255);
 }
 
 function normalizeAirportCode(value: unknown, fallback: string): string {
@@ -760,24 +1064,41 @@ function clampNumber(value: unknown, min: number, max: number, fallback: number)
 async function getIdleScreens(env: Env, config: Config): Promise<IdleScreen[]> {
   const airport = normalizeAirportCode(config.homeAirportIata, env.HOME_AIRPORT_IATA || "OSL");
   const limit = config.device?.timetableItemCount || 8;
+  const avinorWindowHours = normalizeDeviceSettings(config.device).avinorWindowHours;
   const [departures, arrivals] = await Promise.all([
     getAvinorFlights(env, airport, "D", config),
     getAvinorFlights(env, airport, "A", config)
   ]);
 
   return [
-    ...toIdleScreens("DEPARTURES", "departures", departures.slice(0, limit)),
-    ...toIdleScreens("ARRIVALS", "arrivals", arrivals.slice(0, limit))
+    ...toIdleScreens("DEPARTURES", "departures", departures.slice(0, limit), avinorWindowHours),
+    ...toIdleScreens("ARRIVALS", "arrivals", arrivals.slice(0, limit), avinorWindowHours)
   ];
 }
 
-function toIdleScreens(title: IdleScreen["title"], kind: IdleScreen["kind"], flights: AvinorFlight[]): IdleScreen[] {
+function toIdleScreens(title: IdleScreen["title"], kind: IdleScreen["kind"], flights: AvinorFlight[], avinorWindowHours: number): IdleScreen[] {
   const rows = flights.map(toIdleRow);
+  if (!rows.length) {
+    const noun = kind === "departures" ? "departures" : "arrivals";
+    const hours = Math.max(1, Math.round(avinorWindowHours));
+    return [{
+      title,
+      kind,
+      rows: [{
+        flightId: "",
+        airport: "",
+        time: "",
+        status: "empty",
+        message: `No ${noun}|the next ${hours} hours`
+      }]
+    }];
+  }
+
   const pages: IdleRow[][] = [];
   for (let index = 0; index < rows.length; index += 4) {
     pages.push(rows.slice(index, index + 4));
   }
-  return (pages.length ? pages : [[]]).map((pageRows) => ({
+  return pages.map((pageRows) => ({
     title,
     kind,
     rows: pageRows
@@ -1149,14 +1470,14 @@ function localDateString(date: Date, timezone: string): string {
 }
 
 async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
-  const config = await getConfig(env);
-  const suspendedReason = displaySuspendedReason(config);
+  const [config, screenState] = await Promise.all([getConfig(env), getScreenState(env)]);
+  const suspendedReason = displaySuspendedReason(config, screenState);
   const liveSourceStatus: LiveSourceStatus = {
     source: normalizeDeviceSettings(config.device).liveDataSource,
     ok: true
   };
   if (suspendedReason) {
-    return jsonResponse(await displayPayload(env, config, compact, suspendedReason, [], [], [], [], liveSourceStatus), 200, {
+    return jsonResponse(await displayPayload(env, config, screenState, compact, suspendedReason, [], [], [], [], liveSourceStatus), 200, {
       "Cache-Control": "no-store"
     });
   }
@@ -1187,7 +1508,7 @@ async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
     await enrichFollowLocation(env, displayFlights);
   }
   const idleScreens = displayFlights.length ? [] : await getIdleScreens(env, config);
-  const payload = displayPayload(env, config, compact, mode, followFlights, nearbyFlights, displayFlights, idleScreens, liveSourceStatus);
+  const payload = displayPayload(env, config, screenState, compact, mode, followFlights, nearbyFlights, displayFlights, idleScreens, liveSourceStatus);
 
   return jsonResponse(await payload, 200, {
     "Cache-Control": "public, max-age=15"
@@ -1197,6 +1518,7 @@ async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
 async function displayPayload(
   env: Env,
   config: Config,
+  screenState: ScreenState,
   compact: boolean,
   mode: string,
   followFlights: DisplayFlight[],
@@ -1209,8 +1531,10 @@ async function displayPayload(
     ? {
         updatedAt: new Date().toISOString(),
         mode,
-        suspended: mode === "disabled" || mode === "night",
+        suspended: mode === "disabled" || mode === "night" || mode === "remote_disabled",
         airspaceMonitoring: config.device?.airspaceMonitoringEnabled !== false,
+        screenActive: screenState.active,
+        screenState,
         lat: config.lat,
         lon: config.lon,
         radiusKm: config.radiusKm,
@@ -1224,6 +1548,8 @@ async function displayPayload(
         updatedAt: new Date().toISOString(),
         mode,
         airspaceMonitoring: config.device?.airspaceMonitoringEnabled !== false,
+        screenActive: screenState.active,
+        screenState,
         config,
         liveSourceStatus,
         followFlights,
@@ -1233,10 +1559,8 @@ async function displayPayload(
       };
 }
 
-function displaySuspendedReason(config: Config): "disabled" | "night" | undefined {
-  const device = normalizeDeviceSettings(config.device);
-  if (!device.enabled) return "disabled";
-  if (isNightModeActive(device)) return "night";
+function displaySuspendedReason(config: Config, screenState: ScreenState): "disabled" | "night" | "remote_disabled" | undefined {
+  if (!screenState.active) return "remote_disabled";
   return undefined;
 }
 
@@ -2937,16 +3261,20 @@ function renderIndexHtml(): string {
       <section class="card screen-card">
         <div class="section-head">
           <h2>Skjerm</h2>
-          <span class="hint" tabindex="0" data-tip="Dette styrer selve panelet: om det er på, hvor sterkt det lyser, hvor ofte skjermen henter data, og når nattmodus stopper betalte FR24-kall.">i</span>
+          <span class="hint" tabindex="0" data-tip="Dette styrer selve panelet: hvor sterkt det lyser på dag og natt, og hvor ofte skjermen henter config og flydata når den er aktiv. Av/på og dag/natt styres eksternt fra Homey.">i</span>
         </div>
         <p class="section-note">De viktigste displayvalgene. Sjeldnere tidsvalg ligger under avansert.</p>
-        <div class="toggle-row">
-          <label for="deviceEnabled">Skjermen er på</label>
-          <input id="deviceEnabled" type="checkbox">
-        </div>
+        <div class="field-help">Skjermen styres eksternt fra Homey. Her ser du bare status og lagrer nivåene for dag og natt.</div>
+        <div class="field-help" id="screenStateSummary">Skjermstatus: aktiv · lysmodus: dag</div>
+        <div class="field-help" id="screenStateTimestamps">Sist aktivert: aldri · sist deaktivert: aldri · sist byttet lysmodus: aldri</div>
+        <div class="field-help" id="soundTestStatus">Lydtest: aldri</div>
+        <button id="soundTest" class="secondary" type="button">Test lyd nå</button>
+        <label for="audioVolumePercent">Lydvolum</label>
+        <input id="audioVolumePercent" type="range" min="0" max="100" step="1">
+        <div class="field-help">Testlyd og PA-varsel spilles med <span id="audioVolumeValue">35</span>%.</div>
         <div class="row">
           <div>
-            <label for="deviceBrightness">Lysstyrke</label>
+            <label for="deviceBrightness">Lysstyrke dag</label>
             <input id="deviceBrightness" type="number" min="1" max="100" step="1">
           </div>
           <div>
@@ -2965,23 +3293,9 @@ function renderIndexHtml(): string {
                 <div class="field-help">Hvor ofte skjermen spør Worker om nye innstillinger.</div>
               </div>
               <div>
-                <label for="nightBrightness">Lysstyrke om natten</label>
+                <label for="nightBrightness">Lysstyrke natt</label>
                 <input id="nightBrightness" type="number" min="0" max="100" step="1">
-                <div class="field-help">Sett 0 for å stoppe visning og FR24-henting om natten.</div>
-              </div>
-            </div>
-            <div class="toggle-row">
-              <label for="nightEnabled">Bruk nattmodus</label>
-              <input id="nightEnabled" type="checkbox">
-            </div>
-            <div class="row">
-              <div>
-                <label for="nightStart">Natt starter</label>
-                <input id="nightStart" type="time">
-              </div>
-              <div>
-                <label for="nightEnd">Natt slutter</label>
-                <input id="nightEnd" type="time">
+                <div class="field-help">Brukes når Homey setter lysmodus til natt.</div>
               </div>
             </div>
           </div>
@@ -3137,6 +3451,10 @@ function renderIndexHtml(): string {
             <input id="timetableDataColor" type="color">
           </div>
           <div>
+            <label for="timetableTimeColor">Klokkeslett</label>
+            <input id="timetableTimeColor" type="color">
+          </div>
+          <div>
             <label for="timetableNewTimeColor">Ny tid</label>
             <input id="timetableNewTimeColor" type="color">
           </div>
@@ -3151,6 +3469,10 @@ function renderIndexHtml(): string {
         <div class="links">
           <a href="/api/config" target="_blank">Config</a>
           <a href="/api/device-config" target="_blank">Device config</a>
+          <a href="/api/logo-status" target="_blank">Logo status</a>
+          <a href="/api/screen-state" target="_blank">Screen state</a>
+          <a href="/api/brightness-mode" target="_blank">Brightness mode</a>
+          <a href="/api/sound-test" target="_blank">Sound test</a>
           <a href="/api/flights" target="_blank">Flights</a>
           <a href="/api/display" target="_blank">Display</a>
           <a href="/api/avinor-board" target="_blank">Avinor board</a>
@@ -3217,7 +3539,12 @@ function renderIndexHtml(): string {
       speedUnit: document.querySelector("#speedUnit"),
       trackUnit: document.querySelector("#trackUnit"),
       verticalRateUnit: document.querySelector("#verticalRateUnit"),
-      deviceEnabled: document.querySelector("#deviceEnabled"),
+      screenStateSummary: document.querySelector("#screenStateSummary"),
+      screenStateTimestamps: document.querySelector("#screenStateTimestamps"),
+      soundTestStatus: document.querySelector("#soundTestStatus"),
+      soundTest: document.querySelector("#soundTest"),
+      audioVolumePercent: document.querySelector("#audioVolumePercent"),
+      audioVolumeValue: document.querySelector("#audioVolumeValue"),
       deviceBrightness: document.querySelector("#deviceBrightness"),
       nightBrightness: document.querySelector("#nightBrightness"),
       pollSeconds: document.querySelector("#pollSeconds"),
@@ -3235,12 +3562,10 @@ function renderIndexHtml(): string {
       progressColor: document.querySelector("#progressColor"),
       timetableHeaderColor: document.querySelector("#timetableHeaderColor"),
       timetableDataColor: document.querySelector("#timetableDataColor"),
+      timetableTimeColor: document.querySelector("#timetableTimeColor"),
       timetableNewTimeColor: document.querySelector("#timetableNewTimeColor"),
       timetableCanceledColor: document.querySelector("#timetableCanceledColor"),
       timezone: document.querySelector("#timezone"),
-      nightEnabled: document.querySelector("#nightEnabled"),
-      nightStart: document.querySelector("#nightStart"),
-      nightEnd: document.querySelector("#nightEnd"),
       save: document.querySelector("#save"),
       locate: document.querySelector("#locate"),
       status: document.querySelector("#status"),
@@ -3273,6 +3598,8 @@ function renderIndexHtml(): string {
     let emulatorPolling = false;
     let emulatorPollInFlight = false;
     let formIsDirty = false;
+    let screenState = { active: true, brightnessMode: "day", lastActivatedAt: null, lastDeactivatedAt: null, lastBrightnessModeChangedAt: null, updatedAt: null, source: null };
+    let soundState = { testNonce: 0, lastTriggeredAt: null, source: null };
     const logoCache = new Map();
 
     init();
@@ -3307,6 +3634,7 @@ function renderIndexHtml(): string {
         input.addEventListener("input", markDirty);
         input.addEventListener("change", markDirty);
       });
+      els.audioVolumePercent.addEventListener("input", updateAudioVolumeUi);
       renderEmulator();
     }
 
@@ -3319,6 +3647,8 @@ function renderIndexHtml(): string {
     function setForm(config) {
       const device = config.device || {};
       const night = device.nightMode || {};
+      screenState = config.screenState || screenState;
+      soundState = config.soundState || soundState;
       els.label.value = config.label || "";
       els.lat.value = Number(config.lat).toFixed(6);
       els.lon.value = Number(config.lon).toFixed(6);
@@ -3337,8 +3667,9 @@ function renderIndexHtml(): string {
       els.speedUnit.value = followUnits.speed || "kn";
       els.trackUnit.value = followUnits.track || "deg";
       els.verticalRateUnit.value = followUnits.verticalRate || "fpm";
-      els.deviceEnabled.checked = device.enabled !== false;
       els.deviceBrightness.value = device.brightness ?? 80;
+      els.audioVolumePercent.value = device.audioVolumePercent ?? 35;
+      updateAudioVolumeUi();
       els.nightBrightness.value = night.brightness ?? 0;
       els.pollSeconds.value = device.pollSeconds ?? 90;
       els.cycleSeconds.value = device.displayCycleSeconds ?? 5;
@@ -3357,12 +3688,12 @@ function renderIndexHtml(): string {
       const timetableColors = device.timetableColors || {};
       els.timetableHeaderColor.value = timetableColors.header || "#f7b500";
       els.timetableDataColor.value = timetableColors.data || "#f4f7ff";
+      els.timetableTimeColor.value = timetableColors.time || "#f4f7ff";
       els.timetableNewTimeColor.value = timetableColors.newTime || "#f7b500";
       els.timetableCanceledColor.value = timetableColors.canceled || "#ff3b30";
       els.timezone.value = device.timezone || "Europe/Oslo";
-      els.nightEnabled.checked = night.enabled !== false;
-      els.nightStart.value = night.start || "23:00";
-      els.nightEnd.value = night.end || "07:00";
+      updateScreenStateUi();
+      updateSoundTestUi();
     }
 
     function readForm() {
@@ -3381,10 +3712,11 @@ function renderIndexHtml(): string {
             .slice(0, 3)
         },
         device: {
-          enabled: els.deviceEnabled.checked,
+          enabled: true,
           airspaceMonitoringEnabled: els.airspaceMonitoringEnabled.checked,
           liveDataSource: els.liveDataSource.value,
           brightness: Number(els.deviceBrightness.value),
+          audioVolumePercent: Number(els.audioVolumePercent.value),
           pollSeconds: Number(els.pollSeconds.value),
           displayCycleSeconds: Number(els.cycleSeconds.value),
           timetableCycleSeconds: Number(els.timetableCycleSeconds.value),
@@ -3410,13 +3742,14 @@ function renderIndexHtml(): string {
           timetableColors: {
             header: els.timetableHeaderColor.value,
             data: els.timetableDataColor.value,
+            time: els.timetableTimeColor.value,
             newTime: els.timetableNewTimeColor.value,
             canceled: els.timetableCanceledColor.value
           },
           nightMode: {
-            enabled: els.nightEnabled.checked,
-            start: els.nightStart.value,
-            end: els.nightEnd.value,
+            enabled: true,
+            start: "23:00",
+            end: "07:00",
             brightness: Number(els.nightBrightness.value)
           }
         }
@@ -3455,6 +3788,28 @@ function renderIndexHtml(): string {
       renderEmulator();
     });
 
+    els.soundTest.addEventListener("click", async () => {
+      els.soundTest.disabled = true;
+      els.soundTestStatus.textContent = "Lydtest: sender...";
+      try {
+        const res = await fetch("/api/sound-test", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ source: "web" })
+        });
+        const json = await res.json();
+        if (!res.ok) {
+          throw new Error(json && json.error ? json.error : "Kunne ikke trigge lydtest");
+        }
+        soundState = json;
+        updateSoundTestUi();
+      } catch (error) {
+        els.soundTestStatus.textContent = "Lydtest feilet";
+      } finally {
+        els.soundTest.disabled = false;
+      }
+    });
+
     els.locate.addEventListener("click", () => {
       if (!navigator.geolocation) return;
       navigator.geolocation.getCurrentPosition((position) => {
@@ -3468,7 +3823,7 @@ function renderIndexHtml(): string {
 
     els.refresh.addEventListener("click", loadPreview);
     els.refreshAvinor.addEventListener("click", loadAvinorRawOnly);
-    els.emuPolling.addEventListener("click", () => setEmulatorPolling(!emulatorPolling));
+      els.emuPolling.addEventListener("click", () => setEmulatorPolling(!emulatorPolling));
     els.emuSource.addEventListener("change", () => {
       resetFlightCycle();
       renderEmulator();
@@ -3489,6 +3844,7 @@ function renderIndexHtml(): string {
       els.progressColor,
       els.timetableHeaderColor,
       els.timetableDataColor,
+      els.timetableTimeColor,
       els.timetableNewTimeColor,
       els.timetableCanceledColor
     ].forEach((input) => input.addEventListener("input", () => {
@@ -3549,6 +3905,8 @@ function renderIndexHtml(): string {
         }
         const flights = Array.isArray(data.flights) ? data.flights : [];
         displayMode = data.mode || (flights.length ? "nearby" : "idle");
+        screenState = data.screenState || screenState;
+        updateScreenStateUi();
         idleScreens = Array.isArray(data.idleScreens) ? data.idleScreens : [];
         displayFlights = flights;
         currentFlightIndex = 0;
@@ -3674,6 +4032,7 @@ function renderIndexHtml(): string {
 
     function formatIdleRow(row) {
       if (!row || typeof row !== "object") return "";
+      if (row.status === "empty" || row.message) return String(row.message || "").replace("|", " / ");
       const gate = row.gate ? "Gate " + row.gate : "";
       const status = row.gateMessage || (row.status && row.status !== "scheduled" ? row.status : "");
       return [row.flightId, row.airport, gate, row.time, status].filter(Boolean).join(" · ");
@@ -3716,6 +4075,13 @@ function renderIndexHtml(): string {
       sourceCtx.fillRect(0, 0, source.width, source.height);
       ctx.fillStyle = "#000";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      if (screenState && screenState.active === false) {
+        applyDisplayBrightness(sourceCtx);
+        drawLedPanel(ctx, source);
+        els.emuMeta.textContent = "Skjermen er deaktivert eksternt og skal være svart.";
+        return;
+      }
 
       if (els.emuSource.value === "live") {
         const flight = displayFlights[currentFlightIndex] || displayFlights[0];
@@ -3952,7 +4318,7 @@ function renderIndexHtml(): string {
       ensureTickerAnimation();
       const title = screen.title || "AIRPORT";
       drawDotText(ctx, title, 3, 3, colors.header, { maxWidth: 86 });
-      drawLocalClock(ctx, 125, 3, colors.data);
+      drawLocalClock(ctx, 125, 3, colors.time);
       ctx.fillStyle = colors.header;
       ctx.fillRect(3, 14, 122, 1);
       const transition = getTimetableTransition(screen);
@@ -4000,12 +4366,18 @@ function renderIndexHtml(): string {
     function drawIdleRow(ctx, kind, row, x, y) {
       const colors = getTimetableColors();
       const status = row && row.status ? row.status : "scheduled";
+      if (status === "empty" || row.message) {
+        const parts = String(row.message || row.flightId || "").split("|");
+        drawDotText(ctx, (parts[0] || "").toUpperCase(), x, y, colors.data, { maxWidth: 122 });
+        if (parts[1]) drawDotText(ctx, parts[1].toUpperCase(), x, y + 11, colors.data, { maxWidth: 122 });
+        return;
+      }
       const gateBlinkOn = Math.floor(performance.now() / 1200) % 2 === 0;
       const gateStatusText = kind === "departures" ? normalizeGateStatusForDisplay(row.gateMessage) : "";
       const arrivalStatusText = kind === "arrivals" && status === "done" ? "Landed" : "";
       const gateText = kind === "departures" && row.gate ? row.gate : "";
       const airportText = kind === "departures" && gateText && !gateBlinkOn ? gateText : row.airport || "";
-      const timeColor = status === "canceled" ? colors.canceled : status === "newTime" ? colors.newTime : colors.data;
+      const timeColor = status === "canceled" ? colors.canceled : status === "newTime" ? colors.newTime : colors.time;
       const rowColor = status === "canceled" ? colors.canceled : colors.data;
       const alternateTimeText = gateStatusText || arrivalStatusText;
       const timeText = alternateTimeText && !gateBlinkOn ? alternateTimeText : row.time || "";
@@ -4048,9 +4420,41 @@ function renderIndexHtml(): string {
       return {
         header: els.timetableHeaderColor.value || "#f7b500",
         data: els.timetableDataColor.value || "#f4f7ff",
+        time: els.timetableTimeColor.value || "#f4f7ff",
         newTime: els.timetableNewTimeColor.value || "#f7b500",
         canceled: els.timetableCanceledColor.value || "#ff3b30"
       };
+    }
+
+    function formatScreenTimestamp(value) {
+      if (!value) return "aldri";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return "aldri";
+      return new Intl.DateTimeFormat("nb-NO", {
+        dateStyle: "short",
+        timeStyle: "medium"
+      }).format(date);
+    }
+
+    function updateScreenStateUi() {
+      const active = screenState && screenState.active !== false;
+      const brightnessMode = screenState && screenState.brightnessMode === "night" ? "natt" : "dag";
+      const source = screenState && screenState.source ? " via " + screenState.source : "";
+      els.screenStateSummary.textContent = "Skjermstatus: " + (active ? "på" : "av") + " · lysmodus: " + brightnessMode + source;
+      els.screenStateTimestamps.textContent =
+        "Sist aktivert: " + formatScreenTimestamp(screenState && screenState.lastActivatedAt)
+        + " · sist deaktivert: " + formatScreenTimestamp(screenState && screenState.lastDeactivatedAt)
+        + " · sist byttet lysmodus: " + formatScreenTimestamp(screenState && screenState.lastBrightnessModeChangedAt);
+    }
+
+    function updateSoundTestUi() {
+      const source = soundState && soundState.source ? " via " + soundState.source : "";
+      const volume = soundState && Number.isFinite(Number(soundState.volumePercent)) ? " · volum " + Number(soundState.volumePercent) + "%" : "";
+      els.soundTestStatus.textContent = "Lydtest: " + formatScreenTimestamp(soundState && soundState.lastTriggeredAt) + source + volume;
+    }
+
+    function updateAudioVolumeUi() {
+      els.audioVolumeValue.textContent = String(Math.round(Number(els.audioVolumePercent.value || 0)));
     }
 
     function getLineColors() {

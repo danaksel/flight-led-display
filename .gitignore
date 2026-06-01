@@ -7,10 +7,12 @@ cloudflare-worker/.dev.vars
 cloudflare-worker/.wrangler/
 cloudflare-worker/node_modules/
 cloudflare-worker/dist/
+.wrangler/
 
 # PlatformIO / firmware
 firmware-original/.pio/
 firmware-hub75/.pio/
+firmware-hub75/include/WiFiSecrets.h
 
 # Generated/exported airline logo artifacts
 assets/airline-logos/r2-source/
