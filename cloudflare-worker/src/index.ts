@@ -362,6 +362,11 @@ export default {
 
     try {
       if (url.pathname === "/") return htmlResponse(renderIndexHtml());
+      if (url.pathname === "/public/device-config" && request.method === "GET") return deviceConfigResponse(env);
+      if (url.pathname === "/public/display" && request.method === "GET") return flightsResponse(env, true);
+      if (url.pathname.startsWith("/public/logos-rgb565/")) return logoRgb565Response(request, env);
+      if (url.pathname.startsWith("/public/logos/")) return logoAssetResponse(request, env);
+      if (url.pathname.startsWith("/logos-rgb565/")) return logoRgb565Response(request, env);
       if (url.pathname.startsWith("/logos/")) return logoAssetResponse(request, env);
       if (url.pathname === "/api/config" && request.method === "GET") return configResponse(env);
       if (url.pathname === "/api/config" && request.method === "POST") return saveConfig(request, env);
@@ -546,6 +551,44 @@ async function logoAssetResponse(request: Request, env: Env): Promise<Response> 
   });
 }
 
+async function logoRgb565Response(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const filename = url.pathname.split("/").pop() || "";
+  if (!/^[A-Za-z0-9_-]+\.rgb565$/.test(filename)) {
+    return jsonResponse({ error: "Expected /logos-rgb565/{CODE}.rgb565" }, 400, {
+      "Cache-Control": "no-store"
+    });
+  }
+
+  if (!env.AIRLINE_LOGOS) {
+    return jsonResponse({ error: "AIRLINE_LOGOS bucket is not configured" }, 500, {
+      "Cache-Control": "no-store"
+    });
+  }
+
+  const logoObject = await getRgb565LogoObject(env.AIRLINE_LOGOS, filename)
+    || (filename.toUpperCase() === "UNKNOWN.RGB565" ? undefined : await getRgb565LogoObject(env.AIRLINE_LOGOS, "UNKNOWN.rgb565"));
+  if (!logoObject) {
+    return jsonResponse({ error: "RGB565 logo not found" }, 404, {
+      "Cache-Control": "no-store"
+    });
+  }
+
+  const { key, object } = logoObject;
+  return new Response(object.body, {
+    status: 200,
+    headers: {
+      "Content-Type": object.httpMetadata?.contentType || "application/octet-stream",
+      "Cache-Control": "public, max-age=86400",
+      "X-Logo-Source": "r2",
+      "X-Logo-Key": key,
+      "X-Logo-Format": "rgb565-le",
+      "X-Logo-Width": object.customMetadata?.width || "42",
+      "X-Logo-Height": object.customMetadata?.height || "42"
+    }
+  });
+}
+
 async function getLogoObject(bucket: R2Bucket, filename: string): Promise<{ key: string; object: R2ObjectBody } | undefined> {
   const dotIndex = filename.lastIndexOf(".");
   const code = (dotIndex >= 0 ? filename.slice(0, dotIndex) : filename).trim();
@@ -563,6 +606,33 @@ async function getLogoObject(bucket: R2Bucket, filename: string): Promise<{ key:
     `airline-logos/${code.toUpperCase()}.PNG`,
     `airline-logos/${code.toUpperCase()}.png`,
     `airline-logos/${code}.png`
+  ];
+
+  for (const key of Array.from(new Set(variants))) {
+    const object = await bucket.get(key);
+    if (object) return { key, object };
+  }
+  return undefined;
+}
+
+async function getRgb565LogoObject(bucket: R2Bucket, filename: string): Promise<{ key: string; object: R2ObjectBody } | undefined> {
+  const dotIndex = filename.lastIndexOf(".");
+  const code = (dotIndex >= 0 ? filename.slice(0, dotIndex) : filename).trim();
+  if (!/^[A-Za-z0-9_-]+$/.test(code)) return undefined;
+
+  const upper = code.toUpperCase();
+  const variants = [
+    `${upper}.rgb565`,
+    `${upper}.RGB565`,
+    `${code}.rgb565`,
+    `${code}.RGB565`,
+    `${code.toLowerCase()}.rgb565`,
+    `rgb565/${upper}.rgb565`,
+    `rgb565/${code}.rgb565`,
+    `logos-rgb565/${upper}.rgb565`,
+    `logos-rgb565/${code}.rgb565`,
+    `airline-logos-rgb565/${upper}.rgb565`,
+    `airline-logos-rgb565/${code}.rgb565`
   ];
 
   for (const key of Array.from(new Set(variants))) {
@@ -1210,6 +1280,7 @@ async function toCompactDisplayFlight(env: Env, f: DisplayFlight, config: Config
     air: f.airline || "",
     airCode: f.airlineCode || "",
     logoUrl: logoUrlFor(logoCode),
+    logoRgb565Url: logoRgb565UrlFor(logoCode),
     ac: f.aircraft || "",
     reg: f.registration || "",
     from: f.origin || "",
@@ -1369,6 +1440,11 @@ function round2(value: number): string {
 function logoUrlFor(airlineCode: string | undefined): string {
   const code = normalizeLogoCode(airlineCode);
   return code ? `/logos/${code}.png` : "/logos/UNKNOWN.png";
+}
+
+function logoRgb565UrlFor(airlineCode: string | undefined): string {
+  const code = normalizeLogoCode(airlineCode);
+  return code ? `/public/logos-rgb565/${code}.rgb565` : "/public/logos-rgb565/UNKNOWN.rgb565";
 }
 
 async function displayLogoCodeFor(env: Env, flight: DisplayFlight): Promise<string> {

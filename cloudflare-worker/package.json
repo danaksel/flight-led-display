@@ -6,12 +6,13 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "logos:rgb565": "node scripts/convert-logos-rgb565.mjs",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260516.0",
+    "sharp": "^0.34.5",
     "typescript": "^5.8.3",
     "wrangler": "^4.16.1"
   }
 }
-

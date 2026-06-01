@@ -12,6 +12,11 @@ cloudflare-worker/dist/
 firmware-original/.pio/
 firmware-hub75/.pio/
 
+# Generated/exported airline logo artifacts
+assets/airline-logos/r2-source/
+assets/airline-logos/rgb565/
+assets/airline-logos/rgb565-fixture-test/
+
 # Local editor and OS files
 .idea/
 .vscode/

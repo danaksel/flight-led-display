@@ -1,8 +1,9 @@
 name = "flight-display-server"
+account_id = "e508fc18a98790ed507eb3343a0e8f3c"
 main = "src/index.ts"
 compatibility_date = "2026-05-16"
 
-assets = { directory = "./public", binding = "ASSETS", run_worker_first = ["/logos/*"] }
+assets = { directory = "./public", binding = "ASSETS", run_worker_first = ["/logos/*", "/logos-rgb565/*", "/public/*"] }
 
 [vars]
 FR24_API_BASE_URL = "https://fr24api.flightradar24.com/api"

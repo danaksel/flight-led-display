@@ -67,11 +67,23 @@ Ferdig nok for web/server-delen frem til fysisk skjerm kommer:
 - `/api/display`
   Payload som emulatoren bruker, og som ESP32 skal bruke senere. Dette endepunktet kan bruke valgt livekilde dersom skjerm og luftromsovervåking er aktiv.
 
+- `/public/device-config`
+  Public/device alias for `/api/device-config`. Denne er ment for ESP32 og kan legges under Cloudflare Access bypass eller Service Auth.
+
+- `/public/display`
+  Public/device alias for `/api/display`. Denne er ment for ESP32 og kan legges under Cloudflare Access bypass eller Service Auth.
+
 - `/api/avinor-board`
   Rutedata fra Avinor for valgt flyplass. Dette er gratis datakilde og brukes også til raw preview i web.
 
 - `/logos/{CODE}.png`
   Server logo fra R2 for flyselskap. Faller tilbake til Worker assets og deretter eventuell ekstern logo-base hvis konfigurert.
+
+- `/logos-rgb565/{CODE}.rgb565`
+  Fremtidig ESP32-vennlig logoformat. Server ferdig genererte 42 x 42 RGB565 little-endian bytes fra R2. ESP32 skal kunne laste ned filen, cache den og tegne pikslene direkte uten PNG-dekoding.
+
+- `/public/logos-rgb565/{CODE}.rgb565`
+  Public/device alias for RGB565-logoer. ESP32 skal bruke denne URL-en.
 
 ## Livekilder og kredittkontroll
 
@@ -130,7 +142,7 @@ Tidstabellen viser fire rader om gangen på 128 x 64-skjermen. Antall totale rad
 
 ## Logoer
 
-Logoer skal ligge i Cloudflare R2-bucket:
+Logoer skal ligge i Cloudflare R2-bucket, og R2 er source of truth for logoene:
 
 ```text
 flight-display-airline-logos
@@ -158,6 +170,47 @@ UNKNOWN.png
 For fly som mangler tydelig airline-kode, faller Worker tilbake til flightnummer-prefix der det er mulig.
 
 Viktig: samme logo kan brukes av flere koder gjennom mapping i Worker, for eksempel cargo-operasjoner som skal bruke moderselskapets logo.
+
+For ESP32-firmware skal logoene ikke dekodes fra PNG på kortet i første versjon. Worker/API-et har derfor et eget planlagt binærformat:
+
+```text
+/logos-rgb565/{CODE}.rgb565
+```
+
+Filene skal forhåndsgenereres fra PNG-logoene i R2 og legges tilbake i R2, for eksempel som:
+
+```text
+rgb565/SAS.rgb565
+rgb565/NOZ.rgb565
+rgb565/UNKNOWN.rgb565
+```
+
+Format:
+
+- 42 x 42 piksler
+- RGB565
+- little-endian byteorden
+- rå bytes uten header
+- transparens i PNG skal konverteres til svart
+- forventet størrelse: 42 * 42 * 2 = 3528 bytes
+
+Generer lokale RGB565-filer fra en eksport av R2-logoene med:
+
+```bash
+cd cloudflare-worker
+npm run logos:rgb565
+```
+
+Kommandoen leser som standard `assets/airline-logos/r2-source/*.png` og skriver ferdige filer til `assets/airline-logos/rgb565/`.
+
+Viktig: `cloudflare-worker/public/logos/` er bare fallback/dev-fixtures og skal ikke behandles som fasit. Hvis den brukes til testkonvertering, må det gjøres eksplisitt:
+
+```bash
+cd cloudflare-worker
+npm run logos:rgb565 -- --input cloudflare-worker/public/logos
+```
+
+Dette skal være et arkiv av ferdig genererte filer, ikke PNG-konvertering på hver forespørsel. Grunnen er at ESP32 da slipper PNG-dekoder, og Worker slipper tung bildebehandling i request-pathen.
 
 ## Lokal utvikling
 
@@ -249,6 +302,44 @@ Ikke slett hele KV uten grunn. Det vil ikke ødelegge systemet permanent, men vi
 ## Kommende firmware
 
 Når komponentene kommer skal `firmware-hub75/` inneholde koden som flashes til Waveshare ESP32-S3-RGB-Matrix.
+
+Avtalt arbeidsform:
+
+- Hovedoppsett: VS Code + PlatformIO.
+- Start med Arduino framework i PlatformIO for raskest vei til fungerende skjerm.
+- ESP-IDF vurderes senere bare hvis vi trenger mer lavnivakontroll for HUB75, DMA, PSRAM eller Waveshare-spesifikk driverkode.
+- Waveshare-demoene ligger utenfor dette repoet, som søskenmappe til `firmware/`: `../ESP32-S3-RGB-Matrix-main/`.
+- Demoene brukes som referanse/fasit for pinout, panel-driver, init-kode og Waveshare-spesifikke detaljer.
+- Ikke kopier demo-kode ukritisk inn i prosjektet. Hent bare de delene vi faktisk trenger.
+- Ikke start med å skrive en egen HUB75-driver.
+- Bruk et eksisterende Arduino-kompatibelt HUB75-bibliotek, eller adapter kun minimal Waveshare-spesifikk init/pinout fra den offisielle demoen.
+- Første skjermmål er et stabilt testmønster, ikke endelig arkitektur.
+
+Må verifiseres før layout-implementasjon:
+
+- eksakt paneloppløsning
+- HUB75 scan rate
+- pin mapping fra Waveshare-demoen
+- nødvendig strømforsyning
+- om PSRAM er aktivert
+
+Første test når kortet kommer er "proof of life":
+
+- Brukeren kobler Waveshare ESP32-S3-RGB-Matrix til Mac-en med USB.
+- Codex lager et minimalt PlatformIO-prosjekt i `firmware-hub75/`.
+- Codex lager en enkel `main.cpp` som starter `Serial` og skriver en melding hvert sekund.
+- Codex bygger, laster opp og åpner serial monitor.
+- Når terminalen viser meldinger fra kortet, vet vi at kort, kabel, port, build og upload fungerer.
+
+Deretter tas firmware i smale steg:
+
+1. Kortet lever: minimal serial/uptime-test.
+2. Skjermen lyser: HUB75 viser en farge eller et enkelt testmønster.
+3. Wi-Fi virker: ESP32 kobler seg på nett.
+4. Device config virker: ESP32 henter `/api/device-config`.
+5. Display payload virker: ESP32 henter og parser `/api/display`.
+6. Enkel tekst virker: ESP32 viser tekst på panelet.
+7. Full layout virker: ESP32 matcher 128 x 64-emulatoren med flightdata og logoer.
 
 Plan for firmware:
 
