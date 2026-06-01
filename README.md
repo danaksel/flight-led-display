@@ -13,12 +13,13 @@ Cloudflare Worker
   - Valgbar livekilde: FR24 eller OpenSky Network
   - Avinor-oppslag for gratis avgangs-/ankomsttavle
   - R2-logoer via /logos/{CODE}.png
-  - Ferdig device-payload via /api/display
+  - Public device-surface via /public/*
+  - Ferdig device-payload via /public/display
 
 ESP32-S3 + HUB75
-  - Henter /api/device-config
-  - Henter /api/display etter polling-intervall
-  - Henter logoer fra /logos/{CODE}.png
+  - Henter /public/device-config
+  - Henter /public/display etter polling-intervall
+  - Henter RGB565-logoer fra /public/logos-rgb565/{CODE}.rgb565
   - Tegner payloaden uten egen API-logikk mot FR24/OpenSky/Avinor
 ```
 
@@ -68,10 +69,10 @@ Ferdig nok for web/server-delen frem til fysisk skjerm kommer:
   Payload som emulatoren bruker, og som ESP32 skal bruke senere. Dette endepunktet kan bruke valgt livekilde dersom skjerm og luftromsovervåking er aktiv.
 
 - `/public/device-config`
-  Public/device alias for `/api/device-config`. Denne er ment for ESP32 og kan legges under Cloudflare Access bypass eller Service Auth.
+  Public/device alias for `/api/device-config`. Denne er ment for ESP32 og skal ligge under samme Cloudflare Access-regel som `/public/*`.
 
 - `/public/display`
-  Public/device alias for `/api/display`. Denne er ment for ESP32 og kan legges under Cloudflare Access bypass eller Service Auth.
+  Public/device alias for `/api/display`. Denne er ment for ESP32 og skal ligge under samme Cloudflare Access-regel som `/public/*`.
 
 - `/api/avinor-board`
   Rutedata fra Avinor for valgt flyplass. Dette er gratis datakilde og brukes også til raw preview i web.
@@ -84,6 +85,29 @@ Ferdig nok for web/server-delen frem til fysisk skjerm kommer:
 
 - `/public/logos-rgb565/{CODE}.rgb565`
   Public/device alias for RGB565-logoer. ESP32 skal bruke denne URL-en.
+
+## Cloudflare Access
+
+Admin/web skal beskyttes med Cloudflare Access og Google-login.
+
+ESP32 kan ikke bruke Google-login. All firmware-trafikk skal derfor gå via én device-rot:
+
+```text
+/public/*
+```
+
+Sett Cloudflare Access-regelen på `/public/*`, enten som:
+
+- midlertidig bypass under utvikling
+- helst Service Auth / service token når dette skal stå mer permanent
+
+ESP32 skal ikke bruke admin-URL-ene direkte. Den skal bruke:
+
+```text
+/public/device-config
+/public/display
+/public/logos-rgb565/{CODE}.rgb565
+```
 
 ## Livekilder og kredittkontroll
 
@@ -266,7 +290,7 @@ npx wrangler secret put OPENSKY_CLIENT_SECRET
 
 ## Git- og deployflyt
 
-Fast arbeidsflyt:
+Fast arbeidsflyt for alle Worker-/serverendringer:
 
 1. Gjør endring lokalt.
 2. Kjør typecheck.
@@ -274,7 +298,9 @@ Fast arbeidsflyt:
 4. Push til GitHub.
 5. Deploy til Cloudflare.
 
-Dette er viktig fordi Cloudflare ikke skal være eneste sted siste fungerende versjon finnes.
+Dette er en stående regel: GitHub skal oppdateres før Cloudflare deployes. Cloudflare skal ikke være eneste sted siste fungerende versjon finnes.
+
+Unntak er bare hvis brukeren eksplisitt ber om en direkte hotfix-deploy. Da skal endringen fortsatt commit'es og pushes til GitHub rett etterpå.
 
 ## KV
 
@@ -336,18 +362,19 @@ Deretter tas firmware i smale steg:
 1. Kortet lever: minimal serial/uptime-test.
 2. Skjermen lyser: HUB75 viser en farge eller et enkelt testmønster.
 3. Wi-Fi virker: ESP32 kobler seg på nett.
-4. Device config virker: ESP32 henter `/api/device-config`.
-5. Display payload virker: ESP32 henter og parser `/api/display`.
+4. Device config virker: ESP32 henter `/public/device-config`.
+5. Display payload virker: ESP32 henter og parser `/public/display`.
 6. Enkel tekst virker: ESP32 viser tekst på panelet.
-7. Full layout virker: ESP32 matcher 128 x 64-emulatoren med flightdata og logoer.
+7. Logo virker: ESP32 henter og tegner `/public/logos-rgb565/{CODE}.rgb565`.
+8. Full layout virker: ESP32 matcher 128 x 64-emulatoren med flightdata og logoer.
 
 Plan for firmware:
 
 - koble til Wi-Fi
-- hente `/api/device-config`
+- hente `/public/device-config`
 - respektere `enabled`, brightness, nattmodus og polling-intervall
-- hente `/api/display`
-- laste logo fra `/logos/{CODE}.png`
+- hente `/public/display`
+- laste logo fra `/public/logos-rgb565/{CODE}.rgb565`
 - tegne 128 x 64 layout lokalt på HUB75-panelet
 - rotere mellom fly basert på payload og Worker-innstillinger
 - ikke kalle FR24, Avinor eller geokoding direkte
@@ -363,6 +390,14 @@ Planlagt hardware:
 - Paneloppløsning: 128 x 64 piksler
 - Fysisk størrelse: ca. 320 x 160 mm
 - Pikselpitch: 2.5 mm
+
+Strøm og første oppkobling:
+
+- Ikke driv HUB75-panelet fra Mac/USB.
+- Bruk dimensjonert 5V strømforsyning inn på kortets Type-C power supply port.
+- Kortets 5V power output kan brukes videre til LED-panelet slik Waveshare beskriver.
+- USB Type-C-porten brukes samtidig til programmering/debugging fra Mac.
+- Første paneltest skal kjøres med lav brightness og enkelt testmønster, ikke full hvit skjerm.
 
 ## Referanse
 
