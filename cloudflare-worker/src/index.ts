@@ -1245,7 +1245,7 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
     timezone: typeof v.timezone === "string" && v.timezone.trim() ? v.timezone.slice(0, 64) : "Europe/Oslo",
     followUnits: normalizeFollowUnits((v as { followUnits?: unknown }).followUnits),
     lineColors: normalizeLineColors((v as { lineColors?: unknown }).lineColors),
-    clockColor: normalizeHexColor((v as { clockColor?: unknown }).clockColor, "#ff2a23"),
+    clockColor: normalizeHexColor((v as { clockColor?: unknown }).clockColor, "#081b6b"),
     timetableColors: normalizeTimetableColors((v as { timetableColors?: unknown }).timetableColors),
     nightMode: {
       enabled: typeof night.enabled === "boolean" ? night.enabled : true,
@@ -1908,7 +1908,7 @@ function buildClockPayload(device: DeviceSettings): ClockPayload {
   return {
     style: "gorgy",
     timezone: device.timezone || "Europe/Oslo",
-    color: device.clockColor || "#ff2a23",
+    color: device.clockColor || "#081b6b",
     width: 63,
     height: 63,
     centered: true
@@ -3908,9 +3908,9 @@ function renderIndexHtml(): string {
             <div class="field-help">Kan også styres eksternt fra Homey med eget POST-endepunkt.</div>
           </div>
           <div>
-            <label for="clockColor">Klokkefarge</label>
+            <label for="clockColor">Gradientbunn</label>
             <input id="clockColor" type="color">
-            <div class="field-help">Global farge for alle klokkeelementer.</div>
+            <div class="field-help">Sekundlinjen er hvit. Minuttblokken fader mot denne fargen nederst.</div>
           </div>
         </div>
         <button id="screenToggle" class="secondary" type="button">Slå av skjerm</button>
@@ -4351,6 +4351,9 @@ function renderIndexHtml(): string {
     let tickerAnimationFrame = null;
     let tickerStartedAt = performance.now();
     let clockAnimationTimer = null;
+    let clockLastMinute = null;
+    let clockFallingMinuteIndex = null;
+    let clockFallingStartedAt = 0;
     let emulatorPollTimer = null;
     let emulatorPolling = false;
     let emulatorPollInFlight = false;
@@ -4460,7 +4463,7 @@ function renderIndexHtml(): string {
       els.deviceBrightness.value = device.brightness ?? 80;
       els.displayMode.value = device.displayMode || "flight";
       displayMode = device.displayMode || displayMode;
-      els.clockColor.value = device.clockColor || "#ff2a23";
+      els.clockColor.value = device.clockColor || "#081b6b";
       els.audioVolumePercent.value = device.audioVolumePercent ?? 35;
       updateAudioVolumeUi();
       els.nightBrightness.value = night.brightness ?? 0;
@@ -4756,7 +4759,7 @@ function renderIndexHtml(): string {
         }
         if (displayMode === "clock") {
           const timezone = data.clock && data.clock.timezone ? data.clock.timezone : (els.timezone.value || "Europe/Oslo");
-          els.flightList.innerHTML = '<div class="empty">Klokkemodus aktiv. Emulatoren viser Gorgy-inspirert klokke i 63 x 63 px med farge ' + escapeHtml(els.clockColor.value) + ' og tidssone ' + escapeHtml(timezone) + '.</div>';
+          els.flightList.innerHTML = '<div class="empty">Klokkemodus aktiv. Emulatoren viser hvit sekundlinje, minuttstabel med valgt gradientbunn og tredelt klokke ved kolonne 70 i tidssone ' + escapeHtml(timezone) + '.</div>';
           return;
         }
         if (!flights.length) {
@@ -5108,28 +5111,104 @@ function renderIndexHtml(): string {
       ctx.fillStyle = "#000";
       ctx.fillRect(0, 0, 128, 64);
 
-      const clockX = 32;
-      const clockY = 0;
-      const clockSize = 63;
-      const centerX = clockX + Math.floor(clockSize / 2);
-      const centerY = clockY + Math.floor(clockSize / 2);
-      const color = getClockColor();
       const time = getClockTimeParts();
-      const outerDots = buildClockCirclePoints(centerX, centerY, 31, 12);
-      const secondDots = buildClockSecondPoints(centerX, centerY, 27);
-      const activeSecondDots = time.second === 0 ? 0 : time.second === 59 ? secondDots.length : time.second;
+      const completedMinutes = Math.max(0, Math.min(59, Number(time.minute)));
+      const activeSeconds = Math.max(0, Math.min(60, time.second + 1));
+      updateClockFallState(completedMinutes);
+      const falling = isClockRowFalling();
 
       ensureClockAnimation();
-      ctx.fillStyle = color;
-      outerDots.forEach((point) => ctx.fillRect(point.x, point.y, 1, 1));
-      secondDots.slice(0, activeSecondDots).forEach((point) => ctx.fillRect(point.x, point.y, 1, 1));
 
-      drawClockTimeText(ctx, time.hour + ":" + time.minute, Math.round(centerX), Math.round(centerY), color);
-      els.emuMeta.textContent = "Clock layout: 63 x 63 px Gorgy-inspirert klokke, sentrert i 128 x 64 · sekund " + time.second + ".";
+      for (let index = 0; index < completedMinutes; index += 1) {
+        if (falling && index === clockFallingMinuteIndex) continue;
+        const y = 62 - index;
+        ctx.fillStyle = getClockMinuteRowColor(completedMinutes - index);
+        ctx.fillRect(4, y, 60, 1);
+      }
+
+      if (falling) {
+        const targetY = 62 - clockFallingMinuteIndex;
+        const elapsed = Math.min(400, performance.now() - clockFallingStartedAt);
+        const y = Math.round(3 + ((targetY - 3) * elapsed) / 400);
+        ctx.fillStyle = getClockMinuteRowColor(1);
+        ctx.fillRect(4, y, 60, 1);
+      } else if (clockFallingMinuteIndex !== null) {
+        clockFallingMinuteIndex = null;
+        clockFallingStartedAt = 0;
+      }
+
+      if (activeSeconds > 0) {
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(4, 3, activeSeconds, 1);
+      }
+
+      drawClockTimeStack(ctx, 70, time);
+      els.emuMeta.textContent = "Clock layout: sekundlinje fra kolonne 4-63, minutter stablet nederst, HH/MM/SS fra kolonne 70 · " + time.hour + ":" + time.minute + ":" + time.second.toString().padStart(2, "0") + ".";
     }
 
-    function getClockColor() {
-      return els.clockColor.value || "#ff2a23";
+    function updateClockFallState(completedMinutes) {
+      if (clockLastMinute === null) {
+        clockLastMinute = completedMinutes;
+        return;
+      }
+      if (completedMinutes === clockLastMinute) return;
+      if (completedMinutes > 0) {
+        clockFallingMinuteIndex = completedMinutes - 1;
+        clockFallingStartedAt = performance.now();
+      } else {
+        clockFallingMinuteIndex = null;
+        clockFallingStartedAt = 0;
+      }
+      clockLastMinute = completedMinutes;
+    }
+
+    function isClockRowFalling() {
+      return clockFallingMinuteIndex !== null && performance.now() - clockFallingStartedAt < 400;
+    }
+
+    function getClockMinuteRowColor(depth) {
+      const step = Math.max(1, Math.min(60, depth));
+      return interpolateHexColor("#ffffff", els.clockColor.value || "#081b6b", step, 60);
+    }
+
+    function drawClockTimeStack(ctx, x, time) {
+      drawScaledDotText(ctx, time.hour, x, 3, "#ffffff", 2);
+      drawScaledDotText(ctx, time.minute, x, 27, "#ffffff", 2);
+      drawScaledDotText(ctx, time.second.toString().padStart(2, "0"), x, 49, "#ffffff", 2);
+    }
+
+    function drawScaledDotText(ctx, text, x, y, color, scale) {
+      const source = document.createElement("canvas");
+      source.width = 128;
+      source.height = 64;
+      const sourceCtx = source.getContext("2d", { willReadFrequently: true });
+      sourceCtx.imageSmoothingEnabled = false;
+      sourceCtx.fillStyle = "#000";
+      sourceCtx.fillRect(0, 0, source.width, source.height);
+      drawDotText(sourceCtx, text, 0, 0, color, { maxWidth: 24 });
+      const sourceWidth = measureDotText(text);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(source, 0, 0, sourceWidth, 7, x, y, sourceWidth * scale, 7 * scale);
+    }
+
+    function interpolateHexColor(from, to, step, steps) {
+      const fromRgb = hexToRgb(from);
+      const toRgb = hexToRgb(to);
+      const ratio = steps <= 0 ? 1 : Math.max(0, Math.min(1, step / steps));
+      const r = Math.round(fromRgb.r + (toRgb.r - fromRgb.r) * ratio);
+      const g = Math.round(fromRgb.g + (toRgb.g - fromRgb.g) * ratio);
+      const b = Math.round(fromRgb.b + (toRgb.b - fromRgb.b) * ratio);
+      return "rgb(" + r + ", " + g + ", " + b + ")";
+    }
+
+    function hexToRgb(hex) {
+      const value = String(hex || "").replace("#", "");
+      const normalized = value.length === 3 ? value.split("").map((part) => part + part).join("") : value.padStart(6, "0").slice(0, 6);
+      return {
+        r: Number.parseInt(normalized.slice(0, 2), 16) || 0,
+        g: Number.parseInt(normalized.slice(2, 4), 16) || 0,
+        b: Number.parseInt(normalized.slice(4, 6), 16) || 0
+      };
     }
 
     function getClockTimeParts() {
@@ -5156,7 +5235,7 @@ function renderIndexHtml(): string {
         renderEmulator();
         ensureClockAnimation();
       };
-      clockAnimationTimer = setTimeout(tick, millisecondsUntilNextSecond());
+      clockAnimationTimer = setTimeout(tick, isClockRowFalling() ? 50 : millisecondsUntilNextSecond());
     }
 
     function millisecondsUntilNextSecond() {

@@ -4,10 +4,16 @@
 #include <HTTPClient.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <WebSocketsClient.h>
 #include <Wire.h>
 #include <driver/i2s.h>
 #include "WiFiSecrets.h"
 #include "pa_audio.h"
+#include "splash_image.h"
+
+#ifndef FLIGHT_DEVICE_TOKEN
+#define FLIGHT_DEVICE_TOKEN ""
+#endif
 
 namespace
 {
@@ -16,8 +22,27 @@ constexpr uint16_t PanelHeight = 64;
 constexpr uint8_t Brightness = 8;
 constexpr const char *DeviceConfigUrl = "https://flight-display-server.dan-aksel.workers.dev/public/device-config";
 constexpr const char *SoundStateUrl = "https://flight-display-server.dan-aksel.workers.dev/public/sound-state";
+constexpr const char *RealtimeStateUrl = "https://flight-display-server.dan-aksel.workers.dev/public/realtime-state";
 constexpr const char *DisplayUrl = "https://flight-display-server.dan-aksel.workers.dev/public/display";
 constexpr const char *ServerBaseUrl = "https://flight-display-server.dan-aksel.workers.dev";
+constexpr const char *RealtimeHost = "flight-display-server.dan-aksel.workers.dev";
+constexpr const char *RealtimePath = "/public/realtime";
+constexpr const char *DeviceToken = FLIGHT_DEVICE_TOKEN;
+constexpr const char *WorkerTlsRootCa = R"EOF(
+-----BEGIN CERTIFICATE-----
+MIICCTCCAY6gAwIBAgINAgPlwGjvYxqccpBQUjAKBggqhkjOPQQDAzBHMQswCQYD
+VQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZpY2VzIExMQzEUMBIG
+A1UEAxMLR1RTIFJvb3QgUjQwHhcNMTYwNjIyMDAwMDAwWhcNMzYwNjIyMDAwMDAw
+WjBHMQswCQYDVQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZpY2Vz
+IExMQzEUMBIGA1UEAxMLR1RTIFJvb3QgUjQwdjAQBgcqhkjOPQIBBgUrgQQAIgNi
+AATzdHOnaItgrkO4NcWBMHtLSZ37wWHO5t5GvWvVYRg1rkDdc/eJkTBa6zzuhXyi
+QHY7qca4R9gq55KRanPpsXI5nymfopjTX15YhmUPoYRlBtHci8nHc8iMai/lxKvR
+HYqjQjBAMA4GA1UdDwEB/wQEAwIBhjAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQW
+BBSATNbrdP9JNqPV2Py1PsVq8JQdjDAKBggqhkjOPQQDAwNpADBmAjEA6ED/g94D
+9J+uHXqnLrmvT/aDHQ4thQEd0dlq7A/Cr8deVl5c1RxYIigL9zC2L7F8AjEA8GE8
+p/SgguMh1YQdc4acLa/KNJvxn7kjNuK8YAOdgLOaVsjh4rsUecrNIdSUtUlD
+-----END CERTIFICATE-----
+)EOF";
 constexpr const char *OsloTimeZone = "CET-1CEST,M3.5.0/2,M10.5.0/3";
 constexpr uint8_t MaxIdleScreens = 6;
 constexpr uint8_t MaxIdleRows = 4;
@@ -25,10 +50,24 @@ constexpr uint8_t LogoWidth = 42;
 constexpr uint8_t LogoHeight = 42;
 constexpr size_t LogoBytes = LogoWidth * LogoHeight * 2;
 constexpr uint8_t LogoColorDepthBits = 8;
+constexpr uint8_t ClockSecondsStartX = 4;
+constexpr uint8_t ClockSecondsEndX = 63;
+constexpr uint8_t ClockSecondsWidth = ClockSecondsEndX - ClockSecondsStartX + 1;
+constexpr uint8_t ClockActiveRowY = 3;
+constexpr uint8_t ClockStackTopY = 4;
+constexpr uint8_t ClockStackBottomY = 62;
+constexpr uint8_t ClockTextStartX = 70;
+constexpr uint8_t ClockTextTopY = 3;
+constexpr uint8_t ClockTextMiddleY = 27;
+constexpr uint8_t ClockTextBottomY = 49;
+constexpr uint16_t ClockMinuteFallMs = 400;
 constexpr uint16_t TickerHoldMs = 900;
 constexpr uint32_t AudioSampleRate = 16000;
 constexpr uint8_t AudioVolumePercentDefault = 5;
-constexpr uint8_t SoundPollSeconds = 2;
+constexpr uint8_t RealtimeStatePollSeconds = 5;
+constexpr uint8_t MainLoopDelayMs = 20;
+constexpr uint8_t WifiReconnectSeconds = 30;
+constexpr uint16_t ConfigFallbackPollSeconds = 300;
 constexpr uint8_t SpeakerI2cSdaPin = 47;
 constexpr uint8_t SpeakerI2cSclPin = 48;
 constexpr uint8_t SpeakerMclkPin = 12;
@@ -61,9 +100,10 @@ struct IdleScreen
 };
 
 MatrixPanel_I2S_DMA *display = nullptr;
+WebSocketsClient realtimeSocket;
 uint32_t nextConfigFetchAt = 0;
-uint32_t nextSoundFetchAt = 0;
 uint32_t nextDisplayFetchAt = 0;
+uint32_t nextWifiReconnectAt = 0;
 uint32_t nextIdleCycleAt = 0;
 uint32_t nextLiveCycleAt = 0;
 uint32_t idleCycleStartedAt = 0;
@@ -87,8 +127,11 @@ String lastDisplayMode;
 int lastHttpCode = 0;
 bool idleLayoutActive = false;
 bool liveLayoutActive = false;
+bool clockLayoutActive = false;
 bool configFetchActive = false;
 bool displayFetchActive = false;
+bool startupSplashActive = true;
+bool wifiOfflineNotified = false;
 uint8_t logoBuffer[LogoBytes] = {};
 String cachedLogoUrl;
 uint32_t cachedLogoCheckedAt = 0;
@@ -104,14 +147,70 @@ uint8_t audioVolumePercent = AudioVolumePercentDefault;
 int8_t audioI2cSdaPin = -1;
 int8_t audioI2cSclPin = -1;
 uint32_t lastSoundTestNonce = 0;
+uint32_t lastClockRenderAt = 0;
+uint32_t clockFallingStartedAt = 0;
+int8_t lastClockMinute = -1;
+int8_t fallingClockMinuteIndex = -1;
 size_t audioPlaybackOffset = 0;
 int16_t audioChunkBuffer[AudioChunkFrames * 2] = {};
+TaskHandle_t soundPollTaskHandle = nullptr;
+TaskHandle_t networkPollTaskHandle = nullptr;
+TaskHandle_t realtimeTaskHandle = nullptr;
+SemaphoreHandle_t networkMutex = nullptr;
+SemaphoreHandle_t pendingPayloadMutex = nullptr;
+bool configFetchRequested = false;
+bool displayFetchRequested = false;
+bool pendingConfigReady = false;
+bool pendingDisplayReady = false;
+bool pendingConfigOk = false;
+bool pendingDisplayOk = false;
+int pendingConfigHttpCode = 0;
+int pendingDisplayHttpCode = 0;
+String pendingConfigBody;
+String pendingDisplayBody;
+String realtimeExtraHeaders;
+bool realtimeConfigured = false;
+volatile bool realtimePausedForHttp = false;
+String lastRealtimeConfigVersion;
+String lastRealtimeScreenVersion;
+uint32_t lastRealtimeSoundNonce = 0;
+bool realtimeStateSeen = false;
 
 void drawIdleScreen(uint8_t index);
 void drawCurrentLiveFlight();
 void fetchSoundState();
+void soundPollTask(void *);
+void networkPollTask(void *);
+void realtimeTask(void *);
+bool requestConfigFetch();
+bool requestDisplayFetch();
 void queuePaSound(const char *reason);
 bool ensureAudioReady();
+void drawFetchIndicator();
+
+void startRealtimeTaskIfNeeded()
+{
+    // Persistent WSS is available in the Worker, but the ESP32 keeps this
+    // disabled because a second live TLS socket destabilizes logo/display fetches.
+}
+
+void pauseRealtimeForHttp()
+{
+    realtimePausedForHttp = true;
+    realtimeSocket.disconnect();
+    delay(250);
+    const uint32_t startedAt = millis();
+    while (realtimeSocket.isConnected() && millis() - startedAt < 1500)
+    {
+        realtimeSocket.disconnect();
+        delay(50);
+    }
+}
+
+void resumeRealtimeAfterHttp()
+{
+    realtimePausedForHttp = false;
+}
 
 uint16_t panelColor(uint8_t r, uint8_t g, uint8_t b)
 {
@@ -128,6 +227,10 @@ uint16_t lineRouteColor = 0;
 uint16_t lineAircraftColor = 0;
 uint16_t lineContextColor = 0;
 uint16_t lineProgressColor = 0;
+uint16_t lineRouteProgressColor = 0;
+uint8_t clockGradientBottomR = 0x08;
+uint8_t clockGradientBottomG = 0x1B;
+uint8_t clockGradientBottomB = 0x6B;
 String deviceTimeZone = "Europe/Oslo";
 String deviceTimeZonePosix = OsloTimeZone;
 bool screenActive = true;
@@ -165,6 +268,11 @@ uint16_t colorProgressDim()
 uint16_t colorRouteProgressDim()
 {
     return panelColor(0x3C, 0x3C, 0x3C);
+}
+
+uint16_t colorRouteProgressFill()
+{
+    return lineRouteProgressColor ? lineRouteProgressColor : panelColor(0x00, 0xD4, 0x6A);
 }
 
 uint16_t colorProgressFill()
@@ -540,31 +648,228 @@ uint16_t parseHexColorOr(const String &value, uint16_t fallback)
     return panelColor(r, g, b);
 }
 
-uint8_t textCapacity(uint8_t maxWidth)
+bool parseHexRgb(const String &value, uint8_t &r, uint8_t &g, uint8_t &b)
 {
-    return max<uint8_t>(1, maxWidth / 6);
+    if (value.length() != 7 || value[0] != '#') return false;
+
+    char *end = nullptr;
+    const long raw = strtol(value.substring(1).c_str(), &end, 16);
+    if (end == nullptr || *end != '\0' || raw < 0 || raw > 0xFFFFFF) return false;
+
+    r = static_cast<uint8_t>((raw >> 16) & 0xFF);
+    g = static_cast<uint8_t>((raw >> 8) & 0xFF);
+    b = static_cast<uint8_t>(raw & 0xFF);
+    return true;
+}
+
+uint8_t charAdvance(char c)
+{
+    if (c == ' ') return 4;
+    if (c == ':') return 5;
+    return 6;
+}
+
+uint16_t textPixelWidth(const String &text)
+{
+    uint16_t width = 0;
+    for (size_t i = 0; i < text.length(); ++i)
+    {
+        width += charAdvance(text[i]);
+    }
+    return width;
 }
 
 String fitText(const String &text, uint8_t maxWidth)
 {
     const String normalized = normalizeLedText(text);
-    const uint8_t capacity = textCapacity(maxWidth);
-    if (normalized.length() <= capacity) return normalized;
-    return normalized.substring(0, capacity);
+    String output;
+    uint16_t width = 0;
+    for (size_t i = 0; i < normalized.length(); ++i)
+    {
+        const uint8_t advance = charAdvance(normalized[i]);
+        if (output.length() && width + advance > maxWidth) break;
+        output += normalized[i];
+        width += advance;
+    }
+    return output;
 }
 
 void drawTextFit(const String &text, int16_t x, int16_t y, uint16_t color, uint8_t maxWidth)
 {
-    display->setTextColor(color);
-    display->setCursor(x, y);
-    display->print(fitText(text, maxWidth));
+    const String fitted = fitText(text, maxWidth);
+    int16_t cursorX = x;
+    for (size_t i = 0; i < fitted.length(); ++i)
+    {
+        const char c = fitted[i];
+        if (c != ' ')
+        {
+            display->drawChar(cursorX, y, c, color, panelColor(0, 0, 0), 1);
+        }
+        cursorX += charAdvance(c);
+    }
 }
 
 void drawTextRight(const String &text, int16_t rightX, int16_t y, uint16_t color, uint8_t maxWidth)
 {
     const String fitted = fitText(text, maxWidth);
-    const int16_t x = max<int16_t>(0, rightX - static_cast<int16_t>(fitted.length() * 6));
+    const int16_t x = max<int16_t>(0, rightX - static_cast<int16_t>(textPixelWidth(fitted)));
     drawTextFit(fitted, x, y, color, maxWidth);
+}
+
+bool readLocalTime(struct tm &timeinfo)
+{
+    const time_t rawTime = time(nullptr);
+    if (rawTime < 1600000000) return false;
+    localtime_r(&rawTime, &timeinfo);
+    return true;
+}
+
+uint16_t lerpClockColor(uint8_t fromR, uint8_t fromG, uint8_t fromB,
+                        uint8_t toR, uint8_t toG, uint8_t toB,
+                        uint8_t step, uint8_t steps)
+{
+    if (steps == 0) return panelColor(toR, toG, toB);
+    const int16_t deltaR = static_cast<int16_t>(toR) - static_cast<int16_t>(fromR);
+    const int16_t deltaG = static_cast<int16_t>(toG) - static_cast<int16_t>(fromG);
+    const int16_t deltaB = static_cast<int16_t>(toB) - static_cast<int16_t>(fromB);
+    const uint8_t r = static_cast<uint8_t>(fromR + (deltaR * step) / steps);
+    const uint8_t g = static_cast<uint8_t>(fromG + (deltaG * step) / steps);
+    const uint8_t b = static_cast<uint8_t>(fromB + (deltaB * step) / steps);
+    return panelColor(r, g, b);
+}
+
+uint16_t minuteStackColorForDepth(uint8_t depth)
+{
+    const uint8_t step = static_cast<uint8_t>(min<uint8_t>(60, max<uint8_t>(1, depth)));
+    return lerpClockColor(0xFF, 0xFF, 0xFF, clockGradientBottomR, clockGradientBottomG, clockGradientBottomB, step, 60);
+}
+
+void drawClockTextGlyphs(int16_t x, int16_t y, const char *text, uint8_t size)
+{
+    const uint16_t white = panelColor(0xFF, 0xFF, 0xFF);
+    const uint16_t black = panelColor(0, 0, 0);
+    int16_t cursorX = x;
+    for (size_t i = 0; text[i] != '\0'; ++i)
+    {
+        const char c = text[i];
+        if (c != ' ')
+        {
+            display->drawChar(cursorX, y, c, white, black, size);
+        }
+        cursorX += charAdvance(c) * size;
+    }
+}
+
+void drawClockRight(int16_t rightX, int16_t y, uint16_t color)
+{
+    struct tm timeinfo;
+    if (!readLocalTime(timeinfo))
+    {
+        drawTextRight("--:--", rightX, y, color, 32);
+        return;
+    }
+
+    char clockText[6] = {};
+    snprintf(clockText, sizeof(clockText), "%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
+    const int16_t x = max<int16_t>(0, rightX - static_cast<int16_t>(textPixelWidth(clockText)));
+    const uint16_t black = panelColor(0, 0, 0);
+    int16_t cursorX = x;
+    for (size_t i = 0; clockText[i] != '\0'; ++i)
+    {
+        const char c = clockText[i];
+        const uint16_t charColor = c == ':' ? ((timeinfo.tm_sec % 2 == 0) ? color : black) : color;
+        if (charColor != black)
+        {
+            display->drawChar(cursorX, y, c, charColor, black, 1);
+        }
+        cursorX += charAdvance(c);
+    }
+}
+
+void drawClockMode()
+{
+    struct tm timeinfo;
+    const bool hasTime = readLocalTime(timeinfo);
+    const uint16_t white = panelColor(0xFF, 0xFF, 0xFF);
+
+    idleLayoutActive = false;
+    liveLayoutActive = false;
+    clockLayoutActive = true;
+    display->fillScreen(panelColor(0, 0, 0));
+
+    if (hasTime)
+    {
+        const uint32_t now = millis();
+        if (lastClockMinute < 0)
+        {
+            lastClockMinute = timeinfo.tm_min;
+        }
+        else if (timeinfo.tm_min != lastClockMinute)
+        {
+            if (timeinfo.tm_min > 0)
+            {
+                fallingClockMinuteIndex = timeinfo.tm_min - 1;
+                clockFallingStartedAt = now;
+            }
+            else
+            {
+                fallingClockMinuteIndex = -1;
+                clockFallingStartedAt = 0;
+            }
+            lastClockMinute = timeinfo.tm_min;
+        }
+
+        const bool falling = fallingClockMinuteIndex >= 0 && now - clockFallingStartedAt < ClockMinuteFallMs;
+        const uint8_t completedMinutes = constrain(timeinfo.tm_min, 0, 59);
+        for (uint8_t index = 0; index < completedMinutes; ++index)
+        {
+            if (falling && index == static_cast<uint8_t>(fallingClockMinuteIndex)) continue;
+            const uint8_t y = ClockStackBottomY - index;
+            display->drawFastHLine(ClockSecondsStartX, y, ClockSecondsWidth, minuteStackColorForDepth(completedMinutes - index));
+        }
+
+        if (falling)
+        {
+            const uint8_t targetY = ClockStackBottomY - static_cast<uint8_t>(fallingClockMinuteIndex);
+            const uint32_t elapsed = min<uint32_t>(ClockMinuteFallMs, now - clockFallingStartedAt);
+            const uint8_t fallY = ClockActiveRowY + ((targetY - ClockActiveRowY) * elapsed) / ClockMinuteFallMs;
+            display->drawFastHLine(ClockSecondsStartX, fallY, ClockSecondsWidth, minuteStackColorForDepth(1));
+        }
+        else if (fallingClockMinuteIndex >= 0)
+        {
+            fallingClockMinuteIndex = -1;
+            clockFallingStartedAt = 0;
+        }
+
+        const uint8_t litSeconds = min<uint8_t>(60, static_cast<uint8_t>(timeinfo.tm_sec + 1));
+        if (litSeconds > 0)
+        {
+            display->drawFastHLine(ClockSecondsStartX, ClockActiveRowY, litSeconds, white);
+        }
+
+        char hourText[3] = {};
+        char minuteText[3] = {};
+        char secondText[3] = {};
+        snprintf(hourText, sizeof(hourText), "%02d", timeinfo.tm_hour);
+        snprintf(minuteText, sizeof(minuteText), "%02d", timeinfo.tm_min);
+        snprintf(secondText, sizeof(secondText), "%02d", timeinfo.tm_sec);
+        display->setFont(nullptr);
+        drawClockTextGlyphs(ClockTextStartX, ClockTextTopY, hourText, 2);
+        drawClockTextGlyphs(ClockTextStartX, ClockTextMiddleY, minuteText, 2);
+        drawClockTextGlyphs(ClockTextStartX, ClockTextBottomY, secondText, 2);
+    }
+    else
+    {
+        lastClockMinute = -1;
+        fallingClockMinuteIndex = -1;
+        display->setFont(nullptr);
+        drawClockTextGlyphs(ClockTextStartX, ClockTextTopY, "--", 2);
+        drawClockTextGlyphs(ClockTextStartX, ClockTextMiddleY, "--", 2);
+        drawClockTextGlyphs(ClockTextStartX, ClockTextBottomY, "--", 2);
+    }
+
+    drawFetchIndicator();
+    presentFrame();
 }
 
 uint16_t tickerOffset(uint16_t overflow)
@@ -579,32 +884,101 @@ uint16_t tickerOffset(uint16_t overflow)
     return static_cast<uint16_t>(((cycleMs - t) * overflow) / travelMs);
 }
 
+uint16_t tickerForwardOffset(uint16_t overflow, uint32_t startedAt)
+{
+    const uint16_t speed = max<uint16_t>(2, liveScrollPixelsPerSecond);
+    const uint32_t travelMs = max<uint32_t>(1200, (static_cast<uint32_t>(overflow) * 1000UL) / speed);
+    const uint32_t cycleMs = TickerHoldMs + travelMs + TickerHoldMs;
+    const uint32_t elapsed = millis() >= startedAt ? millis() - startedAt : 0;
+    const uint32_t t = elapsed % cycleMs;
+    if (t < TickerHoldMs) return 0;
+    if (t < TickerHoldMs + travelMs) return static_cast<uint16_t>(((t - TickerHoldMs) * overflow) / travelMs);
+    return overflow;
+}
+
 void drawTickerText(const String &text, int16_t x, int16_t y, uint16_t color, uint8_t width)
 {
     const String normalized = normalizeLedText(text);
     if (!normalized.length()) return;
 
-    const uint8_t visibleChars = textCapacity(width);
-    if (normalized.length() <= visibleChars)
+    const uint16_t textWidth = textPixelWidth(normalized);
+    if (textWidth <= width)
+    {
+        drawTextFit(normalized, x, y, color, width);
+        return;
+    }
+    if (textWidth + max<int16_t>(0, x) <= PanelWidth)
+    {
+        drawTextFit(normalized, x, y, color, PanelWidth - max<int16_t>(0, x));
+        return;
+    }
+
+    const uint16_t fullWidthOverflow = textWidth + max<int16_t>(0, x) > PanelWidth
+        ? textWidth + max<int16_t>(0, x) - PanelWidth
+        : 0;
+    const uint16_t overflow = max<uint16_t>(1, fullWidthOverflow);
+    const uint16_t offset = tickerOffset(overflow);
+    int16_t cursorX = x - static_cast<int16_t>(offset);
+    for (size_t i = 0; i < normalized.length(); ++i)
+    {
+        const char c = normalized[i];
+        if (c != ' ')
+        {
+            display->drawChar(cursorX, y, c, color, panelColor(0, 0, 0), 1);
+        }
+        cursorX += charAdvance(c);
+    }
+}
+
+void drawTickerTextBoxed(const String &text, int16_t x, int16_t y, uint16_t color, uint8_t width, uint32_t startedAt)
+{
+    const String normalized = normalizeLedText(text);
+    if (!normalized.length()) return;
+
+    const uint16_t textWidth = textPixelWidth(normalized);
+    if (textWidth <= width)
     {
         drawTextFit(normalized, x, y, color, width);
         return;
     }
 
-    const uint16_t overflow = (normalized.length() - visibleChars) * 6;
-    const uint8_t charOffset = overflow ? static_cast<uint8_t>(tickerOffset(overflow) / 6) : 0;
-    const String window = normalized.substring(charOffset, min<size_t>(normalized.length(), charOffset + visibleChars));
-    drawTextFit(window, x, y, color, width);
+    const uint16_t overflow = max<uint16_t>(1, textWidth - width);
+    const uint16_t offset = tickerForwardOffset(overflow, startedAt);
+    GFXcanvas1 canvas(textWidth, 8);
+    canvas.fillScreen(0);
+    int16_t cursorX = 0;
+    for (size_t i = 0; i < normalized.length(); ++i)
+    {
+        const char c = normalized[i];
+        if (c != ' ')
+        {
+            canvas.drawChar(cursorX, 0, c, 1, 0, 1);
+        }
+        cursorX += charAdvance(c);
+    }
+
+    for (uint8_t targetX = 0; targetX < width; ++targetX)
+    {
+        const uint16_t sourceX = offset + targetX;
+        if (sourceX >= textWidth) break;
+        for (uint8_t targetY = 0; targetY < 8; ++targetY)
+        {
+            if (canvas.getPixel(sourceX, targetY))
+            {
+                display->drawPixel(x + targetX, y + targetY, color);
+            }
+        }
+    }
 }
 
 void drawProgressValue(float progress, int16_t y, uint16_t backgroundColor, uint16_t fillColor)
 {
     const float clamped = min(1.0f, max(0.0f, progress));
-    const uint16_t width = min<uint16_t>(122, static_cast<uint16_t>(floorf(122.0f * clamped)));
-    display->drawFastHLine(3, y, 122, backgroundColor);
+    const uint16_t width = min<uint16_t>(PanelWidth, static_cast<uint16_t>(floorf(static_cast<float>(PanelWidth) * clamped)));
+    display->drawFastHLine(0, y, PanelWidth, backgroundColor);
     for (uint16_t i = 0; i < width; ++i)
     {
-        display->drawPixel(3 + i, y, fillColor);
+        display->drawPixel(i, y, fillColor);
     }
 }
 
@@ -621,7 +995,7 @@ void drawRouteProgressBar(JsonObject flight, int16_t y)
     JsonVariant routeProgress = flight["routeProgress"];
     if (routeProgress.isNull()) return;
     const float progress = routeProgress.as<float>();
-    drawProgressValue(progress, y, colorRouteProgressDim(), colorSuccess());
+    drawProgressValue(progress, y, colorRouteProgressDim(), colorRouteProgressFill());
 }
 
 String normalizeGateStatusForDisplay(const String &value)
@@ -637,7 +1011,7 @@ String normalizeGateStatusForDisplay(const String &value)
     }
 
     if (raw.length() == 0) return "";
-    if (raw.indexOf("gotogate") >= 0 || raw.indexOf("togate") >= 0) return "To gate";
+    if (raw.indexOf("gotogate") >= 0 || raw.indexOf("togate") >= 0) return "Go to gate";
     if (raw.indexOf("boarding") >= 0) return "Boarding";
     if (raw.indexOf("closing") >= 0) return "Closing";
     if (raw.indexOf("closed") >= 0) return "Closed";
@@ -647,24 +1021,70 @@ String normalizeGateStatusForDisplay(const String &value)
 String localClockText()
 {
     struct tm timeinfo;
-    if (!getLocalTime(&timeinfo, 20)) return "--:--";
+    if (!readLocalTime(timeinfo)) return "--:--";
 
     char buffer[6] = {};
     snprintf(buffer, sizeof(buffer), "%02d%c%02d", timeinfo.tm_hour, timeinfo.tm_sec % 2 == 0 ? ':' : ' ', timeinfo.tm_min);
     return String(buffer);
 }
 
-void initLocalTime()
+bool initLocalTime()
 {
     const String tz = deviceTimeZonePosix.length() ? deviceTimeZonePosix : String(OsloTimeZone);
     configTzTime(tz.c_str(), "pool.ntp.org", "time.cloudflare.com");
+
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo, 8000))
+    {
+        Serial.print("Time synchronized: ");
+        Serial.println(localClockText());
+        return true;
+    }
+
+    Serial.println("Time sync failed; TLS certificate validation may fail");
+    return false;
 }
 
 void drawBlackScreen()
 {
     idleLayoutActive = false;
     liveLayoutActive = false;
+    clockLayoutActive = false;
+    startupSplashActive = false;
     display->fillScreen(panelColor(0, 0, 0));
+    presentFrame();
+}
+
+void drawSplashImage()
+{
+    uint32_t pixel = 0;
+    constexpr uint32_t totalPixels = static_cast<uint32_t>(SplashWidth) * static_cast<uint32_t>(SplashHeight);
+    for (uint16_t runIndex = 0; runIndex < SplashRunCount && pixel < totalPixels; ++runIndex)
+    {
+        const uint16_t count = pgm_read_word(&SplashImageRuns[runIndex].count);
+        const uint16_t color = pgm_read_word(&SplashImageRuns[runIndex].color);
+        for (uint16_t i = 0; i < count && pixel < totalPixels; ++i, ++pixel)
+        {
+            display->drawPixel(pixel % PanelWidth, pixel / PanelWidth, color);
+        }
+    }
+}
+
+void drawSplashTextLine(const String &text, int16_t y)
+{
+    const uint16_t black = panelColor(0, 0, 0);
+    drawTextFit(text, 2, y, black, 125);
+}
+
+void drawStartupSplashStatus(const char *title, const char *line1, const char *line2)
+{
+    idleLayoutActive = false;
+    liveLayoutActive = false;
+    clockLayoutActive = false;
+    drawSplashImage();
+    drawSplashTextLine(title, 37);
+    drawSplashTextLine(line1, 45);
+    drawSplashTextLine(line2, 53);
     presentFrame();
 }
 
@@ -695,7 +1115,7 @@ uint32_t inactiveConfigPollSeconds()
 
 bool hasActiveContentLayout()
 {
-    return idleLayoutActive || liveLayoutActive;
+    return idleLayoutActive || liveLayoutActive || clockLayoutActive;
 }
 
 void drawFetchIndicator()
@@ -708,7 +1128,11 @@ void drawFetchIndicator()
 
 void redrawActiveContent()
 {
-    if (idleLayoutActive)
+    if (clockLayoutActive)
+    {
+        drawClockMode();
+    }
+    else if (idleLayoutActive)
     {
         drawIdleScreen(currentIdleScreen);
     }
@@ -738,6 +1162,12 @@ void drawStatusLines(const char *title, const char *line1, const char *line2, co
 {
     idleLayoutActive = false;
     liveLayoutActive = false;
+    clockLayoutActive = false;
+    if (startupSplashActive)
+    {
+        drawStartupSplashStatus(title, line1, line2);
+        return;
+    }
     drawStatusFrame(title, color);
     display->setTextColor(colorData());
     display->setCursor(4, 22);
@@ -842,10 +1272,23 @@ void drawDisplayText(const String &airline, const String &route, const String &a
     drawTickerText(context, 3, 52, lineContextColor ? lineContextColor : colorData(), 122);
 }
 
-bool fetchText(const char *url, String &body, int &httpCode)
+bool fetchText(const char *url, String &body, int &httpCode, TickType_t lockWait = portMAX_DELAY)
 {
+    bool locked = false;
+    if (networkMutex)
+    {
+        if (xSemaphoreTake(networkMutex, lockWait) != pdTRUE)
+        {
+            httpCode = -2;
+            return false;
+        }
+        locked = true;
+    }
+
+    pauseRealtimeForHttp();
+
     WiFiClientSecure client;
-    client.setInsecure();
+    client.setCACert(WorkerTlsRootCa);
 
     HTTPClient http;
     http.setTimeout(12000);
@@ -854,7 +1297,14 @@ bool fetchText(const char *url, String &body, int &httpCode)
     if (!http.begin(client, url))
     {
         httpCode = -1;
+        resumeRealtimeAfterHttp();
+        if (locked) xSemaphoreGive(networkMutex);
         return false;
+    }
+
+    if (strlen(DeviceToken) > 0)
+    {
+        http.addHeader("X-Flight-Device-Token", DeviceToken);
     }
 
     httpCode = http.GET();
@@ -863,6 +1313,8 @@ bool fetchText(const char *url, String &body, int &httpCode)
         body = http.getString();
     }
     http.end();
+    resumeRealtimeAfterHttp();
+    if (locked) xSemaphoreGive(networkMutex);
 
     return httpCode >= 200 && httpCode < 300;
 }
@@ -887,8 +1339,9 @@ void fetchSoundState()
 {
     String body;
     int httpCode = 0;
-    if (!fetchText(SoundStateUrl, body, httpCode))
+    if (!fetchText(SoundStateUrl, body, httpCode, 0))
     {
+        if (httpCode == -2) return;
         Serial.print("Sound state failed, HTTP ");
         Serial.println(httpCode);
         return;
@@ -908,6 +1361,298 @@ void fetchSoundState()
     handleRemoteSoundState(remoteSoundTestNonce, nextAudioVolumePercent);
 }
 
+void fetchRealtimeState()
+{
+    String body;
+    int httpCode = 0;
+    if (!fetchText(RealtimeStateUrl, body, httpCode, 0))
+    {
+        if (httpCode == -2) return;
+        Serial.print("Realtime state failed, HTTP ");
+        Serial.println(httpCode);
+        return;
+    }
+
+    JsonDocument doc;
+    const DeserializationError error = deserializeJson(doc, body);
+    if (error)
+    {
+        Serial.print("Realtime state JSON failed: ");
+        Serial.println(error.c_str());
+        return;
+    }
+
+    const String configVersion = valueOr(doc["configVersion"]);
+    const String screenVersion = valueOr(doc["screenVersion"]);
+    const uint32_t soundNonce = doc["soundTestNonce"] | 0;
+    const uint8_t nextAudioVolumePercent = constrain(doc["volumePercent"] | AudioVolumePercentDefault, 0, 100);
+
+    if (!realtimeStateSeen)
+    {
+        lastRealtimeConfigVersion = configVersion;
+        lastRealtimeScreenVersion = screenVersion;
+        lastRealtimeSoundNonce = soundNonce;
+        realtimeStateSeen = true;
+        handleRemoteSoundState(soundNonce, nextAudioVolumePercent);
+        return;
+    }
+
+    if (configVersion != lastRealtimeConfigVersion || screenVersion != lastRealtimeScreenVersion)
+    {
+        lastRealtimeConfigVersion = configVersion;
+        lastRealtimeScreenVersion = screenVersion;
+        Serial.println("Realtime state changed: config");
+        requestConfigFetch();
+        nextConfigFetchAt = UINT32_MAX;
+        if (screenActive)
+        {
+            requestDisplayFetch();
+            nextDisplayFetchAt = UINT32_MAX;
+        }
+    }
+
+    if (soundNonce > lastRealtimeSoundNonce)
+    {
+        lastRealtimeSoundNonce = soundNonce;
+        handleRemoteSoundState(soundNonce, nextAudioVolumePercent);
+    }
+}
+
+void soundPollTask(void *)
+{
+    for (;;)
+    {
+        if (WiFi.status() == WL_CONNECTED)
+        {
+            fetchRealtimeState();
+        }
+        vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>(RealtimeStatePollSeconds) * 1000UL));
+    }
+}
+
+bool requestConfigFetch()
+{
+    if (!pendingPayloadMutex) return false;
+    bool queued = false;
+    xSemaphoreTake(pendingPayloadMutex, portMAX_DELAY);
+    if (!configFetchRequested && !configFetchActive && !pendingConfigReady)
+    {
+        configFetchRequested = true;
+        queued = true;
+    }
+    xSemaphoreGive(pendingPayloadMutex);
+    return queued;
+}
+
+bool requestDisplayFetch()
+{
+    if (!pendingPayloadMutex) return false;
+    bool queued = false;
+    xSemaphoreTake(pendingPayloadMutex, portMAX_DELAY);
+    if (!displayFetchRequested && !displayFetchActive && !pendingDisplayReady)
+    {
+        displayFetchRequested = true;
+        queued = true;
+    }
+    xSemaphoreGive(pendingPayloadMutex);
+    return queued;
+}
+
+void handleRealtimeText(const uint8_t *payload, size_t length)
+{
+    JsonDocument doc;
+    const DeserializationError error = deserializeJson(doc, payload, length);
+    if (error)
+    {
+        Serial.print("Realtime JSON failed: ");
+        Serial.println(error.c_str());
+        return;
+    }
+
+    const String type = valueOr(doc["type"]);
+    Serial.print("Realtime event: ");
+    Serial.println(type);
+
+    if (type == "config_changed")
+    {
+        requestConfigFetch();
+        nextConfigFetchAt = UINT32_MAX;
+    }
+    else if (type == "display_changed")
+    {
+        if (screenActive)
+        {
+            requestDisplayFetch();
+            nextDisplayFetchAt = UINT32_MAX;
+        }
+    }
+    else if (type == "sound_test")
+    {
+        const uint8_t nextAudioVolumePercent = constrain(doc["volumePercent"] | AudioVolumePercentDefault, 0, 100);
+        const uint32_t remoteSoundTestNonce = doc["testNonce"] | 0;
+        handleRemoteSoundState(remoteSoundTestNonce, nextAudioVolumePercent);
+    }
+}
+
+void realtimeSocketEvent(WStype_t type, uint8_t *payload, size_t length)
+{
+    switch (type)
+    {
+        case WStype_CONNECTED:
+            Serial.println("Realtime connected");
+            break;
+        case WStype_DISCONNECTED:
+            Serial.println("Realtime disconnected");
+            break;
+        case WStype_TEXT:
+            handleRealtimeText(payload, length);
+            break;
+        case WStype_ERROR:
+            Serial.println("Realtime error");
+            break;
+        default:
+            break;
+    }
+}
+
+void configureRealtimeSocket()
+{
+    if (realtimeConfigured) return;
+    realtimeConfigured = true;
+
+    if (strlen(DeviceToken) > 0)
+    {
+        realtimeExtraHeaders = String("X-Flight-Device-Token: ") + DeviceToken + "\r\n";
+        realtimeSocket.setExtraHeaders(realtimeExtraHeaders.c_str());
+    }
+    realtimeSocket.beginSslWithCA(RealtimeHost, 443, RealtimePath, WorkerTlsRootCa, "");
+    realtimeSocket.onEvent(realtimeSocketEvent);
+    realtimeSocket.setReconnectInterval(5000);
+    realtimeSocket.enableHeartbeat(15000, 3000, 2);
+}
+
+void realtimeTask(void *)
+{
+    configureRealtimeSocket();
+    for (;;)
+    {
+        if (realtimePausedForHttp)
+        {
+            if (realtimeSocket.isConnected())
+            {
+                realtimeSocket.disconnect();
+            }
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+
+        if (WiFi.status() == WL_CONNECTED)
+        {
+            realtimeSocket.loop();
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+bool takePendingConfig(String &body, int &httpCode, bool &ok)
+{
+    if (!pendingPayloadMutex) return false;
+    bool ready = false;
+    xSemaphoreTake(pendingPayloadMutex, portMAX_DELAY);
+    if (pendingConfigReady)
+    {
+        body = pendingConfigBody;
+        httpCode = pendingConfigHttpCode;
+        ok = pendingConfigOk;
+        pendingConfigBody = "";
+        pendingConfigReady = false;
+        ready = true;
+    }
+    xSemaphoreGive(pendingPayloadMutex);
+    return ready;
+}
+
+bool takePendingDisplay(String &body, int &httpCode, bool &ok)
+{
+    if (!pendingPayloadMutex) return false;
+    bool ready = false;
+    xSemaphoreTake(pendingPayloadMutex, portMAX_DELAY);
+    if (pendingDisplayReady)
+    {
+        body = pendingDisplayBody;
+        httpCode = pendingDisplayHttpCode;
+        ok = pendingDisplayOk;
+        pendingDisplayBody = "";
+        pendingDisplayReady = false;
+        ready = true;
+    }
+    xSemaphoreGive(pendingPayloadMutex);
+    return ready;
+}
+
+void networkPollTask(void *)
+{
+    for (;;)
+    {
+        bool doConfig = false;
+        bool doDisplay = false;
+
+        if (pendingPayloadMutex)
+        {
+            xSemaphoreTake(pendingPayloadMutex, portMAX_DELAY);
+            doConfig = configFetchRequested;
+            if (doConfig) configFetchRequested = false;
+            doDisplay = displayFetchRequested;
+            if (doDisplay) displayFetchRequested = false;
+            xSemaphoreGive(pendingPayloadMutex);
+        }
+
+        if (WiFi.status() == WL_CONNECTED && doConfig)
+        {
+            Serial.println("Fetching device config");
+            configFetchActive = true;
+            String body;
+            int httpCode = 0;
+            const bool ok = fetchText(DeviceConfigUrl, body, httpCode);
+
+            xSemaphoreTake(pendingPayloadMutex, portMAX_DELAY);
+            pendingConfigBody = body;
+            pendingConfigHttpCode = httpCode;
+            pendingConfigOk = ok;
+            pendingConfigReady = true;
+            xSemaphoreGive(pendingPayloadMutex);
+        }
+
+        if (WiFi.status() == WL_CONNECTED && doDisplay)
+        {
+            Serial.println("Fetching display payload");
+            displayFetchActive = true;
+            String body;
+            int httpCode = 0;
+            bool ok = fetchText(DisplayUrl, body, httpCode);
+            if (!ok && httpCode < 0)
+            {
+                Serial.print("Display fetch transient HTTP ");
+                Serial.print(httpCode);
+                Serial.println(", retrying");
+                vTaskDelay(pdMS_TO_TICKS(350));
+                body = "";
+                httpCode = 0;
+                ok = fetchText(DisplayUrl, body, httpCode);
+            }
+
+            xSemaphoreTake(pendingPayloadMutex, portMAX_DELAY);
+            pendingDisplayBody = body;
+            pendingDisplayHttpCode = httpCode;
+            pendingDisplayOk = ok;
+            pendingDisplayReady = true;
+            xSemaphoreGive(pendingPayloadMutex);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
 String absoluteUrl(const String &url)
 {
     if (url.startsWith("http://") || url.startsWith("https://")) return url;
@@ -925,8 +1670,17 @@ bool fetchLogoRgb565(const String &url)
     cachedLogoCheckedAt = millis();
     cachedLogoOk = false;
 
+    bool locked = false;
+    if (networkMutex)
+    {
+        xSemaphoreTake(networkMutex, portMAX_DELAY);
+        locked = true;
+    }
+
+    pauseRealtimeForHttp();
+
     WiFiClientSecure client;
-    client.setInsecure();
+    client.setCACert(WorkerTlsRootCa);
 
     HTTPClient http;
     http.setTimeout(12000);
@@ -935,7 +1689,14 @@ bool fetchLogoRgb565(const String &url)
     if (!http.begin(client, resolvedUrl))
     {
         Serial.println("Logo begin failed");
+        resumeRealtimeAfterHttp();
+        if (locked) xSemaphoreGive(networkMutex);
         return false;
+    }
+
+    if (strlen(DeviceToken) > 0)
+    {
+        http.addHeader("X-Flight-Device-Token", DeviceToken);
     }
 
     const int httpCode = http.GET();
@@ -947,6 +1708,8 @@ bool fetchLogoRgb565(const String &url)
         Serial.print(" bytes=");
         Serial.println(contentLength);
         http.end();
+        resumeRealtimeAfterHttp();
+        if (locked) xSemaphoreGive(networkMutex);
         return false;
     }
 
@@ -969,6 +1732,8 @@ bool fetchLogoRgb565(const String &url)
     }
 
     http.end();
+    resumeRealtimeAfterHttp();
+    if (locked) xSemaphoreGive(networkMutex);
     cachedLogoOk = received == LogoBytes;
     Serial.print("Logo ");
     Serial.print(cachedLogoOk ? "OK " : "short ");
@@ -1020,9 +1785,8 @@ void applySafeBrightness(uint8_t requested)
     display->setBrightness8(applied);
 }
 
-bool fetchDeviceConfig()
+bool applyDeviceConfigPayload(const String &body, int httpCode, bool httpOk)
 {
-    Serial.println("Fetching device config");
     const bool hadActiveLayout = hasActiveContentLayout();
     const bool screenWasInactive = !screenActive;
     configFetchActive = true;
@@ -1039,9 +1803,7 @@ bool fetchDeviceConfig()
         drawStatusLines("CONFIG...", "GET device-config", "Waiting", "", colorHeader());
     }
 
-    String body;
-    int httpCode = 0;
-    if (!fetchText(DeviceConfigUrl, body, httpCode))
+    if (!httpOk)
     {
         configFetchActive = false;
         lastConfigOk = false;
@@ -1094,7 +1856,7 @@ bool fetchDeviceConfig()
     brightnessMode = valueOr(remoteScreenState["brightnessMode"], "day");
     const uint8_t requestedBrightness = device["effectiveBrightness8"] | (device["effectiveBrightness"] | (device["brightness"] | Brightness));
     displayPollSeconds = constrain(device["pollSeconds"] | 60, 15, 600);
-    configRefreshSeconds = constrain(device["configRefreshSeconds"] | 300, 60, 3600);
+    configRefreshSeconds = constrain(device["configRefreshSeconds"] | ConfigFallbackPollSeconds, 60, 3600);
     displayCycleSeconds = constrain(device["displayCycleSeconds"] | 5, 2, 30);
     timetableCycleSeconds = constrain(device["timetableCycleSeconds"] | 10, 3, 120);
     liveScrollPixelsPerSecond = constrain(device["scrollPixelsPerSecond"] | 9, 2, 30);
@@ -1118,6 +1880,9 @@ bool fetchDeviceConfig()
     lineAircraftColor = parseHexColorOr(valueOr(lineColors["aircraft"]), defaultDataColor);
     lineContextColor = parseHexColorOr(valueOr(lineColors["context"]), defaultDataColor);
     lineProgressColor = parseHexColorOr(valueOr(lineColors["progress"]), defaultHeaderColor);
+    lineRouteProgressColor = parseHexColorOr(valueOr(lineColors["routeProgress"]), panelColor(0x00, 0xD4, 0x6A));
+    const String nextClockColor = valueOr(device["clockColor"], "#081b6b");
+    parseHexRgb(nextClockColor, clockGradientBottomR, clockGradientBottomG, clockGradientBottomB);
 
     JsonObject audio = doc["audio"];
     const uint8_t nextAudioVolumePercent = constrain(audio["volumePercent"] | AudioVolumePercentDefault, 0, 100);
@@ -1253,6 +2018,7 @@ void drawIdleScreen(uint8_t index)
 {
     idleLayoutActive = false;
     liveLayoutActive = false;
+    clockLayoutActive = false;
     if (idleScreenCount == 0 || index >= idleScreenCount)
     {
         drawStatusLines("IDLE", "No rows", "", "", colorHeader());
@@ -1271,7 +2037,7 @@ void drawIdleScreen(uint8_t index)
     display->setTextSize(1);
     display->setTextWrap(false);
     drawTextFit(screen.title, 3, 3, yellow, 86);
-    drawTextRight(localClockText(), 125, 3, clockColor, 32);
+    drawClockRight(125, 3, clockColor);
     display->drawFastHLine(3, 14, 122, yellow);
     drawIdleRows(index, 20 - offset);
     if (showNext) drawIdleRows(nextIndex, 64 - offset);
@@ -1316,7 +2082,10 @@ void drawFlightPayload(JsonObject flight, const char *mode, size_t flightCount, 
 {
     idleLayoutActive = false;
     liveLayoutActive = false;
+    clockLayoutActive = false;
     display->fillScreen(panelColor(0, 0, 0));
+    display->setTextSize(1);
+    display->setTextWrap(false);
     const String logoRgb565Url = valueOr(flight["logoRgb565Url"]);
     if (fetchLogoRgb565(logoRgb565Url))
     {
@@ -1344,16 +2113,18 @@ void drawFlightPayload(JsonObject flight, const char *mode, size_t flightCount, 
 
     if (layout == "follow_cycle" || layout == "follow_status" || String(mode) == "follow")
     {
-        const bool locationPhase = (millis() % 15000UL) >= 10000UL;
+        const uint32_t phaseElapsed = millis() >= liveCycleStartedAt ? millis() - liveCycleStartedAt : 0;
+        const bool locationPhase = (phaseElapsed % 15000UL) >= 10000UL;
+        const uint32_t phaseStart = liveCycleStartedAt + (phaseElapsed / 15000UL) * 15000UL + (locationPhase ? 10000UL : 0UL);
         JsonObject followStatus = flight["followStatus"];
         const String etaLine = valueOr(flight["arrTime"]);
-        const String topLine = locationPhase && etaLine.length() ? "ETA:" + etaLine : (flightId.length() ? flightId : callsign);
-        const String secondLine = route.length() ? route : airline;
+        const String topLine = locationPhase && airline.length() ? airline : (flightId.length() ? flightId : callsign);
+        const String secondLine = locationPhase && etaLine.length() ? "ETA:" + etaLine : (route.length() ? route : airline);
         const String thirdLine = aircraft;
 
-        drawTextFit(topLine, 50, 5, lineAirlineColor ? lineAirlineColor : colorData(), 75);
-        drawTextFit(secondLine, 50, 19, lineRouteColor ? lineRouteColor : colorData(), 75);
-        drawTextFit(thirdLine, 50, 33, lineAircraftColor ? lineAircraftColor : colorData(), 75);
+        drawTickerTextBoxed(topLine, 50, 5, lineAirlineColor ? lineAirlineColor : colorData(), 75, phaseStart);
+        drawTickerTextBoxed(secondLine, 50, 19, lineRouteColor ? lineRouteColor : colorData(), 75, phaseStart);
+        drawTickerTextBoxed(thirdLine, 50, 33, lineAircraftColor ? lineAircraftColor : colorData(), 75, phaseStart);
 
         if (!followStatus.isNull())
         {
@@ -1426,6 +2197,14 @@ void drawDisplayPayload(JsonDocument &doc)
         return;
     }
 
+    if (String(mode) == "clock")
+    {
+        liveFlightsPreviouslyVisible = false;
+        drawClockMode();
+        Serial.println("Display OK. mode=clock");
+        return;
+    }
+
     if (flightCount > 0)
     {
         if (!liveFlightsPreviouslyVisible)
@@ -1437,8 +2216,8 @@ void drawDisplayPayload(JsonDocument &doc)
         JsonObject flight = flights[currentLiveFlight];
         const char *route = flight["lines"]["route"] | "";
         const char *flightId = flight["flt"] | flight["cs"] | "";
-        drawCurrentLiveFlight();
         liveCycleStartedAt = millis();
+        drawCurrentLiveFlight();
         nextLiveCycleAt = millis() + static_cast<uint32_t>(displayCycleSeconds) * 1000UL;
         lastLiveRenderAt = millis();
 
@@ -1474,9 +2253,8 @@ void drawDisplayPayload(JsonDocument &doc)
     Serial.println(idleCount);
 }
 
-bool fetchDisplayPayload()
+bool applyDisplayPayload(const String &body, int httpCode, bool httpOk)
 {
-    Serial.println("Fetching display payload");
     const bool hadActiveLayout = hasActiveContentLayout();
     displayFetchActive = true;
     if (hadActiveLayout)
@@ -1488,15 +2266,18 @@ bool fetchDisplayPayload()
         drawStatusLines("DISPLAY...", "GET display", "Waiting", "", colorHeader());
     }
 
-    String body;
-    int httpCode = 0;
-    if (!fetchText(DisplayUrl, body, httpCode))
+    if (!httpOk)
     {
         displayFetchActive = false;
         lastHttpCode = httpCode;
         lastDisplayOk = false;
         Serial.print("Display failed, HTTP ");
         Serial.println(httpCode);
+        if (httpCode < 0 && hadActiveLayout)
+        {
+            redrawActiveContent();
+            return false;
+        }
         drawError("DISPLAY FAIL", "HTTP " + String(httpCode));
         return false;
     }
@@ -1514,59 +2295,135 @@ bool fetchDisplayPayload()
     }
 
     displayFetchActive = false;
+    startupSplashActive = false;
     drawDisplayPayload(currentDisplayDoc);
     return true;
 }
 
 bool connectWiFi()
 {
-    Serial.print("Connecting to Wi-Fi SSID: ");
-    Serial.println(WifiSsid);
+    struct WifiCandidate
+    {
+        const char *ssid;
+        const char *password;
+    };
+
+    const WifiCandidate candidates[] = {
+        {WifiSsid, WifiPassword},
+        {WifiFallbackSsid, WifiFallbackPassword},
+    };
+    constexpr uint32_t TimeoutMs = 6500;
 
     WiFi.mode(WIFI_STA);
-    WiFi.begin(WifiSsid, WifiPassword);
 
-    drawWifiStatus("WIFI...", WifiSsid, "Connecting", colorHeader());
-
-    constexpr uint32_t TimeoutMs = 20000;
-    const uint32_t startedAt = millis();
-    uint8_t dotCount = 0;
-
-    while (WiFi.status() != WL_CONNECTED && millis() - startedAt < TimeoutMs)
+    for (const WifiCandidate &candidate : candidates)
     {
-        delay(500);
-        Serial.print(".");
-
-        display->fillRect(4, 50, PanelWidth - 8, 8, panelColor(0, 0, 0));
-        display->setCursor(4, 50);
-        display->setTextColor(colorHeader());
-        for (uint8_t i = 0; i < dotCount; ++i)
+        if (!candidate.ssid || candidate.ssid[0] == '\0')
         {
-            display->print(".");
+            continue;
         }
-        presentFrame();
-        dotCount = (dotCount + 1) % 18;
-    }
 
-    Serial.println();
+        Serial.print("Connecting to Wi-Fi SSID: ");
+        Serial.println(candidate.ssid);
 
-    if (WiFi.status() != WL_CONNECTED)
-    {
-        Serial.print("Wi-Fi failed, status=");
+        WiFi.disconnect(false);
+        delay(100);
+        WiFi.begin(candidate.ssid, candidate.password);
+
+        if (screenActive)
+        {
+            drawWifiStatus("WIFI...", candidate.ssid, "Connecting", colorHeader());
+        }
+        else
+        {
+            drawBlackScreen();
+        }
+
+        const uint32_t startedAt = millis();
+        uint8_t dotCount = 0;
+
+        while (WiFi.status() != WL_CONNECTED && millis() - startedAt < TimeoutMs)
+        {
+            delay(250);
+            Serial.print(".");
+
+            if (screenActive)
+            {
+                if (startupSplashActive)
+                {
+                    String dots;
+                    for (uint8_t i = 0; i < dotCount; ++i)
+                    {
+                        dots += ".";
+                    }
+                    drawStartupSplashStatus("WIFI...", candidate.ssid, dots.c_str());
+                }
+                else
+                {
+                    display->fillRect(4, 50, PanelWidth - 8, 8, panelColor(0, 0, 0));
+                    display->setCursor(4, 50);
+                    display->setTextColor(colorHeader());
+                    for (uint8_t i = 0; i < dotCount; ++i)
+                    {
+                        display->print(".");
+                    }
+                    presentFrame();
+                }
+            }
+            dotCount = (dotCount + 1) % 18;
+        }
+
+        Serial.println();
+
+        if (WiFi.status() == WL_CONNECTED)
+        {
+            const String ip = WiFi.localIP().toString();
+            Serial.print("Wi-Fi connected. IP: ");
+            Serial.println(ip);
+            Serial.print("RSSI: ");
+            Serial.println(WiFi.RSSI());
+            initLocalTime();
+
+            if (screenActive)
+            {
+                drawWifiStatus("WIFI OK", candidate.ssid, ip.c_str(), colorSuccess());
+            }
+            else
+            {
+                drawBlackScreen();
+            }
+            wifiOfflineNotified = false;
+            return true;
+        }
+
+        Serial.print("Wi-Fi failed for SSID ");
+        Serial.print(candidate.ssid);
+        Serial.print(", status=");
         Serial.println(static_cast<int>(WiFi.status()));
-        drawWifiStatus("WIFI FAIL", WifiSsid, "Check serial", colorCanceled());
-        return false;
     }
 
-    const String ip = WiFi.localIP().toString();
-    Serial.print("Wi-Fi connected. IP: ");
-    Serial.println(ip);
-    Serial.print("RSSI: ");
-    Serial.println(WiFi.RSSI());
-    initLocalTime();
+    if (screenActive)
+    {
+        drawWifiStatus("WIFI FAIL", "All networks", "Retrying", colorCanceled());
+    }
+    else
+    {
+        drawBlackScreen();
+    }
+    wifiOfflineNotified = true;
+    return false;
+}
 
-    drawWifiStatus("WIFI OK", WifiSsid, ip.c_str(), colorSuccess());
-    return true;
+void scheduleWifiReconnect(uint32_t now)
+{
+    nextWifiReconnectAt = now + static_cast<uint32_t>(WifiReconnectSeconds) * 1000UL;
+}
+
+void resumeNetworkPollingAfterReconnect()
+{
+    requestConfigFetch();
+    nextConfigFetchAt = UINT32_MAX;
+    nextDisplayFetchAt = 0;
 }
 }
 
@@ -1602,22 +2459,39 @@ void setup()
 
     display->clearScreen();
     Serial.println("HUB75 initialized");
+    drawStartupSplashStatus("BOOT", "Starting", "");
     ensureAudioReady();
+    networkMutex = xSemaphoreCreateMutex();
+    pendingPayloadMutex = xSemaphoreCreateMutex();
+    if (networkPollTaskHandle == nullptr)
+    {
+        xTaskCreatePinnedToCore(
+            networkPollTask,
+            "network_poll",
+            10000,
+            nullptr,
+            1,
+            &networkPollTaskHandle,
+            0);
+    }
+    if (soundPollTaskHandle == nullptr)
+    {
+        xTaskCreatePinnedToCore(
+            soundPollTask,
+            "sound_poll",
+            8192,
+            nullptr,
+            1,
+            &soundPollTaskHandle,
+            0);
+    }
     if (connectWiFi())
     {
-        fetchDeviceConfig();
-        if (screenActive)
-        {
-            fetchDisplayPayload();
-            nextDisplayFetchAt = millis() + static_cast<uint32_t>(displayPollSeconds) * 1000UL;
-        }
-        else
-        {
-            drawBlackScreen();
-            nextDisplayFetchAt = 0;
-        }
-        nextConfigFetchAt = millis() + inactiveConfigPollSeconds() * 1000UL;
-        nextSoundFetchAt = millis() + static_cast<uint32_t>(SoundPollSeconds) * 1000UL;
+        resumeNetworkPollingAfterReconnect();
+    }
+    else
+    {
+        scheduleWifiReconnect(millis());
     }
 }
 
@@ -1637,6 +2511,8 @@ void loop()
         Serial.print(static_cast<int>(WiFi.status()));
         if (WiFi.status() == WL_CONNECTED)
         {
+            Serial.print(" ssid=");
+            Serial.print(WiFi.SSID());
             Serial.print(" ip=");
             Serial.print(WiFi.localIP());
             Serial.print(" rssi=");
@@ -1653,34 +2529,94 @@ void loop()
         Serial.println();
     }
 
-    if (WiFi.status() == WL_CONNECTED && now >= nextConfigFetchAt)
+    if (WiFi.status() != WL_CONNECTED)
+    {
+        if (!wifiOfflineNotified)
+        {
+            Serial.print("Wi-Fi disconnected, status=");
+            Serial.println(static_cast<int>(WiFi.status()));
+            if (screenActive)
+            {
+                drawWifiStatus("WIFI LOST", WifiSsid, "Retrying", colorCanceled());
+            }
+            else
+            {
+                drawBlackScreen();
+            }
+            wifiOfflineNotified = true;
+        }
+
+        if (nextWifiReconnectAt == 0 || now >= nextWifiReconnectAt)
+        {
+            Serial.println("Retrying Wi-Fi connection");
+            WiFi.disconnect(true);
+            delay(100);
+            if (connectWiFi())
+            {
+                nextWifiReconnectAt = 0;
+                resumeNetworkPollingAfterReconnect();
+            }
+            else
+            {
+                scheduleWifiReconnect(millis());
+            }
+        }
+    }
+
+    String pendingBody;
+    int pendingHttpCode = 0;
+    bool pendingOk = false;
+    if (takePendingConfig(pendingBody, pendingHttpCode, pendingOk))
     {
         const bool wasScreenActive = screenActive;
-        fetchDeviceConfig();
+        applyDeviceConfigPayload(pendingBody, pendingHttpCode, pendingOk);
         if (!wasScreenActive && screenActive)
         {
-            fetchDisplayPayload();
-            nextDisplayFetchAt = millis() + static_cast<uint32_t>(displayPollSeconds) * 1000UL;
+            if (requestDisplayFetch())
+            {
+                nextDisplayFetchAt = UINT32_MAX;
+            }
         }
         else if (!screenActive)
         {
             nextDisplayFetchAt = 0;
+            startRealtimeTaskIfNeeded();
+        }
+        else if (nextDisplayFetchAt == 0)
+        {
+            if (requestDisplayFetch())
+            {
+                nextDisplayFetchAt = UINT32_MAX;
+            }
         }
         nextConfigFetchAt = millis() + inactiveConfigPollSeconds() * 1000UL;
     }
 
-    if (WiFi.status() == WL_CONNECTED && now >= nextSoundFetchAt)
+    if (takePendingDisplay(pendingBody, pendingHttpCode, pendingOk))
     {
-        fetchSoundState();
-        nextSoundFetchAt = millis() + static_cast<uint32_t>(SoundPollSeconds) * 1000UL;
+        applyDisplayPayload(pendingBody, pendingHttpCode, pendingOk);
+        startRealtimeTaskIfNeeded();
+        nextDisplayFetchAt = screenActive
+            ? millis() + static_cast<uint32_t>(displayPollSeconds) * 1000UL
+            : 0;
+    }
+
+    if (WiFi.status() == WL_CONNECTED && now >= nextConfigFetchAt)
+    {
+        if (requestConfigFetch())
+        {
+            nextConfigFetchAt = UINT32_MAX;
+        }
     }
 
     updateOffFetchIndicator();
 
     if (screenActive && WiFi.status() == WL_CONNECTED && nextDisplayFetchAt != 0 && now >= nextDisplayFetchAt)
     {
-        fetchDisplayPayload();
-        nextDisplayFetchAt = millis() + static_cast<uint32_t>(displayPollSeconds) * 1000UL;
+        if (requestDisplayFetch())
+        {
+            nextDisplayFetchAt = UINT32_MAX;
+        }
     }
 
     if (idleScreenCount > 1 && millis() >= nextIdleCycleAt)
@@ -1694,7 +2630,9 @@ void loop()
     if (idleLayoutActive)
     {
         const bool scrolling = idleScrollOffset() > 0;
-        const uint16_t renderIntervalMs = scrolling ? 80 : 500;
+        const uint16_t renderIntervalMs = scrolling
+            ? max<uint16_t>(20, min<uint16_t>(80, 1000 / max<uint16_t>(1, timetableScrollPixelsPerSecond)))
+            : 250;
         if (now - lastIdleRenderAt >= renderIntervalMs)
         {
             lastIdleRenderAt = now;
@@ -1718,12 +2656,18 @@ void loop()
             lastLiveRenderAt = now;
             drawCurrentLiveFlight();
         }
-        else if (now - lastLiveRenderAt >= 1000)
+        else if (now - lastLiveRenderAt >= max<uint16_t>(30, min<uint16_t>(120, 1000 / max<uint16_t>(1, liveScrollPixelsPerSecond))))
         {
             lastLiveRenderAt = now;
             drawCurrentLiveFlight();
         }
     }
 
-    delay(100);
+    if (clockLayoutActive && now - lastClockRenderAt >= 50)
+    {
+        lastClockRenderAt = now;
+        drawClockMode();
+    }
+
+    delay(MainLoopDelayMs);
 }
