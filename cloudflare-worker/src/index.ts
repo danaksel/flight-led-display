@@ -1,5 +1,6 @@
 export interface Env {
   FLIGHT_DISPLAY_KV: KVNamespace;
+  REALTIME_HUB?: DurableObjectNamespace;
   AIRLINE_LOGOS?: R2Bucket;
   ASSETS: Fetcher;
   FR24_API_KEY: string;
@@ -10,10 +11,8 @@ export interface Env {
   FR24_AIRPORT_ENDPOINT_TEMPLATE?: string;
   AVIATIONSTACK_API_KEY?: string;
   AVIATIONSTACK_API_BASE_URL?: string;
-  OPENSKY_CLIENT_ID?: string;
-  OPENSKY_CLIENT_SECRET?: string;
-  OPENSKY_TOKEN_URL?: string;
-  OPENSKY_BASE_URL?: string;
+  ADMIN_API_TOKEN?: string;
+  DEVICE_API_TOKEN?: string;
   HOME_AIRPORT_IATA?: string;
   DEFAULT_LAT?: string;
   DEFAULT_LON?: string;
@@ -47,8 +46,9 @@ type FollowSettings = {
 
 type DeviceSettings = {
   enabled: boolean;
+  displayMode: "flight" | "clock";
   airspaceMonitoringEnabled: boolean;
-  liveDataSource: "fr24" | "opensky";
+  allowedAircraftCategories: AircraftCategoryCode[];
   brightness: number;
   audioVolumePercent: number;
   pollSeconds: number;
@@ -72,7 +72,9 @@ type DeviceSettings = {
     aircraft: string;
     context: string;
     progress: string;
+    routeProgress: string;
   };
+  clockColor: string;
   timetableColors: {
     header: string;
     data: string;
@@ -104,6 +106,16 @@ type SoundState = {
   source: string | null;
 };
 
+type AircraftCategoryCode = "P" | "C" | "M" | "J" | "T" | "H" | "B" | "G" | "D" | "V" | "O" | "N";
+
+type RealtimeEvent = {
+  type: "hello" | "config_changed" | "display_changed" | "sound_test";
+  updatedAt: string;
+  source?: string;
+  testNonce?: number;
+  volumePercent?: number;
+};
+
 type DisplayFlight = {
   fr24Id?: string;
   callsign?: string;
@@ -111,6 +123,8 @@ type DisplayFlight = {
   airline?: string;
   airlineCode?: string;
   aircraft?: string;
+  category?: AircraftCategoryCode;
+  categoryName?: string;
   registration?: string;
   origin?: string;
   destination?: string;
@@ -125,7 +139,7 @@ type DisplayFlight = {
   onGround?: boolean;
   distanceKm: number;
   bearingDeg: number;
-  source?: "fr24" | "opensky" | "avinor" | "aviationstack";
+  source?: "fr24" | "avinor" | "aviationstack";
   status?: string;
   gate?: string;
   gateMessage?: string;
@@ -142,9 +156,18 @@ type DisplayFlight = {
 };
 
 type LiveSourceStatus = {
-  source: DeviceSettings["liveDataSource"];
+  source: "fr24";
   ok: boolean;
   error?: string;
+};
+
+type ClockPayload = {
+  style: "gorgy";
+  timezone: string;
+  color: string;
+  width: number;
+  height: number;
+  centered: boolean;
 };
 
 type AvinorFlight = {
@@ -373,6 +396,78 @@ const KNOWN_AIRPORT_COORDS: Record<string, { lat: number; lon: number }> = {
   SVG: { lat: 58.8768, lon: 5.6379 }
 };
 
+const AIRCRAFT_CATEGORY_LABELS: Record<AircraftCategoryCode, string> = {
+  P: "PASSENGER",
+  C: "CARGO",
+  M: "MILITARY_AND_GOVERNMENT",
+  J: "BUSINESS_JETS",
+  T: "GENERAL_AVIATION",
+  H: "HELICOPTERS",
+  B: "LIGHTER_THAN_AIR",
+  G: "GLIDERS",
+  D: "DRONES",
+  V: "GROUND_VEHICLES",
+  O: "OTHER",
+  N: "NON_CATEGORIZED"
+};
+
+const DEFAULT_ALLOWED_AIRCRAFT_CATEGORIES: AircraftCategoryCode[] = ["P", "C", "M", "J", "H", "B", "G", "D", "V", "O", "N"];
+
+export class RealtimeHub implements DurableObject {
+  constructor(private state: DurableObjectState, private env: Env) {
+    void this.env;
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (request.headers.get("Upgrade") === "websocket") {
+      const pair = new WebSocketPair();
+      const [client, server] = Object.values(pair);
+      this.state.acceptWebSocket(server);
+      return new Response(null, { status: 101, webSocket: client });
+    }
+
+    if (url.pathname === "/broadcast" && request.method === "POST") {
+      const event = await request.json<RealtimeEvent>();
+      this.broadcast(event);
+      return jsonResponse({ ok: true, sessions: this.state.getWebSockets().length }, 200, { "Cache-Control": "no-store" });
+    }
+
+    return jsonResponse({ error: "Not found" }, 404);
+  }
+
+  async webSocketMessage(socket: WebSocket, message: ArrayBuffer | string): Promise<void> {
+    void socket;
+    void message;
+  }
+
+  async webSocketClose(socket: WebSocket): Promise<void> {
+    socket.close();
+  }
+
+  async webSocketError(socket: WebSocket): Promise<void> {
+    socket.close();
+  }
+
+  private broadcast(event: RealtimeEvent): void {
+    for (const socket of this.state.getWebSockets()) {
+      this.send(socket, event);
+    }
+  }
+
+  private send(socket: WebSocket, event: RealtimeEvent): void {
+    try {
+      socket.send(JSON.stringify(event));
+    } catch {
+      try {
+        socket.close();
+      } catch {
+        // Already closed.
+      }
+    }
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -382,7 +477,13 @@ export default {
     }
 
     try {
+      const authFailure = authorizeRequest(request, env, url.pathname);
+      if (authFailure) return authFailure;
+
       if (url.pathname === "/") return htmlResponse(renderIndexHtml());
+      if (url.pathname === "/pixel-editor") return htmlResponse(renderPixelEditorHtml());
+      if (url.pathname === "/public/realtime") return realtimeResponse(request, env);
+      if (url.pathname === "/public/realtime-state" && request.method === "GET") return realtimeStateResponse(env);
       if (url.pathname === "/public/device-config" && request.method === "GET") return deviceConfigResponse(env);
       if (url.pathname === "/public/sound-state" && request.method === "GET") return soundStateResponse(env);
       if (url.pathname === "/public/display" && request.method === "GET") return flightsResponse(env, true);
@@ -393,12 +494,18 @@ export default {
       if (url.pathname === "/api/config" && request.method === "GET") return configResponse(env);
       if (url.pathname === "/api/config" && request.method === "POST") return saveConfig(request, env);
       if (url.pathname === "/api/device-config" && request.method === "GET") return deviceConfigResponse(env);
+      if (url.pathname === "/api/realtime-state" && request.method === "GET") return realtimeStateResponse(env);
       if (url.pathname === "/api/sound-state" && request.method === "GET") return soundStateResponse(env);
       if (url.pathname === "/api/logo-status" && request.method === "GET") return logoStatusResponse(env);
+      if (url.pathname === "/api/admin/screen-state/toggle" && request.method === "POST") return toggleScreenState(env);
       if (url.pathname === "/api/screen-state" && request.method === "GET") return screenStateResponse(env);
       if (url.pathname === "/api/screen-state" && request.method === "POST") return saveScreenState(request, env);
       if (url.pathname === "/api/screen-state/activate" && request.method === "POST") return writeScreenState(env, { active: true }, "homey-api");
       if (url.pathname === "/api/screen-state/deactivate" && request.method === "POST") return writeScreenState(env, { active: false }, "homey-api");
+      if (url.pathname === "/api/display-mode" && request.method === "GET") return displayModeResponse(env);
+      if (url.pathname === "/api/display-mode" && request.method === "POST") return saveDisplayMode(request, env);
+      if (url.pathname === "/api/display-mode/flight" && request.method === "POST") return writeDisplayMode(env, "flight", "homey-api");
+      if (url.pathname === "/api/display-mode/clock" && request.method === "POST") return writeDisplayMode(env, "clock", "homey-api");
       if (url.pathname === "/api/brightness-mode" && request.method === "GET") return brightnessModeResponse(env);
       if (url.pathname === "/api/brightness-mode" && request.method === "POST") return saveBrightnessMode(request, env);
       if (url.pathname === "/api/brightness-mode/day" && request.method === "POST") return writeScreenState(env, { brightnessMode: "day" }, "homey-api");
@@ -417,6 +524,76 @@ export default {
     }
   }
 };
+
+function authorizeRequest(request: Request, env: Env, pathname: string): Response | undefined {
+  const adminToken = normalizeSecretString(env.ADMIN_API_TOKEN);
+  const deviceToken = normalizeSecretString(env.DEVICE_API_TOKEN);
+
+  if (pathname === "/api/health") return undefined;
+
+  if (adminToken && isAutomationApiPath(pathname) && !requestHasToken(request, adminToken, "X-Flight-Admin-Token")) {
+    return jsonResponse({ error: "Unauthorized" }, 401, {
+      "Cache-Control": "no-store",
+      "WWW-Authenticate": "Bearer"
+    });
+  }
+
+  if (deviceToken && pathname.startsWith("/public/") && !requestHasToken(request, deviceToken, "X-Flight-Device-Token")) {
+    return jsonResponse({ error: "Unauthorized" }, 401, {
+      "Cache-Control": "no-store",
+      "WWW-Authenticate": "Bearer"
+    });
+  }
+
+  return undefined;
+}
+
+function realtimeResponse(request: Request, env: Env): Response | Promise<Response> {
+  if (!env.REALTIME_HUB) {
+    return jsonResponse({ error: "REALTIME_HUB is not configured" }, 500, { "Cache-Control": "no-store" });
+  }
+  const id = env.REALTIME_HUB.idFromName("flight-display-main-v2");
+  return env.REALTIME_HUB.get(id).fetch(request);
+}
+
+async function broadcastRealtime(env: Env, event: RealtimeEvent): Promise<void> {
+  if (!env.REALTIME_HUB) return;
+  const id = env.REALTIME_HUB.idFromName("flight-display-main-v2");
+  const stub = env.REALTIME_HUB.get(id);
+  await stub.fetch("https://realtime.internal/broadcast", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(event)
+  });
+}
+
+function isAutomationApiPath(pathname: string): boolean {
+  return pathname === "/api/screen-state"
+    || pathname.startsWith("/api/screen-state/")
+    || pathname === "/api/display-mode"
+    || pathname.startsWith("/api/display-mode/")
+    || pathname === "/api/brightness-mode"
+    || pathname.startsWith("/api/brightness-mode/");
+}
+
+function requestHasToken(request: Request, expectedToken: string, headerName: string): boolean {
+  const directToken = normalizeSecretString(request.headers.get(headerName) || undefined);
+  if (constantTimeEquals(directToken, expectedToken)) return true;
+
+  const authorization = request.headers.get("Authorization") || "";
+  const bearer = authorization.match(/^Bearer\s+(.+)$/i)?.[1];
+  return constantTimeEquals(normalizeSecretString(bearer), expectedToken);
+}
+
+function constantTimeEquals(a: string | undefined, b: string | undefined): boolean {
+  if (!a || !b) return false;
+  let diff = a.length ^ b.length;
+  const maxLength = Math.max(a.length, b.length);
+  for (let i = 0; i < maxLength; i += 1) {
+    diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
+  }
+  return diff === 0;
+}
 
 async function getConfig(env: Env): Promise<Config> {
   const stored = await env.FLIGHT_DISPLAY_KV.get(CONFIG_KEY, "json");
@@ -513,7 +690,17 @@ async function writeScreenState(
     source: source.slice(0, 80)
   };
   await env.FLIGHT_DISPLAY_KV.put(SCREEN_STATE_KEY, JSON.stringify(next));
+  await broadcastRealtime(env, {
+    type: "config_changed",
+    updatedAt: now,
+    source: next.source || source
+  });
   return jsonResponse(next, 200, { "Cache-Control": "no-store" });
+}
+
+async function toggleScreenState(env: Env): Promise<Response> {
+  const previous = await getScreenState(env);
+  return writeScreenState(env, { active: !previous.active }, "web-admin");
 }
 
 async function configResponse(env: Env): Promise<Response> {
@@ -552,7 +739,18 @@ async function saveConfig(request: Request, env: Env): Promise<Response> {
     updatedAt: new Date().toISOString()
   };
 
+  const configUpdatedAt = config.updatedAt || new Date().toISOString();
   await env.FLIGHT_DISPLAY_KV.put(CONFIG_KEY, JSON.stringify(config));
+  await broadcastRealtime(env, {
+    type: "config_changed",
+    updatedAt: configUpdatedAt,
+    source: "web-config"
+  });
+  await broadcastRealtime(env, {
+    type: "display_changed",
+    updatedAt: configUpdatedAt,
+    source: "web-config"
+  });
   return configResponse(env);
 }
 
@@ -594,6 +792,20 @@ async function soundStateResponse(env: Env): Promise<Response> {
   });
 }
 
+async function realtimeStateResponse(env: Env): Promise<Response> {
+  const [config, screenState, soundState] = await Promise.all([getConfig(env), getScreenState(env), getSoundState(env)]);
+  const normalizedDevice = normalizeDeviceSettings(config.device);
+  return jsonResponse({
+    updatedAt: new Date().toISOString(),
+    configVersion: config.updatedAt || "",
+    screenVersion: screenState.updatedAt || "",
+    soundTestNonce: soundState.testNonce,
+    volumePercent: normalizedDevice.audioVolumePercent
+  }, 200, {
+    "Cache-Control": "no-store"
+  });
+}
+
 async function screenStateResponse(env: Env): Promise<Response> {
   const screenState = await getScreenState(env);
   return jsonResponse(screenState, 200, {
@@ -611,6 +823,48 @@ async function brightnessModeResponse(env: Env): Promise<Response> {
   }, 200, {
     "Cache-Control": "no-store"
   });
+}
+
+async function displayModeResponse(env: Env): Promise<Response> {
+  const config = await getConfig(env);
+  const device = normalizeDeviceSettings(config.device);
+  return jsonResponse({
+    displayMode: device.displayMode,
+    updatedAt: config.updatedAt || null
+  }, 200, {
+    "Cache-Control": "no-store"
+  });
+}
+
+async function writeDisplayMode(env: Env, displayMode: DeviceSettings["displayMode"], source = "api"): Promise<Response> {
+  const config = await getConfig(env);
+  const normalizedDevice = normalizeDeviceSettings(config.device);
+  const updatedAt = new Date().toISOString();
+  const next: Config = {
+    ...config,
+    device: {
+      ...normalizedDevice,
+      displayMode
+    },
+    updatedAt
+  };
+
+  await env.FLIGHT_DISPLAY_KV.put(CONFIG_KEY, JSON.stringify(next));
+  await broadcastRealtime(env, {
+    type: "config_changed",
+    updatedAt,
+    source: source.slice(0, 80)
+  });
+  await broadcastRealtime(env, {
+    type: "display_changed",
+    updatedAt,
+    source: source.slice(0, 80)
+  });
+  return jsonResponse({
+    displayMode,
+    updatedAt,
+    source: source.slice(0, 80)
+  }, 200, { "Cache-Control": "no-store" });
 }
 
 async function logoStatusResponse(env: Env): Promise<Response> {
@@ -698,6 +952,23 @@ async function saveBrightnessMode(request: Request, env: Env): Promise<Response>
   return writeScreenState(env, { brightnessMode: mode }, source);
 }
 
+async function saveDisplayMode(request: Request, env: Env): Promise<Response> {
+  let body: unknown = {};
+  try {
+    body = await request.json();
+  } catch {
+    return jsonResponse({ error: "Expected JSON body" }, 400, { "Cache-Control": "no-store" });
+  }
+
+  const mode = firstString(body && typeof body === "object" ? body as Record<string, unknown> : {}, ["displayMode", "mode"]);
+  if (mode !== "flight" && mode !== "clock") {
+    return jsonResponse({ error: "Expected displayMode or mode to be 'flight' or 'clock'" }, 400, { "Cache-Control": "no-store" });
+  }
+
+  const source = firstString(body && typeof body === "object" ? body as Record<string, unknown> : {}, ["source"]) || "api";
+  return writeDisplayMode(env, mode, source);
+}
+
 async function triggerSoundTest(request: Request, env: Env): Promise<Response> {
   let body: unknown = {};
   try {
@@ -708,6 +979,13 @@ async function triggerSoundTest(request: Request, env: Env): Promise<Response> {
   const source = firstString(body && typeof body === "object" ? body as Record<string, unknown> : {}, ["source"]) || "api";
   const [soundState, config] = await Promise.all([triggerSoundTestState(env, source), getConfig(env)]);
   const normalizedDevice = normalizeDeviceSettings(config.device);
+  await broadcastRealtime(env, {
+    type: "sound_test",
+    updatedAt: soundState.lastTriggeredAt || new Date().toISOString(),
+    source,
+    testNonce: soundState.testNonce,
+    volumePercent: normalizedDevice.audioVolumePercent
+  });
   return jsonResponse({
     ...soundState,
     volumePercent: normalizedDevice.audioVolumePercent
@@ -949,10 +1227,11 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
   const night = v.nightMode && typeof v.nightMode === "object" ? v.nightMode as Partial<DeviceSettings["nightMode"]> : {};
   return {
     enabled: typeof v.enabled === "boolean" ? v.enabled : true,
+    displayMode: v.displayMode === "clock" ? "clock" : "flight",
     airspaceMonitoringEnabled: typeof (v as { airspaceMonitoringEnabled?: unknown }).airspaceMonitoringEnabled === "boolean"
       ? Boolean((v as { airspaceMonitoringEnabled?: unknown }).airspaceMonitoringEnabled)
       : true,
-    liveDataSource: oneOf((v as { liveDataSource?: unknown }).liveDataSource, ["fr24", "opensky"], "fr24"),
+    allowedAircraftCategories: normalizeAircraftCategoryFilter((v as { allowedAircraftCategories?: unknown }).allowedAircraftCategories),
     brightness: clampNumber(v.brightness, 1, 100, 80),
     audioVolumePercent: clampNumber((v as { audioVolumePercent?: unknown }).audioVolumePercent, 0, 100, 35),
     pollSeconds: clampNumber(v.pollSeconds, 30, 900, 90),
@@ -966,6 +1245,7 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
     timezone: typeof v.timezone === "string" && v.timezone.trim() ? v.timezone.slice(0, 64) : "Europe/Oslo",
     followUnits: normalizeFollowUnits((v as { followUnits?: unknown }).followUnits),
     lineColors: normalizeLineColors((v as { lineColors?: unknown }).lineColors),
+    clockColor: normalizeHexColor((v as { clockColor?: unknown }).clockColor, "#ff2a23"),
     timetableColors: normalizeTimetableColors((v as { timetableColors?: unknown }).timetableColors),
     nightMode: {
       enabled: typeof night.enabled === "boolean" ? night.enabled : true,
@@ -974,6 +1254,25 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
       brightness: clampNumber(night.brightness, 0, 100, 0)
     }
   };
+}
+
+function normalizeAircraftCategoryFilter(value: unknown): AircraftCategoryCode[] {
+  if (!Array.isArray(value)) return [...DEFAULT_ALLOWED_AIRCRAFT_CATEGORIES];
+  const allowed = new Set<AircraftCategoryCode>();
+  value.forEach((item) => {
+    const code = normalizeAircraftCategoryCode(item);
+    if (code) allowed.add(code);
+  });
+  return Array.from(allowed);
+}
+
+function normalizeAircraftCategoryCode(value: unknown): AircraftCategoryCode | undefined {
+  if (typeof value !== "string") return undefined;
+  const raw = value.trim().toUpperCase();
+  if ((Object.keys(AIRCRAFT_CATEGORY_LABELS) as AircraftCategoryCode[]).includes(raw as AircraftCategoryCode)) return raw as AircraftCategoryCode;
+  const match = (Object.entries(AIRCRAFT_CATEGORY_LABELS) as Array<[AircraftCategoryCode, string]>)
+    .find(([, label]) => label === raw);
+  return match?.[0];
 }
 
 function normalizeFollowUnits(value: unknown): DeviceSettings["followUnits"] {
@@ -1032,7 +1331,8 @@ function normalizeLineColors(value: unknown): DeviceSettings["lineColors"] {
     route: normalizeHexColor(v.route, "#f4f7ff"),
     aircraft: normalizeHexColor(v.aircraft, "#f4f7ff"),
     context: normalizeHexColor(v.context, "#f4f7ff"),
-    progress: normalizeHexColor(v.progress, "#f7b500")
+    progress: normalizeHexColor(v.progress, "#f7b500"),
+    routeProgress: normalizeHexColor(v.routeProgress, "#00d46a")
   };
 }
 
@@ -1304,7 +1604,7 @@ function normalizeGateMessage(value: string): string | undefined {
   if (!raw) return undefined;
   const normalized = raw.toLowerCase().replace(/[^a-z0-9]+/g, "");
   if (["boarding", "board"].includes(normalized) || normalized.includes("boarding")) return "Boarding";
-  if (["gotogate", "togate", "go", "g"].includes(normalized) || normalized.includes("gotogate")) return "To gate";
+  if (["gotogate", "togate", "go", "g"].includes(normalized) || normalized.includes("gotogate")) return "Go to gate";
   if (["gateclosing", "closing", "close", "gc"].includes(normalized) || normalized.includes("closing")) return "Closing";
   if (["gateclosed", "closed", "cl"].includes(normalized) || normalized.includes("closed")) return "Closed";
   return undefined;
@@ -1471,13 +1771,20 @@ function localDateString(date: Date, timezone: string): string {
 
 async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
   const [config, screenState] = await Promise.all([getConfig(env), getScreenState(env)]);
+  const normalizedDevice = normalizeDeviceSettings(config.device);
   const suspendedReason = displaySuspendedReason(config, screenState);
   const liveSourceStatus: LiveSourceStatus = {
-    source: normalizeDeviceSettings(config.device).liveDataSource,
+    source: "fr24",
     ok: true
   };
   if (suspendedReason) {
     return jsonResponse(await displayPayload(env, config, screenState, compact, suspendedReason, [], [], [], [], liveSourceStatus), 200, {
+      "Cache-Control": "no-store"
+    });
+  }
+
+  if (normalizedDevice.displayMode === "clock") {
+    return jsonResponse(await displayPayload(env, config, screenState, compact, "clock", [], [], [], [], liveSourceStatus), 200, {
       "Cache-Control": "no-store"
     });
   }
@@ -1505,6 +1812,7 @@ async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
   const mode = followFlights.length ? "follow" : nearbyFlights.length ? "nearby" : "idle";
   const displayFlights = (followFlights.length ? followFlights : nearbyFlights).slice(0, limit);
   if (mode === "follow" || mode === "nearby") {
+    enrichFollowEtaTimes(config, displayFlights);
     await enrichFollowLocation(env, displayFlights);
   }
   const idleScreens = displayFlights.length ? [] : await getIdleScreens(env, config);
@@ -1527,6 +1835,8 @@ async function displayPayload(
   idleScreens: IdleScreen[],
   liveSourceStatus: LiveSourceStatus
 ): Promise<Record<string, unknown>> {
+  const normalizedDevice = normalizeDeviceSettings(config.device);
+  const clock = buildClockPayload(normalizedDevice);
   return compact
     ? {
         updatedAt: new Date().toISOString(),
@@ -1539,7 +1849,8 @@ async function displayPayload(
         lon: config.lon,
         radiusKm: config.radiusKm,
         follow: config.follow,
-        device: config.device,
+        device: normalizedDevice,
+        clock,
         liveSourceStatus,
         idleScreens,
         flights: await Promise.all(displayFlights.map((flight) => toCompactDisplayFlight(env, flight, config)))
@@ -1551,6 +1862,7 @@ async function displayPayload(
         screenActive: screenState.active,
         screenState,
         config,
+        clock,
         liveSourceStatus,
         followFlights,
         nearbyFlights,
@@ -1590,6 +1902,17 @@ function minutesFromTime(value: string): number {
   const match = value.match(/^(\d{2}):(\d{2})$/);
   if (!match) return 0;
   return Number(match[1]) * 60 + Number(match[2]);
+}
+
+function buildClockPayload(device: DeviceSettings): ClockPayload {
+  return {
+    style: "gorgy",
+    timezone: device.timezone || "Europe/Oslo",
+    color: device.clockColor || "#ff2a23",
+    width: 63,
+    height: 63,
+    centered: true
+  };
 }
 
 async function toCompactDisplayFlight(env: Env, f: DisplayFlight, config: Config): Promise<Record<string, unknown>> {
@@ -1836,9 +2159,8 @@ function normalizeLogoCode(airlineCode: string | undefined): string {
 }
 
 async function getFlights(env: Env, config: Config): Promise<DisplayFlight[]> {
-  const liveDataSource = normalizeDeviceSettings(config.device).liveDataSource;
   const cacheTtl = Math.max(60, parseNumber(env.CACHE_TTL_SECONDS, 60));
-  const cacheKey = `flights:${liveDataSource}:v1:${config.lat.toFixed(3)}:${config.lon.toFixed(3)}:${Math.round(config.radiusKm)}`;
+  const cacheKey = `flights:fr24:v1:${config.lat.toFixed(3)}:${config.lon.toFixed(3)}:${Math.round(config.radiusKm)}`;
   const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
   if (Array.isArray(cached)) {
     const flights = cached as DisplayFlight[];
@@ -1847,13 +2169,12 @@ async function getFlights(env: Env, config: Config): Promise<DisplayFlight[]> {
   }
 
   const bounds = boundsFromRadius(config.lat, config.lon, config.radiusKm);
-  const records = liveDataSource === "opensky"
-    ? await fetchOpenSky(env, config)
-    : await fetchFr24(env, bounds);
+  const records = await fetchFr24(env, bounds);
   const flights = records
-    .map((record) => liveDataSource === "opensky" ? normalizeOpenSkyFlight(record, config) : normalizeFlight(record, config))
+    .map((record) => normalizeFlight(record, config))
     .filter((flight): flight is DisplayFlight => Boolean(flight))
     .filter(isAirborneFlight)
+    .filter((flight) => aircraftCategoryAllowed(flight, config.device?.allowedAircraftCategories))
     .filter((flight) => flight.distanceKm <= config.radiusKm)
     .sort((a, b) => a.distanceKm - b.distanceKm);
 
@@ -1869,12 +2190,12 @@ async function getFollowFlights(env: Env, config: Config, liveFlights: DisplayFl
 
   const airport = normalizeAirportCode(config.homeAirportIata, env.HOME_AIRPORT_IATA || "OSL");
   const timezone = config.device?.timezone || "Europe/Oslo";
-  const [departures, arrivals, targetedLiveFlights] = await Promise.all([
+  const [departures, arrivals] = await Promise.all([
     getAvinorRawFlights(env, airport, "D", timezone),
-    getAvinorRawFlights(env, airport, "A", timezone),
-    getTargetedFollowFlights(env, config, follow.flights)
+    getAvinorRawFlights(env, airport, "A", timezone)
   ]);
   const scheduled = [...departures, ...arrivals];
+  const targetedLiveFlights = await getTargetedFollowFlights(env, config, follow.flights);
   const liveCandidates = mergeFlightsByIdentity([...targetedLiveFlights, ...liveFlights]);
 
   const flights = await Promise.all(follow.flights
@@ -1904,31 +2225,25 @@ async function getFollowFlights(env: Env, config: Config, liveFlights: DisplayFl
 }
 
 async function getTargetedFollowFlights(env: Env, config: Config, tokens: string[]): Promise<DisplayFlight[]> {
-  const liveDataSource = normalizeDeviceSettings(config.device).liveDataSource;
   const normalizedTokens = tokens
     .map(normalizeFollowToken)
     .filter((token): token is string => Boolean(token));
   if (!normalizedTokens.length) return [];
 
   const cacheTtl = Math.max(30, Math.min(300, parseNumber(env.CACHE_TTL_SECONDS, 60)));
-  const sourceVersion = liveDataSource === "fr24" ? "v4" : "v1";
-  const areaPart = liveDataSource === "opensky" ? `:${config.lat.toFixed(3)}:${config.lon.toFixed(3)}:${Math.round(config.radiusKm)}` : "";
-  const cacheKey = `follow:${liveDataSource}:${sourceVersion}:${normalizedTokens.slice().sort().join(",")}${areaPart}`;
+  const cacheKey = `follow:fr24:v4:${normalizedTokens.slice().sort().join(",")}`;
   const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
   if (Array.isArray(cached)) return cached as DisplayFlight[];
 
-  const [records, staticFlights] = liveDataSource === "opensky"
-    ? [await fetchOpenSky(env, config), [] as DisplayFlight[]]
-    : await Promise.all([
-        fetchFr24(env, undefined, { flights: normalizedTokens }, env.FR24_FOLLOW_ENDPOINT || "/live/flight-positions/light"),
-        getFr24FollowStaticFlights(env, config, normalizedTokens)
-      ]);
-  const fallbackFlight = liveDataSource === "fr24" && normalizedTokens.length === 1 ? normalizedTokens[0] : undefined;
+  const [records, staticFlights] = await Promise.all([
+    fetchFr24(env, undefined, { flights: normalizedTokens }, env.FR24_FOLLOW_ENDPOINT || "/live/flight-positions/light"),
+    getFr24FollowStaticFlights(env, config, normalizedTokens)
+  ]);
+  const fallbackFlight = normalizedTokens.length === 1 ? normalizedTokens[0] : undefined;
   const liveFlights = records
-    .map((record) => liveDataSource === "opensky" ? normalizeOpenSkyFlight(record, config) : normalizeFlight(record, config, fallbackFlight))
-    .filter((flight): flight is DisplayFlight => Boolean(flight))
-    .filter((flight) => liveDataSource === "opensky" ? normalizedTokens.some((token) => flightMatchesFollowToken(flight, token)) : true);
-  const flights = liveDataSource === "fr24" ? mergeFollowStaticFlights(liveFlights, staticFlights) : liveFlights;
+    .map((record) => normalizeFlight(record, config, fallbackFlight))
+    .filter((flight): flight is DisplayFlight => Boolean(flight));
+  const flights = mergeFollowStaticFlights(liveFlights, staticFlights);
 
   await enrichAirlineNames(env, flights);
   await enrichAirportContext(env, config, flights);
@@ -2009,7 +2324,7 @@ function sameFlightIdentity(a: DisplayFlight, b: DisplayFlight): boolean {
 }
 
 function normalizedIdentityValue(value: string | undefined): string {
-  return value?.toUpperCase().replace(/\s+/g, "") || "";
+  return value?.toUpperCase().replace(/[\s-]+/g, "") || "";
 }
 
 async function shouldTreatFollowAsLanded(env: Env, flight: DisplayFlight, raw: AvinorRawFlight | undefined, config: Config): Promise<boolean> {
@@ -2278,6 +2593,21 @@ function normalizeSecretString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      return new Response("timeout", { status: 504 });
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function safeJsonSnippet(value: unknown): string {
   try {
     return JSON.stringify(value).slice(0, 240);
@@ -2302,11 +2632,25 @@ function mergeFlightsByIdentity(flights: DisplayFlight[]): DisplayFlight[] {
 async function enrichFollowLocation(env: Env, flights: DisplayFlight[]): Promise<void> {
   await Promise.all(flights.map(async (flight) => {
     if (typeof flight.lat !== "number" || typeof flight.lon !== "number") return;
-    const location = await getFlightLocation(env, flight.lat, flight.lon);
-    flight.locationLabel = "Flying over";
-    flight.locationValue = location;
-    flight.routeProgress = await calculateRouteProgress(env, flight);
+    try {
+      const location = await getFlightLocation(env, flight.lat, flight.lon);
+      flight.locationLabel = "Flying over";
+      flight.locationValue = location;
+      flight.routeProgress = await calculateRouteProgress(env, flight);
+    } catch {
+      flight.locationLabel = "Flying over";
+      flight.locationValue = inferSeaName(flight.lat, flight.lon) || "";
+      flight.routeProgress = undefined;
+    }
   }));
+}
+
+function enrichFollowEtaTimes(config: Config, flights: DisplayFlight[]): void {
+  const displayTimezone = config.device?.timezone || "Europe/Oslo";
+  flights.forEach((flight) => {
+    if (!flight.arrivalScheduledTime) return;
+    flight.arrivalDisplayTime = formatLocalTime(flight.arrivalScheduledTime, displayTimezone) || flight.arrivalDisplayTime;
+  });
 }
 
 async function getFlightLocation(env: Env, lat: number, lon: number): Promise<string> {
@@ -2325,13 +2669,13 @@ async function getFlightLocation(env: Env, lat: number, lon: number): Promise<st
   url.searchParams.set("addressdetails", "1");
   url.searchParams.set("accept-language", "en");
 
-  const response = await fetch(url.toString(), {
+  const response = await fetchWithTimeout(url.toString(), {
     headers: {
       Accept: "application/json",
       "Accept-Language": "en",
       "User-Agent": "flight-display-server/0.1"
     }
-  });
+  }, 3000);
   if (!response.ok) return inferSeaName(lat, lon) || "Unknown area";
 
   const data = await response.json() as Record<string, unknown>;
@@ -2394,13 +2738,13 @@ async function getAirportCoordinates(env: Env, code: string): Promise<{ lat: num
   url.searchParams.set("limit", "1");
   url.searchParams.set("accept-language", "en");
 
-  const response = await fetch(url.toString(), {
+  const response = await fetchWithTimeout(url.toString(), {
     headers: {
       Accept: "application/json",
       "Accept-Language": "en",
       "User-Agent": "flight-display-server/0.1"
     }
-  });
+  }, 3000);
   if (!response.ok) return undefined;
 
   const results = await response.json() as Array<Record<string, unknown>>;
@@ -2416,9 +2760,21 @@ async function getAirportCoordinates(env: Env, code: string): Promise<{ lat: num
 function flightMatchesFollowToken(flight: DisplayFlight, token: string): boolean {
   const normalized = normalizeFollowToken(token);
   if (!normalized) return false;
+  const candidates = followTokenVariants(normalized);
   return [flight.flight, flight.callsign, flight.registration]
-    .map((value) => value?.toUpperCase().replace(/\s+/g, ""))
-    .some((value) => value === normalized);
+    .map(normalizedIdentityValue)
+    .some((value) => candidates.includes(value));
+}
+
+function followTokenVariants(token: string): string[] {
+  const normalized = normalizedIdentityValue(token);
+  const variants = new Set<string>([normalized]);
+  const match = normalized.match(/^([A-Z0-9]{2})(\d[A-Z0-9]*)$/);
+  if (match) {
+    const icao = airlineIataToLogoCode(match[1]);
+    if (icao && /^[A-Z]{3}$/.test(icao)) variants.add(`${icao}${match[2]}`);
+  }
+  return Array.from(variants);
 }
 
 function avinorFlightMatchesFollowToken(flight: AvinorRawFlight, token: string): boolean {
@@ -2548,144 +2904,10 @@ function isAirborneFlight(flight: DisplayFlight): boolean {
   return typeof flight.altitudeFt === "number" && flight.altitudeFt > 0;
 }
 
-async function fetchOpenSky(env: Env, config: Config): Promise<unknown[]> {
-  const token = await getOptionalOpenSkyAccessToken(env);
-  const bbox = boundingBoxFromRadius(config.lat, config.lon, config.radiusKm);
-  const baseUrl = env.OPENSKY_BASE_URL || "https://opensky-network.org";
-  const url = new URL(`${baseUrl}/api/states/all`);
-  url.searchParams.set("lamin", bbox.south.toFixed(6));
-  url.searchParams.set("lamax", bbox.north.toFixed(6));
-  url.searchParams.set("lomin", bbox.west.toFixed(6));
-  url.searchParams.set("lomax", bbox.east.toFixed(6));
-  const headers: Record<string, string> = {
-    Accept: "application/json",
-    "User-Agent": "flight-display-server/1.0"
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-
-  let response = await fetch(url, { headers });
-  if (!response.ok && token && (response.status === 401 || response.status === 403)) {
-    response = await fetch(url, {
-      headers: {
-        Accept: "application/json",
-        "User-Agent": "flight-display-server/1.0"
-      }
-    });
-  }
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`OpenSky request failed (${response.status}): ${text.slice(0, 240)}`);
-  }
-
-  const json = await response.json();
-  if (json && typeof json === "object" && Array.isArray((json as { states?: unknown[] }).states)) {
-    return (json as { states: unknown[] }).states;
-  }
-  return [];
-}
-
-async function getOptionalOpenSkyAccessToken(env: Env): Promise<string | undefined> {
-  try {
-    return await getOpenSkyAccessToken(env);
-  } catch (error) {
-    console.warn(error instanceof Error ? error.message : "OpenSky token request failed");
-    return undefined;
-  }
-}
-
-async function getOpenSkyAccessToken(env: Env): Promise<string> {
-  if (!env.OPENSKY_CLIENT_ID || !env.OPENSKY_CLIENT_SECRET) {
-    throw new Error("OpenSky OAuth credentials are not configured; using anonymous OpenSky request");
-  }
-
-  const cacheKey = "opensky:token:v1";
-  const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey);
-  if (cached) return cached;
-
-  const tokenUrl = env.OPENSKY_TOKEN_URL || "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token";
-  const body = new URLSearchParams({
-    grant_type: "client_credentials",
-    client_id: env.OPENSKY_CLIENT_ID,
-    client_secret: env.OPENSKY_CLIENT_SECRET
-  });
-  const response = await fetch(tokenUrl, {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/x-www-form-urlencoded",
-      "User-Agent": "flight-display-server/1.0"
-    },
-    body
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`OpenSky token request failed (${response.status}): ${text.slice(0, 240)}`);
-  }
-
-  const json = await response.json() as { access_token?: unknown; expires_in?: unknown };
-  if (typeof json.access_token !== "string" || !json.access_token) {
-    throw new Error("OpenSky token response did not contain access_token");
-  }
-  const ttl = Math.max(60, Math.min(3600, Number(json.expires_in || 1800) - 60));
-  await env.FLIGHT_DISPLAY_KV.put(cacheKey, json.access_token, { expirationTtl: ttl });
-  return json.access_token;
-}
-
-function normalizeOpenSkyFlight(record: unknown, config: Config): DisplayFlight | null {
-  if (!Array.isArray(record) || record.length < 17) return null;
-  const callsign = typeof record[1] === "string" ? record[1].trim().toUpperCase() : "";
-  const originCountry = typeof record[2] === "string" ? record[2].trim() : "";
-  const lon = numberFromUnknown(record[5]);
-  const lat = numberFromUnknown(record[6]);
-  if (lat === undefined || lon === undefined) return null;
-
-  const baroAltitudeM = numberFromUnknown(record[7]);
-  const geoAltitudeM = numberFromUnknown(record[13]);
-  const velocityMs = numberFromUnknown(record[9]);
-  const trueTrack = numberFromUnknown(record[10]);
-  const verticalRateMs = numberFromUnknown(record[11]);
-  const onGround = typeof record[8] === "boolean" ? record[8] : undefined;
-  const distanceKm = haversineKm(config.lat, config.lon, lat, lon);
-  const bearingDeg = bearing(config.lat, config.lon, lat, lon);
-  const icaoPrefix = callsign.match(/^([A-Z]{3})\d/)?.[1];
-
-  return {
-    callsign,
-    flight: callsign,
-    airline: icaoPrefix || originCountry || undefined,
-    airlineCode: icaoPrefix,
-    lat,
-    lon,
-    altitudeFt: metersToFeet(baroAltitudeM ?? geoAltitudeM),
-    speedKts: velocityMs === undefined ? undefined : velocityMs * 1.94384,
-    headingDeg: trueTrack,
-    verticalRateFpm: verticalRateMs === undefined ? undefined : verticalRateMs * 196.850394,
-    onGround,
-    distanceKm,
-    bearingDeg,
-    source: "opensky"
-  };
-}
-
-function numberFromUnknown(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function metersToFeet(value: number | undefined): number | undefined {
-  return value === undefined ? undefined : value * 3.28084;
-}
-
-function boundingBoxFromRadius(lat: number, lon: number, radiusKm: number): { north: number; south: number; west: number; east: number } {
-  const latDelta = radiusKm / 111.32;
-  const lonDelta = radiusKm / (111.32 * Math.cos((lat * Math.PI) / 180));
-  return {
-    north: clamp(lat + latDelta, -90, 90),
-    south: clamp(lat - latDelta, -90, 90),
-    west: clamp(lon - lonDelta, -180, 180),
-    east: clamp(lon + lonDelta, -180, 180)
-  };
+function aircraftCategoryAllowed(flight: DisplayFlight, allowedCategories: AircraftCategoryCode[] | undefined): boolean {
+  if (!flight.category) return true;
+  const allowed = allowedCategories?.length ? allowedCategories : DEFAULT_ALLOWED_AIRCRAFT_CATEGORIES;
+  return allowed.includes(flight.category);
 }
 
 async function fetchFr24(env: Env, bounds?: string, filters: { flights?: string[]; callsigns?: string[] } = {}, endpointOverride?: string): Promise<unknown[]> {
@@ -2732,6 +2954,7 @@ function normalizeFlight(record: unknown, config: Config, fallbackFlight?: strin
 
   const altitudeFt = firstNumber(r, ["alt", "altitude", "altitude_ft"]);
   const explicitOnGround = firstBoolean(r, ["on_ground", "onground", "ground", "is_ground", "is_on_ground"]);
+  const category = firstAircraftCategory(r);
   const departureScheduledTime = firstDateString(r, [
     "scheduled_departure",
     "departure_scheduled",
@@ -2778,6 +3001,8 @@ function normalizeFlight(record: unknown, config: Config, fallbackFlight?: strin
     airline: firstString(r, ["airline_name", "airline_full_name", "name"]),
     airlineCode: firstString(r, ["painted_as", "operated_as", "airline_icao", "airline"]),
     aircraft: firstString(r, ["type", "aircraft_code", "aircraft"]),
+    category,
+    categoryName: category ? AIRCRAFT_CATEGORY_LABELS[category] : undefined,
     registration: firstString(r, ["reg", "registration"]),
     origin: firstString(r, ["orig_iata", "origin_iata", "origin_icao"]),
     destination: firstString(r, ["dest_iata", "destination_iata", "destination_icao"]),
@@ -2798,6 +3023,18 @@ function normalizeFlight(record: unknown, config: Config, fallbackFlight?: strin
   };
 }
 
+function firstAircraftCategory(record: Record<string, unknown>): AircraftCategoryCode | undefined {
+  return normalizeAircraftCategoryCode(firstString(record, [
+    "category",
+    "aircraft_category",
+    "aircraftCategory",
+    "aircraft_class",
+    "aircraftClass",
+    "fr24_category",
+    "fr24Category"
+  ]));
+}
+
 async function enrichAirlineNames(env: Env, flights: DisplayFlight[]): Promise<void> {
   const iataCodes = Array.from(
     new Set(
@@ -2815,7 +3052,6 @@ async function enrichAirlineNames(env: Env, flights: DisplayFlight[]): Promise<v
   const codes = Array.from(
     new Set(
       flights
-        .filter((flight) => flight.source !== "opensky")
         .map((flight) => flight.airlineCode)
         .filter((code): code is string => Boolean(code && /^[A-Z0-9]{2,4}$/.test(code)))
     )
@@ -3096,6 +3332,383 @@ function normalizeDisplayText(value: string): string {
     .replace(/[ñÑ]/g, "n");
 }
 
+function renderPixelEditorHtml(): string {
+  return `<!doctype html>
+<html lang="no">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pixel Editor 128 x 64</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; --ink:#f4f7ff; --muted:#9aa7b8; --line:#2c3849; --panel:#101720; --field:#070b10; --accent:#f6b800; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: #05080d; color: var(--ink); }
+    main { min-height: 100vh; }
+    aside { padding: 14px 18px; border-bottom: 1px solid var(--line); background: #0b1118; display: grid; grid-template-columns: minmax(230px, 340px) minmax(420px, 1fr) minmax(300px, 420px); gap: 14px; align-items: start; }
+    h1 { margin: 0; font-size: 24px; line-height: 1.1; letter-spacing: 0; }
+    p { margin: 8px 0 0; color: var(--muted); font-size: 13px; line-height: 1.4; }
+    label { display: block; margin: 13px 0 5px; color: #dce4ee; font-size: 12px; font-weight: 800; }
+    input, select, textarea { width: 100%; border: 1px solid #344257; border-radius: 7px; background: var(--field); color: var(--ink); font: inherit; }
+    input, select { padding: 9px 10px; }
+    textarea { min-height: 132px; padding: 10px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 11px; line-height: 1.35; }
+    button { width: 100%; margin-top: 9px; border: 1px solid #3b4859; border-radius: 7px; padding: 10px 12px; background: #182232; color: var(--ink); font: inherit; font-weight: 850; cursor: pointer; }
+    button.primary, button.active { background: var(--accent); color: #111; border-color: var(--accent); }
+    button.danger { background: #321923; color: #ffd8d1; border-color: #6c3141; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+    .meta { margin-top: 9px; color: var(--muted); font-size: 12px; }
+    .tools { display: grid; grid-template-columns: 1fr 1fr 150px; gap: 9px; align-items: end; }
+    .output-panel { min-width: 0; }
+    .stage { padding: 12px 18px 18px; overflow: auto; background: #070a0e; }
+    .editor-grid { display: grid; grid-template-columns: 44px minmax(0, 1fr); grid-template-rows: 28px auto; gap: 6px; width: 100%; }
+    .coord-box { display: grid; place-items: center; border: 1px solid #263345; border-radius: 6px; background: #0b1118; color: #f4f7ff; font: 11px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    #topAxis, #leftAxis { display: block; width: 100%; height: 100%; background: #090d13; border: 1px solid #263345; border-radius: 6px; }
+    .canvas-wrap { width: 100%; aspect-ratio: 2 / 1; background: #000; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+    #pixelCanvas { width: 100%; height: 100%; display: block; background: #000; image-rendering: pixelated; cursor: crosshair; touch-action: none; }
+    .mini { margin-top: 12px; margin-left: 50px; width: min(100%, 512px); aspect-ratio: 2 / 1; border: 1px solid var(--line); background: #000; }
+    #miniCanvas { width: 100%; height: 100%; display: block; image-rendering: pixelated; }
+    a { color: #6aa7ff; text-decoration: none; }
+    @media (max-width: 860px) {
+      aside { display: block; }
+      .tools { display: block; }
+      .stage { padding: 12px; }
+      .editor-grid { grid-template-columns: 34px minmax(0, 1fr); grid-template-rows: 24px auto; gap: 4px; }
+      .mini { margin-left: 38px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <aside>
+      <h1>Pixel editor</h1>
+      <p>128 x 64 LED-grid med samme pitch og runde prikker som emulatoren. Ruler og peker viser x 1-128 og y 1-64; outputen er fortsatt kodeklar 0-basert.</p>
+      <div id="meta" class="meta">128 x 64 · ruler x 1-128 · y 1-64 · 0 pixels tent · x:- y:-</div>
+      <p><a href="/">Tilbake til kontrollpanel</a></p>
+      <div class="tools">
+        <div>
+          <label for="format">Output</label>
+          <select id="format">
+            <option value="json">JSON coordinates</option>
+            <option value="cpp">C++ points</option>
+            <option value="bitmap">64 row bitmap</option>
+          </select>
+        </div>
+        <div class="row">
+          <button id="copy" class="primary" type="button">Kopier output</button>
+          <button id="clear" class="danger" type="button">Tøm grid</button>
+        </div>
+        <button id="invert" type="button">Inverter pixels</button>
+      </div>
+      <div class="output-panel">
+        <label for="output">Kode</label>
+        <textarea id="output" spellcheck="false"></textarea>
+        <button id="load" type="button">Last JSON fra feltet</button>
+      </div>
+    </aside>
+    <section class="stage">
+      <div class="editor-grid">
+        <div id="coordBox" class="coord-box">x:-<br>y:-</div>
+        <canvas id="topAxis" width="1024" height="28"></canvas>
+        <canvas id="leftAxis" width="44" height="512"></canvas>
+        <div class="canvas-wrap">
+          <canvas id="pixelCanvas" width="1024" height="512"></canvas>
+        </div>
+      </div>
+      <div class="mini">
+        <canvas id="miniCanvas" width="128" height="64"></canvas>
+      </div>
+    </section>
+  </main>
+  <script>
+    const cols = 128;
+    const rows = 64;
+    const canvas = document.querySelector("#pixelCanvas");
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    const topAxis = document.querySelector("#topAxis");
+    const topAxisCtx = topAxis.getContext("2d", { willReadFrequently: true });
+    const leftAxis = document.querySelector("#leftAxis");
+    const leftAxisCtx = leftAxis.getContext("2d", { willReadFrequently: true });
+    const coordBox = document.querySelector("#coordBox");
+    const miniCanvas = document.querySelector("#miniCanvas");
+    const miniCtx = miniCanvas.getContext("2d", { willReadFrequently: true });
+    const output = document.querySelector("#output");
+    const meta = document.querySelector("#meta");
+    const format = document.querySelector("#format");
+    const pixels = new Set();
+    let strokeMode = "draw";
+    let pointerDown = false;
+    let activePointerId = null;
+    let hoverPoint = null;
+
+    function key(x, y) { return x + "," + y; }
+    function parseKey(value) {
+      const parts = value.split(",");
+      return { x: Number(parts[0]), y: Number(parts[1]) };
+    }
+    function pixelFromEvent(event) {
+      const rect = canvas.getBoundingClientRect();
+      const x = Math.floor(((event.clientX - rect.left) / rect.width) * cols);
+      const y = Math.floor(((event.clientY - rect.top) / rect.height) * rows);
+      if (x < 0 || y < 0 || x >= cols || y >= rows) return null;
+      return { x, y };
+    }
+    function setPixelState(point, nextOn) {
+      if (!point) return;
+      if (nextOn) {
+        pixels.add(key(point.x, point.y));
+      } else {
+        pixels.delete(key(point.x, point.y));
+      }
+    }
+    function applyPixel(event) {
+      const point = pixelFromEvent(event);
+      if (!point) return;
+      setPixelState(point, strokeMode === "draw");
+      render();
+    }
+    function render() {
+      drawLedPanel();
+      drawAxes();
+      drawMini();
+      updateOutput();
+    }
+    function drawLedPanel() {
+      const panelW = canvas.width;
+      const panelH = canvas.height;
+      const pitchX = panelW / cols;
+      const pitchY = panelH / rows;
+      const radius = Math.min(pitchX, pitchY) * 0.27;
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, panelW, panelH);
+      for (let y = 0; y < rows; y += 1) {
+        for (let x = 0; x < cols; x += 1) {
+          const cx = x * pitchX + pitchX / 2;
+          const cy = y * pitchY + pitchY / 2;
+          ctx.fillStyle = "#242a33";
+          ctx.beginPath();
+          ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+          ctx.fill();
+          if (pixels.has(key(x, y))) {
+            ctx.fillStyle = "#ffffff";
+            ctx.beginPath();
+            ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+      }
+      drawBoardCrosshair();
+    }
+    function drawBoardCrosshair() {
+      if (!hoverPoint) return;
+      const pitchX = canvas.width / cols;
+      const pitchY = canvas.height / rows;
+      const x = hoverPoint.x * pitchX + pitchX / 2;
+      const y = hoverPoint.y * pitchY + pitchY / 2;
+      ctx.save();
+      ctx.strokeStyle = "rgba(246,184,0,.95)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, canvas.height);
+      ctx.moveTo(0, y);
+      ctx.lineTo(canvas.width, y);
+      ctx.stroke();
+      ctx.fillStyle = "rgba(246,184,0,.95)";
+      ctx.beginPath();
+      ctx.arc(x, y, Math.min(pitchX, pitchY) * 0.33, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+    function drawAxes() {
+      const pitchX = topAxis.width / cols;
+      const pitchY = leftAxis.height / rows;
+      topAxisCtx.fillStyle = "#090d13";
+      topAxisCtx.fillRect(0, 0, topAxis.width, topAxis.height);
+      leftAxisCtx.fillStyle = "#090d13";
+      leftAxisCtx.fillRect(0, 0, leftAxis.width, leftAxis.height);
+      topAxisCtx.font = "10px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
+      topAxisCtx.textAlign = "center";
+      topAxisCtx.textBaseline = "top";
+      leftAxisCtx.font = "10px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
+      leftAxisCtx.textAlign = "right";
+      leftAxisCtx.textBaseline = "middle";
+      for (let x = 0; x < cols; x += 1) {
+        const px = x * pitchX + pitchX / 2;
+        const major = x % 16 === 0;
+        const minor = x % 8 === 0;
+        if (!major && !minor) continue;
+        topAxisCtx.strokeStyle = major ? "#6f7f92" : "#394657";
+        topAxisCtx.beginPath();
+        topAxisCtx.moveTo(px, topAxis.height);
+        topAxisCtx.lineTo(px, major ? 12 : 19);
+        topAxisCtx.stroke();
+        if (major) {
+          topAxisCtx.fillStyle = "#dce4ee";
+          topAxisCtx.fillText(String(x + 1), px, 2);
+        }
+      }
+      topAxisCtx.fillStyle = "#dce4ee";
+      topAxisCtx.fillText("128", topAxis.width - pitchX / 2, 2);
+      for (let y = 0; y < rows; y += 1) {
+        const py = y * pitchY + pitchY / 2;
+        const major = y % 8 === 0;
+        const minor = y % 4 === 0;
+        if (!major && !minor) continue;
+        leftAxisCtx.strokeStyle = major ? "#6f7f92" : "#394657";
+        leftAxisCtx.beginPath();
+        leftAxisCtx.moveTo(leftAxis.width, py);
+        leftAxisCtx.lineTo(major ? 20 : 31, py);
+        leftAxisCtx.stroke();
+        if (major) {
+          leftAxisCtx.fillStyle = "#dce4ee";
+          leftAxisCtx.fillText(String(y + 1), 18, py);
+        }
+      }
+      leftAxisCtx.fillStyle = "#dce4ee";
+      leftAxisCtx.fillText("64", 18, leftAxis.height - pitchY / 2);
+      if (hoverPoint) {
+        const hx = hoverPoint.x * pitchX + pitchX / 2;
+        const hy = hoverPoint.y * pitchY + pitchY / 2;
+        topAxisCtx.fillStyle = "#f6b800";
+        topAxisCtx.fillRect(Math.max(0, hx - 1), 0, 2, topAxis.height);
+        topAxisCtx.fillStyle = "#111";
+        topAxisCtx.fillRect(Math.max(0, hx - 14), 2, 28, 12);
+        topAxisCtx.fillStyle = "#f6b800";
+        topAxisCtx.fillText(String(hoverPoint.x + 1), hx, 3);
+        leftAxisCtx.fillStyle = "#f6b800";
+        leftAxisCtx.fillRect(0, Math.max(0, hy - 1), leftAxis.width, 2);
+        leftAxisCtx.fillStyle = "#111";
+        leftAxisCtx.fillRect(2, Math.max(0, hy - 7), 24, 14);
+        leftAxisCtx.fillStyle = "#f6b800";
+        leftAxisCtx.fillText(String(hoverPoint.y + 1), 22, hy);
+        coordBox.innerHTML = "x:" + (hoverPoint.x + 1) + "<br>y:" + (hoverPoint.y + 1);
+      } else {
+        coordBox.innerHTML = "x:-<br>y:-";
+      }
+    }
+    function drawMini() {
+      miniCtx.fillStyle = "#000";
+      miniCtx.fillRect(0, 0, cols, rows);
+      miniCtx.fillStyle = "#ffffff";
+      pixels.forEach((value) => {
+        const point = parseKey(value);
+        miniCtx.fillRect(point.x, point.y, 1, 1);
+      });
+    }
+    function sortedPixels() {
+      return Array.from(pixels)
+        .map(parseKey)
+        .sort((a, b) => a.y - b.y || a.x - b.x);
+    }
+    function updateOutput() {
+      const list = sortedPixels();
+      if (format.value === "cpp") {
+        const lines = list.map((point) => "  {" + point.x + ", " + point.y + "}");
+        output.value = "const uint8_t CLOCK_TEMPLATE[][2] = {\\n" + lines.join(",\\n") + "\\n};\\nconst size_t CLOCK_TEMPLATE_COUNT = " + list.length + ";";
+      } else if (format.value === "bitmap") {
+        output.value = JSON.stringify({
+          width: cols,
+          height: rows,
+          rows: Array.from({ length: rows }, (_, y) => {
+            let line = "";
+            for (let x = 0; x < cols; x += 1) line += pixels.has(key(x, y)) ? "1" : "0";
+            return line;
+          })
+        }, null, 2);
+      } else {
+        output.value = JSON.stringify({
+          width: cols,
+          height: rows,
+          pixels: list.map((point) => [point.x, point.y])
+        }, null, 2);
+      }
+      const cursor = hoverPoint ? " · x:" + (hoverPoint.x + 1) + " y:" + (hoverPoint.y + 1) : " · x:- y:-";
+      meta.textContent = "128 x 64 · ruler x 1-128 · y 1-64 · " + list.length + " pixels tent" + cursor;
+    }
+    function loadJson() {
+      const parsed = JSON.parse(output.value);
+      pixels.clear();
+      if (Array.isArray(parsed.pixels)) {
+        parsed.pixels.forEach((point) => {
+          const x = Number(point[0]);
+          const y = Number(point[1]);
+          if (Number.isInteger(x) && Number.isInteger(y) && x >= 0 && y >= 0 && x < cols && y < rows) pixels.add(key(x, y));
+        });
+      } else if (Array.isArray(parsed.rows)) {
+        parsed.rows.slice(0, rows).forEach((line, y) => {
+          String(line).slice(0, cols).split("").forEach((char, x) => {
+            if (char === "1") pixels.add(key(x, y));
+          });
+        });
+      }
+      render();
+    }
+
+    format.addEventListener("change", updateOutput);
+    document.querySelector("#clear").addEventListener("click", () => {
+      pixels.clear();
+      render();
+    });
+    document.querySelector("#invert").addEventListener("click", () => {
+      const next = new Set();
+      for (let y = 0; y < rows; y += 1) for (let x = 0; x < cols; x += 1) {
+        if (!pixels.has(key(x, y))) next.add(key(x, y));
+      }
+      pixels.clear();
+      next.forEach((value) => pixels.add(value));
+      render();
+    });
+    document.querySelector("#copy").addEventListener("click", async () => {
+      await navigator.clipboard.writeText(output.value);
+      meta.textContent = sortedPixels().length + " pixels tent · kopiert";
+    });
+    document.querySelector("#load").addEventListener("click", () => {
+      try {
+        loadJson();
+      } catch (error) {
+        meta.textContent = "Kunne ikke lese JSON";
+      }
+    });
+    canvas.addEventListener("pointerdown", (event) => {
+      pointerDown = true;
+      activePointerId = event.pointerId;
+      canvas.setPointerCapture(event.pointerId);
+      hoverPoint = pixelFromEvent(event);
+      strokeMode = hoverPoint && pixels.has(key(hoverPoint.x, hoverPoint.y)) ? "erase" : "draw";
+      setPixelState(hoverPoint, strokeMode === "draw");
+      render();
+    });
+    canvas.addEventListener("pointermove", (event) => {
+      hoverPoint = pixelFromEvent(event);
+      if (!pointerDown || event.pointerId !== activePointerId) {
+        render();
+        return;
+      }
+      applyPixel(event);
+    });
+    canvas.addEventListener("pointerup", (event) => {
+      pointerDown = false;
+      activePointerId = null;
+      canvas.releasePointerCapture(event.pointerId);
+      hoverPoint = pixelFromEvent(event);
+      render();
+    });
+    canvas.addEventListener("pointercancel", () => {
+      pointerDown = false;
+      activePointerId = null;
+      hoverPoint = null;
+      render();
+    });
+    canvas.addEventListener("pointerleave", () => {
+      if (pointerDown) return;
+      hoverPoint = null;
+      render();
+    });
+    render();
+  </script>
+</body>
+</html>`;
+}
+
 function renderIndexHtml(): string {
   return `<!doctype html>
 <html lang="no">
@@ -3105,55 +3718,65 @@ function renderIndexHtml(): string {
   <title>Flight Display Server</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <style>
-    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; --ink:#f5f0df; --muted:#9fa8b8; --line:#273345; --panel:#101720; --panel2:#151f2b; --field:#0b1118; --amber:#f6b800; --amber2:#ffd761; --blue:#2f7fdd; --danger:#ff6d4a; --ok:#78d98f; }
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; --ink:#f5f0df; --muted:#9fa8b8; --line:#273345; --panel:#101720; --panel2:#151f2b; --field:#0b1118; --amber:#f6b800; --amber2:#ffd761; --blue:#2f7fdd; --blue2:#172942; --danger:#ff6d4a; --ok:#78d98f; --soft:#101720; }
     body { margin: 0; min-height: 100vh; background: #05080d; color: var(--ink); }
-    .shell { min-height: 100vh; display: grid; grid-template-columns: minmax(390px, 450px) minmax(0, 1fr); align-items: stretch; background: linear-gradient(135deg, #05080d 0%, #0d141e 54%, #161205 100%); }
+    .shell { min-height: 100vh; display: grid; grid-template-columns: minmax(410px, 470px) minmax(0, 1fr); align-items: stretch; background: linear-gradient(135deg, #05080d 0%, #0d141e 54%, #161205 100%); }
     aside { padding: 18px; background: linear-gradient(180deg, rgba(9,14,20,.98), rgba(13,19,28,.96)); border-right: 1px solid #2c3542; box-shadow: 12px 0 30px rgba(0,0,0,.24); box-sizing: border-box; display: flex; flex-direction: column; }
-    .brand { margin: 0 0 14px; padding: 14px 14px 12px; background: #05070a; border: 1px solid #293241; border-left: 5px solid var(--amber); border-radius: 6px; }
-    .eyebrow { margin: 0 0 7px; color: var(--amber2); font-size: 11px; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; }
-    h1 { margin: 0; font-size: 25px; line-height: 1.05; letter-spacing: .02em; }
+    .brand { margin: 0 0 14px; padding: 16px; background: #05070a; border: 1px solid #293241; border-left: 5px solid var(--amber); border-radius: 8px; }
+    .eyebrow { margin: 0 0 7px; color: var(--amber2); font-size: 11px; font-weight: 850; letter-spacing: .14em; text-transform: uppercase; }
+    h1 { margin: 0; font-size: 28px; line-height: 1.05; letter-spacing: 0; }
     p { margin: 7px 0 0; color: var(--muted); line-height: 1.45; font-size: 13px; }
-    .card { margin-top: 12px; padding: 13px; border: 1px solid var(--line); border-radius: 6px; background: rgba(16,23,32,.88); box-shadow: 0 14px 36px rgba(0,0,0,.22); }
+    .card { margin-top: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: rgba(16,23,32,.88); box-shadow: 0 14px 36px rgba(0,0,0,.22); }
     .brand { order: 0; }
     .savebar { order: 1; }
-    .flight-card { order: 2; }
-    .place-card { order: 3; }
-    .screen-card { order: 4; }
+    .place-card { order: 2; }
+    .screen-card { order: 3; }
+    .flight-card { order: 4; }
     .timetable-card { order: 5; }
     .links-wrap { order: 6; }
     .preview { order: 7; }
     .card h2 { margin: 0; color: var(--amber2); font-size: 13px; letter-spacing: .12em; text-transform: uppercase; }
     .section-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 0 12px; }
     .section-note { margin: -4px 0 10px; color: var(--muted); font-size: 12px; line-height: 1.4; }
-    .hint { position: relative; display: inline-grid; place-items: center; flex: 0 0 auto; width: 19px; height: 19px; border: 1px solid #405066; border-radius: 50%; color: #f8fafc; background: #182232; font-size: 12px; font-weight: 900; cursor: help; }
-    .hint::after { content: attr(data-tip); position: absolute; right: 0; top: 25px; z-index: 20; width: min(280px, 74vw); padding: 9px 10px; border: 1px solid #405066; border-radius: 6px; background: #05080d; color: #edf2f8; box-shadow: 0 10px 30px rgba(0,0,0,.35); font-size: 12px; font-weight: 650; line-height: 1.35; letter-spacing: 0; text-transform: none; opacity: 0; pointer-events: none; transform: translateY(-4px); transition: opacity .12s ease, transform .12s ease; }
+    .hint { position: relative; display: inline-grid; place-items: center; flex: 0 0 auto; width: 21px; height: 21px; border: 1px solid #405066; border-radius: 50%; color: #f8fafc; background: #182232; font-size: 12px; font-weight: 900; cursor: help; }
+    .hint::after { content: attr(data-tip); position: absolute; right: 0; top: 27px; z-index: 20; width: min(280px, 74vw); padding: 9px 10px; border: 1px solid #405066; border-radius: 8px; background: #05080d; color: #edf2f8; box-shadow: 0 10px 30px rgba(0,0,0,.35); font-size: 12px; font-weight: 650; line-height: 1.35; letter-spacing: 0; text-transform: none; opacity: 0; pointer-events: none; transform: translateY(-4px); transition: opacity .12s ease, transform .12s ease; }
     .hint:hover::after, .hint:focus::after { opacity: 1; transform: translateY(0); }
     .subhead { margin: 14px 0 8px; color: #f4f7ff; font-size: 12px; font-weight: 850; letter-spacing: .06em; text-transform: uppercase; }
-    label { display: block; margin: 11px 0 5px; color: #d7deea; font-weight: 700; font-size: 12px; }
+    label { display: block; margin: 11px 0 5px; color: #d7deea; font-weight: 750; font-size: 12px; }
     .field-help { margin: 4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.35; }
-    input, select { width: 100%; box-sizing: border-box; border: 1px solid #334154; border-radius: 5px; padding: 9px 10px; font: inherit; background: var(--field); color: var(--ink); }
+    input, select { width: 100%; box-sizing: border-box; border: 1px solid #334154; border-radius: 8px; padding: 9px 10px; font: inherit; background: var(--field); color: var(--ink); }
     input[type="checkbox"] { width: auto; }
     input:focus, select:focus { outline: 2px solid rgba(246,184,0,.35); border-color: var(--amber); }
-    input[type="color"] { height: 38px; padding: 3px; cursor: pointer; }
+    input[type="color"] { height: 38px; padding: 3px; cursor: pointer; background: var(--field); }
+    input[type="range"] { padding: 0; height: 28px; border: 0; background: transparent; accent-color: var(--amber); }
+    .range-field { margin-top: 10px; }
+    .range-label { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 2px; }
+    .range-value { min-width: 58px; padding: 4px 8px; border-radius: 999px; background: #182232; color: var(--amber2); text-align: center; font-size: 12px; font-weight: 850; }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .color-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
     .color-grid label { margin-top: 10px; }
     .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 8px 0 4px; }
     .toggle-row label { margin: 0; }
-    button { margin-top: 14px; width: 100%; border: 0; border-radius: 5px; padding: 10px 13px; background: var(--amber); color: #111; font: inherit; font-weight: 850; cursor: pointer; }
+    .category-grid { display: grid; grid-template-columns: 1fr; gap: 6px; margin: 7px 0 10px; }
+    .category-option { display: grid; grid-template-columns: auto 1fr; align-items: start; gap: 8px; padding: 7px 8px; border: 1px solid #263345; border-radius: 8px; background: rgba(5,8,13,.32); }
+    .category-option input { margin-top: 2px; }
+    .category-option label { margin: 0; color: #eef3fb; font-size: 12px; line-height: 1.25; }
+    .category-option span { display: block; color: var(--muted); font-size: 11px; line-height: 1.25; }
+    button { margin-top: 14px; width: 100%; border: 0; border-radius: 8px; padding: 10px 13px; background: var(--amber); color: #111; font: inherit; font-weight: 850; cursor: pointer; }
     button.secondary { background: #1d2938; color: #f3f6fb; border: 1px solid #354457; margin-top: 9px; }
-    button:hover { filter: brightness(1.05); }
-    .savebar { position: sticky; top: 0; z-index: 12; margin-top: 12px; padding: 12px; border: 1px solid #3c4a5e; border-radius: 6px; background: linear-gradient(180deg, rgba(24,34,48,.98), rgba(9,14,20,.98)); box-shadow: 0 10px 22px rgba(0,0,0,.34); }
+    button.danger { background: #321923; color: #ffd8d1; border: 1px solid #6c3141; }
+    button:hover { filter: brightness(1.03); transform: translateY(-1px); }
+    .savebar { position: sticky; top: 0; z-index: 12; margin-top: 12px; padding: 12px; border: 1px solid #3c4a5e; border-radius: 8px; background: linear-gradient(180deg, rgba(24,34,48,.98), rgba(9,14,20,.98)); box-shadow: 0 10px 22px rgba(0,0,0,.34); }
     .savebar button { margin: 0; }
     .status { min-height: 18px; margin-top: 9px; font-size: 12px; color: var(--ok); }
     .status.dirty { color: var(--amber2); }
     .error { color: var(--danger); }
     .links { margin-top: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 12px; }
-    .links a { padding: 7px 8px; background: #0b1118; border: 1px solid #263345; border-radius: 5px; }
-    details.links-wrap { margin-top: 12px; border: 1px solid #263345; border-radius: 6px; background: #0b1118; }
+    .links a { padding: 7px 8px; background: #0b1118; border: 1px solid #263345; border-radius: 7px; }
+    details.links-wrap { margin-top: 12px; border: 1px solid #263345; border-radius: 8px; background: #0b1118; }
     details.links-wrap summary { cursor: pointer; padding: 9px 10px; color: var(--muted); font-size: 12px; font-weight: 800; }
     details.links-wrap .links { margin: 0; padding: 0 10px 10px; }
-    details.settings-group { margin-top: 12px; border: 1px solid #263345; border-radius: 6px; background: rgba(11,17,24,.76); }
+    details.settings-group { margin-top: 12px; border: 1px solid #263345; border-radius: 8px; background: rgba(11,17,24,.76); }
     details.settings-group summary { cursor: pointer; padding: 9px 10px; color: #f4f7ff; font-size: 12px; font-weight: 850; letter-spacing: .06em; text-transform: uppercase; }
     details.settings-group .settings-body { padding: 0 10px 10px; border-top: 1px solid #263345; }
     .preview { margin-top: 16px; }
@@ -3163,7 +3786,7 @@ function renderIndexHtml(): string {
     .preview-head button { width: auto; margin: 0; padding: 8px 10px; font-size: 12px; background: #1d2938; color: #f3f6fb; border: 1px solid #354457; }
     .meta { margin: 8px 0 10px; color: var(--muted); font-size: 12px; }
     .flight-list { display: grid; gap: 8px; }
-    .flight { border: 1px solid #2e3a4c; border-radius: 6px; padding: 9px 10px; background: #0b1118; }
+    .flight { border: 1px solid #2e3a4c; border-radius: 8px; padding: 9px 10px; background: #0b1118; }
     .flight-row { display: grid; grid-template-columns: 42px 1fr; gap: 10px; align-items: center; }
     .flight-logo { width: 42px; height: 42px; object-fit: contain; background: #000; border-radius: 4px; }
     .flight-logo.missing { display: grid; place-items: center; color: #7b8797; font-size: 10px; border: 1px solid #2e3a4c; background: #111923; }
@@ -3192,7 +3815,13 @@ function renderIndexHtml(): string {
     .emu-wrap { position: relative; width: min(100%, 1024px); aspect-ratio: 2 / 1; background: #000; }
     #ledCanvas { width: 100%; height: 100%; display: block; background: #000; }
     .emu-meta { margin-top: 10px; color: #aeb8c5; font-size: 12px; }
-    a { color: #2f6fbd; text-decoration: none; }
+    a { color: #6aa7ff; text-decoration: none; }
+    details.card { padding: 0; overflow: hidden; }
+    details.card > summary.section-head { margin: 0; padding: 14px; list-style: none; cursor: pointer; }
+    details.card > summary.section-head::-webkit-details-marker { display: none; }
+    details.card > summary.section-head::after { content: "›"; color: var(--muted); font-size: 24px; line-height: 1; transform: rotate(90deg); transition: transform .14s ease; }
+    details.card:not([open]) > summary.section-head::after { transform: rotate(0deg); }
+    details.card > .section-content { padding: 0 14px 14px; }
     a:hover { text-decoration: underline; }
     #map { height: 330px; min-height: 330px; margin-top: 12px; border: 1px solid #2c3849; border-radius: 8px; overflow: hidden; filter: saturate(.78) contrast(1.05); }
     @media (max-width: 820px) {
@@ -3219,11 +3848,11 @@ function renderIndexHtml(): string {
         <button id="save">Lagre alle innstillinger</button>
         <div id="status" class="status"></div>
       </div>
-      <section class="card place-card">
-        <div class="section-head">
+      <details class="card place-card" open>
+        <summary class="section-head">
           <h2>Sted og flyplass</h2>
-          <span class="hint" tabindex="0" data-tip="Dette bestemmer hvor skjermen leter etter fly, og hvilken flyplass som brukes til avgangs- og ankomsttavlen.">i</span>
-        </div>
+        </summary>
+        <div class="section-content">
         <p class="section-note">Sett nålen på kartet, velg radius rundt hjemmet ditt og hvilken flyplass tidstabellen skal vise.</p>
         <label for="label">Navn på stedet</label>
         <input id="label" autocomplete="off" placeholder="Home">
@@ -3249,63 +3878,95 @@ function renderIndexHtml(): string {
             <input id="lon" inputmode="decimal">
           </div>
         </div>
-        <div class="row">
-          <div>
-            <label for="radius">Søkeområde i km</label>
-            <input id="radius" type="number" min="1" max="250" step="1">
+        <div class="range-field">
+          <div class="range-label">
+            <label for="radius">Søkeområde</label>
+            <span class="range-value"><span id="radiusValue">10</span> km</span>
           </div>
+          <input id="radius" type="range" min="1" max="250" step="1">
         </div>
         <button id="locate" class="secondary">Bruk min posisjon</button>
         <section id="map" aria-label="Kart"></section>
-      </section>
-      <section class="card screen-card">
-        <div class="section-head">
-          <h2>Skjerm</h2>
-          <span class="hint" tabindex="0" data-tip="Dette styrer selve panelet: hvor sterkt det lyser på dag og natt, og hvor ofte skjermen henter config og flydata når den er aktiv. Av/på og dag/natt styres eksternt fra Homey.">i</span>
         </div>
+      </details>
+      <details class="card screen-card">
+        <summary class="section-head">
+          <h2>Skjerm</h2>
+        </summary>
+        <div class="section-content">
         <p class="section-note">De viktigste displayvalgene. Sjeldnere tidsvalg ligger under avansert.</p>
         <div class="field-help">Skjermen styres eksternt fra Homey. Her ser du bare status og lagrer nivåene for dag og natt.</div>
         <div class="field-help" id="screenStateSummary">Skjermstatus: aktiv · lysmodus: dag</div>
         <div class="field-help" id="screenStateTimestamps">Sist aktivert: aldri · sist deaktivert: aldri · sist byttet lysmodus: aldri</div>
-        <div class="field-help" id="soundTestStatus">Lydtest: aldri</div>
-        <button id="soundTest" class="secondary" type="button">Test lyd nå</button>
-        <label for="audioVolumePercent">Lydvolum</label>
-        <input id="audioVolumePercent" type="range" min="0" max="100" step="1">
-        <div class="field-help">Testlyd og PA-varsel spilles med <span id="audioVolumeValue">35</span>%.</div>
         <div class="row">
           <div>
-            <label for="deviceBrightness">Lysstyrke dag</label>
-            <input id="deviceBrightness" type="number" min="1" max="100" step="1">
+            <label for="displayMode">Displaymodus</label>
+            <select id="displayMode">
+              <option value="flight">Flight display</option>
+              <option value="clock">Klokke</option>
+            </select>
+            <div class="field-help">Kan også styres eksternt fra Homey med eget POST-endepunkt.</div>
           </div>
           <div>
-            <label for="pollSeconds">Hent nye flydata hvert</label>
-            <input id="pollSeconds" type="number" min="30" max="900" step="5">
-            <div class="field-help">Sekunder mellom hver henting når skjermen er aktiv.</div>
+            <label for="clockColor">Klokkefarge</label>
+            <input id="clockColor" type="color">
+            <div class="field-help">Global farge for alle klokkeelementer.</div>
           </div>
+        </div>
+        <button id="screenToggle" class="secondary" type="button">Slå av skjerm</button>
+        <div class="field-help" id="soundTestStatus">Lydtest: aldri</div>
+        <button id="soundTest" class="secondary" type="button">Test lyd nå</button>
+        <div class="range-label">
+          <label for="audioVolumePercent">Lydvolum</label>
+          <span class="range-value"><span id="audioVolumeValue">35</span>%</span>
+        </div>
+        <input id="audioVolumePercent" type="range" min="0" max="100" step="1">
+        <div class="field-help">Gjelder testlyd og PA-varsel.</div>
+        <div class="range-field">
+          <div class="range-label">
+            <label for="deviceBrightness">Lysstyrke dag</label>
+            <span class="range-value"><span id="deviceBrightnessValue">80</span>%</span>
+          </div>
+          <input id="deviceBrightness" type="range" min="1" max="100" step="1">
+        </div>
+        <div class="range-field">
+          <div class="range-label">
+            <label for="pollSeconds">Hent nye flydata</label>
+            <span class="range-value"><span id="pollSecondsValue">90</span> s</span>
+          </div>
+          <input id="pollSeconds" type="range" min="30" max="900" step="5">
+          <div class="field-help">Sekunder mellom hver henting når skjermen er aktiv.</div>
         </div>
         <details class="settings-group">
           <summary>Avansert skjerm</summary>
           <div class="settings-body">
             <div class="row">
               <div>
-                <label for="configRefreshSeconds">Sjekk innstillinger hvert</label>
-                <input id="configRefreshSeconds" type="number" min="60" max="3600" step="30">
+                <div class="range-label">
+                  <label for="configRefreshSeconds">Sjekk innstillinger</label>
+                  <span class="range-value"><span id="configRefreshSecondsValue">300</span> s</span>
+                </div>
+                <input id="configRefreshSeconds" type="range" min="60" max="3600" step="30">
                 <div class="field-help">Hvor ofte skjermen spør Worker om nye innstillinger.</div>
               </div>
               <div>
-                <label for="nightBrightness">Lysstyrke natt</label>
-                <input id="nightBrightness" type="number" min="0" max="100" step="1">
+                <div class="range-label">
+                  <label for="nightBrightness">Lysstyrke natt</label>
+                  <span class="range-value"><span id="nightBrightnessValue">0</span>%</span>
+                </div>
+                <input id="nightBrightness" type="range" min="0" max="100" step="1">
                 <div class="field-help">Brukes når Homey setter lysmodus til natt.</div>
               </div>
             </div>
           </div>
         </details>
-      </section>
-      <section class="card flight-card">
-        <div class="section-head">
-          <h2>Fly</h2>
-          <span class="hint" tabindex="0" data-tip="Dette gjelder skjermen som viser fly i nærheten eller et flightnummer du følger. Follow-visningen bytter automatisk mellom live tall og Flying over.">i</span>
         </div>
+      </details>
+      <details class="card flight-card">
+        <summary class="section-head">
+          <h2>Fly</h2>
+        </summary>
+        <div class="section-content">
         <p class="section-note">Live flyvisning alternerer mellom målinger i 10 sekunder og Flying over i 5 sekunder. Follow-flight viser i tillegg status før avgang og Landed når flyet har landet.</p>
         <div class="toggle-row">
           <div>
@@ -3314,19 +3975,69 @@ function renderIndexHtml(): string {
           </div>
           <input id="airspaceMonitoringEnabled" type="checkbox">
         </div>
-        <label for="liveDataSource">Kilde for live flydata</label>
-        <select id="liveDataSource">
-          <option value="fr24">Flightradar24</option>
-          <option value="opensky">OpenSky Network</option>
-        </select>
-        <div class="field-help">OpenSky er samme posisjonskilde som originalprosjektet. Den gir færre rute-/navnedata, men bruker ikke FR24-credits.</div>
+        <details class="settings-group">
+          <summary>Flytyper i overvåkning</summary>
+          <div class="settings-body">
+            <div class="field-help">Gjelder bare automatisk fly-i-radius. Follow-flight viser fortsatt flighten du eksplisitt følger.</div>
+            <div class="category-grid" id="aircraftCategoryGrid">
+              <div class="category-option">
+                <input id="catP" type="checkbox" data-aircraft-category="P">
+                <label for="catP">P Passenger<span>Kommersielle passasjerfly</span></label>
+              </div>
+              <div class="category-option">
+                <input id="catC" type="checkbox" data-aircraft-category="C">
+                <label for="catC">C Cargo<span>Rene fraktfly</span></label>
+              </div>
+              <div class="category-option">
+                <input id="catM" type="checkbox" data-aircraft-category="M">
+                <label for="catM">M Military and government<span>Militaer eller offentlig operator</span></label>
+              </div>
+              <div class="category-option">
+                <input id="catJ" type="checkbox" data-aircraft-category="J">
+                <label for="catJ">J Business jets<span>Store private jetfly</span></label>
+              </div>
+              <div class="category-option">
+                <input id="catT" type="checkbox" data-aircraft-category="T">
+                <label for="catT">T General aviation<span>Privat, ambulanse, skole, survey og kalibrering</span></label>
+              </div>
+              <div class="category-option">
+                <input id="catH" type="checkbox" data-aircraft-category="H">
+                <label for="catH">H Helicopters<span>Helikoptre</span></label>
+              </div>
+              <div class="category-option">
+                <input id="catB" type="checkbox" data-aircraft-category="B">
+                <label for="catB">B Lighter than air<span>Luftskip og lignende</span></label>
+              </div>
+              <div class="category-option">
+                <input id="catG" type="checkbox" data-aircraft-category="G">
+                <label for="catG">G Gliders<span>Seilfly</span></label>
+              </div>
+              <div class="category-option">
+                <input id="catD" type="checkbox" data-aircraft-category="D">
+                <label for="catD">D Drones<span>UAV og droner</span></label>
+              </div>
+              <div class="category-option">
+                <input id="catV" type="checkbox" data-aircraft-category="V">
+                <label for="catV">V Ground vehicles<span>Kjoeretoy med transponder</span></label>
+              </div>
+              <div class="category-option">
+                <input id="catO" type="checkbox" data-aircraft-category="O">
+                <label for="catO">O Other<span>Alt som ikke passer andre steder</span></label>
+              </div>
+              <div class="category-option">
+                <input id="catN" type="checkbox" data-aircraft-category="N">
+                <label for="catN">N Non categorized<span>Ikke kategorisert i FR24-databasen</span></label>
+              </div>
+            </div>
+          </div>
+        </details>
         <div class="toggle-row">
           <label for="followEnabled">Følg flightnummer</label>
           <input id="followEnabled" type="checkbox">
         </div>
-        <label for="followFlights">Flightnummer</label>
+        <label for="followFlights" id="followFlightsLabel">Flightnummer</label>
         <input id="followFlights" autocomplete="off" placeholder="SK4673, DY1304, DOC45">
-        <div class="field-help">La stå av for å vise fly i området. Skru på for å følge bestemte fly.</div>
+        <div class="field-help" id="followFlightsHelp">La stå av for å vise fly i området. Skru på for å følge bestemte fly.</div>
         <details class="settings-group">
           <summary>Avansert flyvisning</summary>
           <div class="settings-body">
@@ -3377,13 +4088,19 @@ function renderIndexHtml(): string {
             <div class="subhead">Oppførsel</div>
             <div class="row">
               <div>
-                <label for="cycleSeconds">Bytt fly etter sekunder</label>
-                <input id="cycleSeconds" type="number" min="2" max="30" step="1">
+                <div class="range-label">
+                  <label for="cycleSeconds">Bytt fly</label>
+                  <span class="range-value"><span id="cycleSecondsValue">5</span> s</span>
+                </div>
+                <input id="cycleSeconds" type="range" min="2" max="30" step="1">
                 <div class="field-help">Gjelder når flere fly vises samtidig.</div>
               </div>
               <div>
-                <label for="scrollSpeed">Scrollhastighet</label>
-                <input id="scrollSpeed" type="number" min="2" max="30" step="1">
+                <div class="range-label">
+                  <label for="scrollSpeed">Scrollhastighet</label>
+                  <span class="range-value"><span id="scrollSpeedValue">9</span> px/s</span>
+                </div>
+                <input id="scrollSpeed" type="range" min="2" max="30" step="1">
                 <div class="field-help">Hvor fort lang tekst beveger seg.</div>
               </div>
             </div>
@@ -3409,35 +4126,52 @@ function renderIndexHtml(): string {
                 <label for="progressColor">Bytte-linje</label>
                 <input id="progressColor" type="color">
               </div>
+              <div>
+                <label for="routeProgressColor">Flyprogress</label>
+                <input id="routeProgressColor" type="color">
+              </div>
             </div>
           </div>
         </details>
-      </section>
-      <section class="card timetable-card">
-        <div class="section-head">
-          <h2>Tidstabell</h2>
-          <span class="hint" tabindex="0" data-tip="Dette gjelder skjermen som vises når det ikke er fly i området. Data kommer fra Avinor og bruker ikke FR24-credits.">i</span>
         </div>
+      </details>
+      <details class="card timetable-card">
+        <summary class="section-head">
+          <h2>Tidstabell</h2>
+        </summary>
+        <div class="section-content">
         <p class="section-note">Viser avganger og ankomster fra valgt flyplass. Tavlen ruller automatisk hvis det er mer enn fire rader.</p>
         <div class="row">
           <div>
-            <label for="timetableCycleSeconds">Hold hver tavleside i sekunder</label>
-            <input id="timetableCycleSeconds" type="number" min="2" max="60" step="1">
+            <div class="range-label">
+              <label for="timetableCycleSeconds">Hold hver tavleside</label>
+              <span class="range-value"><span id="timetableCycleSecondsValue">7</span> s</span>
+            </div>
+            <input id="timetableCycleSeconds" type="range" min="2" max="60" step="1">
           </div>
           <div>
-            <label for="timetableScrollSpeed">Rullehastighet</label>
-            <input id="timetableScrollSpeed" type="number" min="4" max="40" step="1">
+            <div class="range-label">
+              <label for="timetableScrollSpeed">Rullehastighet</label>
+              <span class="range-value"><span id="timetableScrollSpeedValue">18</span> px/s</span>
+            </div>
+            <input id="timetableScrollSpeed" type="range" min="4" max="40" step="1">
           </div>
         </div>
         <div class="row">
           <div>
-            <label for="timetableItemCount">Antall fly på tavlen</label>
-            <input id="timetableItemCount" type="number" min="4" max="40" step="4">
+            <div class="range-label">
+              <label for="timetableItemCount">Antall fly på tavlen</label>
+              <span class="range-value"><span id="timetableItemCountValue">8</span></span>
+            </div>
+            <input id="timetableItemCount" type="range" min="4" max="40" step="4">
             <div class="field-help">Skjermen viser fire rader om gangen.</div>
           </div>
           <div>
-            <label for="avinorWindowHours">Se så mange timer frem</label>
-            <input id="avinorWindowHours" type="number" min="1" max="24" step="1">
+            <div class="range-label">
+              <label for="avinorWindowHours">Se fremover</label>
+              <span class="range-value"><span id="avinorWindowHoursValue">4</span> t</span>
+            </div>
+            <input id="avinorWindowHours" type="range" min="1" max="24" step="1">
           </div>
         </div>
         <div class="subhead">Farger for tidstabell</div>
@@ -3463,7 +4197,8 @@ function renderIndexHtml(): string {
             <input id="timetableCanceledColor" type="color">
           </div>
         </div>
-      </section>
+        </div>
+      </details>
       <details class="links-wrap">
         <summary>Avansert: API-lenker</summary>
         <div class="links">
@@ -3471,26 +4206,30 @@ function renderIndexHtml(): string {
           <a href="/api/device-config" target="_blank">Device config</a>
           <a href="/api/logo-status" target="_blank">Logo status</a>
           <a href="/api/screen-state" target="_blank">Screen state</a>
+          <a href="/api/display-mode" target="_blank">Display mode</a>
           <a href="/api/brightness-mode" target="_blank">Brightness mode</a>
           <a href="/api/sound-test" target="_blank">Sound test</a>
           <a href="/api/flights" target="_blank">Flights</a>
           <a href="/api/display" target="_blank">Display</a>
+          <a href="/pixel-editor" target="_blank">Pixel editor</a>
           <a href="/api/avinor-board" target="_blank">Avinor board</a>
           <a href="/api/aviationstack?flight=TP764" target="_blank">Aviationstack raw</a>
         </div>
       </details>
-      <section class="preview card" aria-label="Display preview">
-        <div class="preview-head">
+      <details class="preview card" aria-label="Display preview">
+        <summary class="preview-head section-head">
           <h2>Display-data</h2>
           <div class="preview-actions">
             <button id="refreshAvinor" type="button">Hent Avinor</button>
             <button id="refresh" type="button">Hent data</button>
           </div>
+        </summary>
+        <div class="section-content">
+          <div id="previewMeta" class="meta"></div>
+          <div id="flightList" class="flight-list"></div>
+          <div id="avinorRaw" class="raw-board"></div>
         </div>
-        <div id="previewMeta" class="meta"></div>
-        <div id="flightList" class="flight-list"></div>
-        <div id="avinorRaw" class="raw-board"></div>
-      </section>
+      </details>
     </aside>
     <div class="workbench">
       <section class="emulator" aria-label="LED matrix emulator">
@@ -3529,11 +4268,14 @@ function renderIndexHtml(): string {
       lat: document.querySelector("#lat"),
       lon: document.querySelector("#lon"),
       radius: document.querySelector("#radius"),
-      homeAirport: document.querySelector("#homeAirport"),
-      airspaceMonitoringEnabled: document.querySelector("#airspaceMonitoringEnabled"),
-      liveDataSource: document.querySelector("#liveDataSource"),
-      followEnabled: document.querySelector("#followEnabled"),
+	      radiusValue: document.querySelector("#radiusValue"),
+	      homeAirport: document.querySelector("#homeAirport"),
+	      airspaceMonitoringEnabled: document.querySelector("#airspaceMonitoringEnabled"),
+	      aircraftCategoryInputs: Array.from(document.querySelectorAll("[data-aircraft-category]")),
+	      followEnabled: document.querySelector("#followEnabled"),
       followFlights: document.querySelector("#followFlights"),
+      followFlightsLabel: document.querySelector("#followFlightsLabel"),
+      followFlightsHelp: document.querySelector("#followFlightsHelp"),
       aviationstackStatus: document.querySelector("#aviationstackStatus"),
       altitudeUnit: document.querySelector("#altitudeUnit"),
       speedUnit: document.querySelector("#speedUnit"),
@@ -3541,25 +4283,39 @@ function renderIndexHtml(): string {
       verticalRateUnit: document.querySelector("#verticalRateUnit"),
       screenStateSummary: document.querySelector("#screenStateSummary"),
       screenStateTimestamps: document.querySelector("#screenStateTimestamps"),
+      screenToggle: document.querySelector("#screenToggle"),
+      displayMode: document.querySelector("#displayMode"),
+      clockColor: document.querySelector("#clockColor"),
       soundTestStatus: document.querySelector("#soundTestStatus"),
       soundTest: document.querySelector("#soundTest"),
       audioVolumePercent: document.querySelector("#audioVolumePercent"),
       audioVolumeValue: document.querySelector("#audioVolumeValue"),
       deviceBrightness: document.querySelector("#deviceBrightness"),
+      deviceBrightnessValue: document.querySelector("#deviceBrightnessValue"),
       nightBrightness: document.querySelector("#nightBrightness"),
+      nightBrightnessValue: document.querySelector("#nightBrightnessValue"),
       pollSeconds: document.querySelector("#pollSeconds"),
+      pollSecondsValue: document.querySelector("#pollSecondsValue"),
       cycleSeconds: document.querySelector("#cycleSeconds"),
+      cycleSecondsValue: document.querySelector("#cycleSecondsValue"),
       timetableCycleSeconds: document.querySelector("#timetableCycleSeconds"),
+      timetableCycleSecondsValue: document.querySelector("#timetableCycleSecondsValue"),
       timetableItemCount: document.querySelector("#timetableItemCount"),
+      timetableItemCountValue: document.querySelector("#timetableItemCountValue"),
       avinorWindowHours: document.querySelector("#avinorWindowHours"),
+      avinorWindowHoursValue: document.querySelector("#avinorWindowHoursValue"),
       timetableScrollSpeed: document.querySelector("#timetableScrollSpeed"),
+      timetableScrollSpeedValue: document.querySelector("#timetableScrollSpeedValue"),
       scrollSpeed: document.querySelector("#scrollSpeed"),
+      scrollSpeedValue: document.querySelector("#scrollSpeedValue"),
       configRefreshSeconds: document.querySelector("#configRefreshSeconds"),
+      configRefreshSecondsValue: document.querySelector("#configRefreshSecondsValue"),
       airlineColor: document.querySelector("#airlineColor"),
       routeColor: document.querySelector("#routeColor"),
       aircraftColor: document.querySelector("#aircraftColor"),
       contextColor: document.querySelector("#contextColor"),
       progressColor: document.querySelector("#progressColor"),
+      routeProgressColor: document.querySelector("#routeProgressColor"),
       timetableHeaderColor: document.querySelector("#timetableHeaderColor"),
       timetableDataColor: document.querySelector("#timetableDataColor"),
       timetableTimeColor: document.querySelector("#timetableTimeColor"),
@@ -3594,18 +4350,47 @@ function renderIndexHtml(): string {
     let flightCycleStartedAt = performance.now();
     let tickerAnimationFrame = null;
     let tickerStartedAt = performance.now();
+    let clockAnimationTimer = null;
     let emulatorPollTimer = null;
     let emulatorPolling = false;
     let emulatorPollInFlight = false;
     let formIsDirty = false;
-    let screenState = { active: true, brightnessMode: "day", lastActivatedAt: null, lastDeactivatedAt: null, lastBrightnessModeChangedAt: null, updatedAt: null, source: null };
-    let soundState = { testNonce: 0, lastTriggeredAt: null, source: null };
-    const logoCache = new Map();
+	    let screenState = { active: true, brightnessMode: "day", lastActivatedAt: null, lastDeactivatedAt: null, lastBrightnessModeChangedAt: null, updatedAt: null, source: null };
+	    let soundState = { testNonce: 0, lastTriggeredAt: null, source: null };
+	    const logoCache = new Map();
+	    const adminTokenStorageKey = "flightDisplayAdminToken";
+	    const defaultAircraftCategories = ["P", "C", "M", "J", "H", "B", "G", "D", "V", "O", "N"];
 
     init();
 
+    function adminToken() {
+      return localStorage.getItem(adminTokenStorageKey) || "";
+    }
+
+    function adminHeaders(headers) {
+      const merged = Object.assign({}, headers || {});
+      const token = adminToken();
+      if (token) merged["X-Flight-Admin-Token"] = token;
+      return merged;
+    }
+
+    async function apiFetch(url, options) {
+      const nextOptions = Object.assign({}, options || {});
+      nextOptions.headers = adminHeaders(nextOptions.headers);
+      let res = await fetch(url, nextOptions);
+      if (res.status !== 401) return res;
+
+      const token = prompt("Admin-token kreves for API-kall:");
+      if (!token) return res;
+      localStorage.setItem(adminTokenStorageKey, token.trim());
+      nextOptions.headers = adminHeaders(options && options.headers);
+      res = await fetch(url, nextOptions);
+      if (res.status === 401) localStorage.removeItem(adminTokenStorageKey);
+      return res;
+    }
+
     async function init() {
-      const res = await fetch("/api/config");
+      const res = await apiFetch("/api/config");
       const config = await res.json();
       setForm(config);
       map = L.map("map").setView([config.lat, config.lon], 11);
@@ -3635,6 +4420,7 @@ function renderIndexHtml(): string {
         input.addEventListener("change", markDirty);
       });
       els.audioVolumePercent.addEventListener("input", updateAudioVolumeUi);
+      bindRangeValues();
       renderEmulator();
     }
 
@@ -3654,11 +4440,15 @@ function renderIndexHtml(): string {
       els.lon.value = Number(config.lon).toFixed(6);
       els.radius.value = config.radiusKm || 10;
       els.homeAirport.value = config.homeAirportIata || "OSL";
-      const follow = config.follow || {};
-      els.airspaceMonitoringEnabled.checked = device.airspaceMonitoringEnabled !== false;
-      els.liveDataSource.value = device.liveDataSource || "fr24";
-      els.followEnabled.checked = follow.enabled === true;
+	      const follow = config.follow || {};
+	      els.airspaceMonitoringEnabled.checked = device.airspaceMonitoringEnabled !== false;
+	      const allowedCategories = Array.isArray(device.allowedAircraftCategories) ? device.allowedAircraftCategories : defaultAircraftCategories;
+	      els.aircraftCategoryInputs.forEach((input) => {
+	        input.checked = allowedCategories.includes(input.dataset.aircraftCategory);
+	      });
+	      els.followEnabled.checked = follow.enabled === true;
       els.followFlights.value = Array.isArray(follow.flights) ? follow.flights.join(", ") : "";
+      updateFollowInputUi();
       els.aviationstackStatus.textContent = config.aviationstackApiKeyConfigured
         ? "Aviationstack: Worker secret AVIATIONSTACK_API_KEY er satt"
         : "Aviationstack: legg inn AVIATIONSTACK_API_KEY under Cloudflare Worker Secrets";
@@ -3668,6 +4458,9 @@ function renderIndexHtml(): string {
       els.trackUnit.value = followUnits.track || "deg";
       els.verticalRateUnit.value = followUnits.verticalRate || "fpm";
       els.deviceBrightness.value = device.brightness ?? 80;
+      els.displayMode.value = device.displayMode || "flight";
+      displayMode = device.displayMode || displayMode;
+      els.clockColor.value = device.clockColor || "#ff2a23";
       els.audioVolumePercent.value = device.audioVolumePercent ?? 35;
       updateAudioVolumeUi();
       els.nightBrightness.value = night.brightness ?? 0;
@@ -3685,6 +4478,7 @@ function renderIndexHtml(): string {
       els.aircraftColor.value = colors.aircraft || "#f4f7ff";
       els.contextColor.value = colors.context || "#f4f7ff";
       els.progressColor.value = colors.progress || "#f7b500";
+      els.routeProgressColor.value = colors.routeProgress || "#00d46a";
       const timetableColors = device.timetableColors || {};
       els.timetableHeaderColor.value = timetableColors.header || "#f7b500";
       els.timetableDataColor.value = timetableColors.data || "#f4f7ff";
@@ -3692,6 +4486,7 @@ function renderIndexHtml(): string {
       els.timetableNewTimeColor.value = timetableColors.newTime || "#f7b500";
       els.timetableCanceledColor.value = timetableColors.canceled || "#ff3b30";
       els.timezone.value = device.timezone || "Europe/Oslo";
+      syncRangeValues();
       updateScreenStateUi();
       updateSoundTestUi();
     }
@@ -3711,11 +4506,14 @@ function renderIndexHtml(): string {
             .filter(Boolean)
             .slice(0, 3)
         },
-        device: {
-          enabled: true,
-          airspaceMonitoringEnabled: els.airspaceMonitoringEnabled.checked,
-          liveDataSource: els.liveDataSource.value,
-          brightness: Number(els.deviceBrightness.value),
+	        device: {
+	          enabled: true,
+          displayMode: els.displayMode.value,
+	          airspaceMonitoringEnabled: els.airspaceMonitoringEnabled.checked,
+	          allowedAircraftCategories: els.aircraftCategoryInputs
+	            .filter((input) => input.checked)
+	            .map((input) => input.dataset.aircraftCategory),
+	          brightness: Number(els.deviceBrightness.value),
           audioVolumePercent: Number(els.audioVolumePercent.value),
           pollSeconds: Number(els.pollSeconds.value),
           displayCycleSeconds: Number(els.cycleSeconds.value),
@@ -3737,8 +4535,10 @@ function renderIndexHtml(): string {
             route: els.routeColor.value,
             aircraft: els.aircraftColor.value,
             context: els.contextColor.value,
-            progress: els.progressColor.value
+            progress: els.progressColor.value,
+            routeProgress: els.routeProgressColor.value
           },
+          clockColor: els.clockColor.value,
           timetableColors: {
             header: els.timetableHeaderColor.value,
             data: els.timetableDataColor.value,
@@ -3769,7 +4569,7 @@ function renderIndexHtml(): string {
       els.status.className = "status";
       els.status.textContent = "Lagrer...";
       const headers = { "Content-Type": "application/json" };
-      const res = await fetch("/api/config", {
+      const res = await apiFetch("/api/config", {
         method: "POST",
         headers,
         body: JSON.stringify(readForm())
@@ -3792,7 +4592,7 @@ function renderIndexHtml(): string {
       els.soundTest.disabled = true;
       els.soundTestStatus.textContent = "Lydtest: sender...";
       try {
-        const res = await fetch("/api/sound-test", {
+        const res = await apiFetch("/api/sound-test", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ source: "web" })
@@ -3810,6 +4610,29 @@ function renderIndexHtml(): string {
       }
     });
 
+    els.screenToggle.addEventListener("click", async () => {
+      const nextActive = !(screenState && screenState.active !== false);
+      els.screenToggle.disabled = true;
+      els.screenToggle.textContent = nextActive ? "Slår på..." : "Slår av...";
+      try {
+        const res = await apiFetch("/api/admin/screen-state/toggle", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" }
+        });
+        const json = await res.json();
+        if (!res.ok) {
+          throw new Error(json && json.error ? json.error : "Kunne ikke endre skjermstatus");
+        }
+        screenState = json;
+        updateScreenStateUi();
+        renderEmulator();
+      } catch (error) {
+        els.screenStateSummary.textContent = "Skjermstatus kunne ikke endres";
+      } finally {
+        els.screenToggle.disabled = false;
+      }
+    });
+
     els.locate.addEventListener("click", () => {
       if (!navigator.geolocation) return;
       navigator.geolocation.getCurrentPosition((position) => {
@@ -3821,16 +4644,28 @@ function renderIndexHtml(): string {
       });
     });
 
-    els.refresh.addEventListener("click", loadPreview);
-    els.refreshAvinor.addEventListener("click", loadAvinorRawOnly);
-      els.emuPolling.addEventListener("click", () => setEmulatorPolling(!emulatorPolling));
+    els.refresh.addEventListener("click", (event) => {
+      event.stopPropagation();
+      loadPreview();
+    });
+    els.refreshAvinor.addEventListener("click", (event) => {
+      event.stopPropagation();
+      loadAvinorRawOnly();
+    });
+    els.emuPolling.addEventListener("click", () => setEmulatorPolling(!emulatorPolling));
     els.emuSource.addEventListener("change", () => {
+      resetFlightCycle();
+      renderEmulator();
+    });
+    els.displayMode.addEventListener("change", () => {
+      updateScreenStateUi();
       resetFlightCycle();
       renderEmulator();
     });
     els.imageUpload.addEventListener("change", handleImageUpload);
     [
       els.deviceBrightness,
+      els.clockColor,
       els.scrollSpeed,
       els.timetableScrollSpeed,
       els.altitudeUnit,
@@ -3842,6 +4677,8 @@ function renderIndexHtml(): string {
       els.aircraftColor,
       els.contextColor,
       els.progressColor,
+      els.routeProgressColor,
+      els.displayMode,
       els.timetableHeaderColor,
       els.timetableDataColor,
       els.timetableTimeColor,
@@ -3893,16 +4730,9 @@ function renderIndexHtml(): string {
       els.flightList.innerHTML = "";
       els.avinorRaw.innerHTML = "";
       try {
-        const [res, avinorRes] = await Promise.all([
-          fetch("/api/display?ts=" + Date.now()),
-          fetch("/api/avinor-board?ts=" + Date.now())
-        ]);
+        const res = await apiFetch("/api/display?ts=" + Date.now());
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Kunne ikke hente display-data");
-        const avinorData = await avinorRes.json();
-        if (avinorRes.ok) {
-          renderAvinorRaw(avinorData);
-        }
         const flights = Array.isArray(data.flights) ? data.flights : [];
         displayMode = data.mode || (flights.length ? "nearby" : "idle");
         screenState = data.screenState || screenState;
@@ -3913,7 +4743,7 @@ function renderIndexHtml(): string {
         currentIdleScreenIndex = 0;
         resetFlightCycle();
         renderEmulator();
-        const liveSource = data.device?.liveDataSource === "opensky" ? "OpenSky" : "FR24";
+        const liveSource = "FR24";
         const sourceError = data.liveSourceStatus && data.liveSourceStatus.ok === false ? data.liveSourceStatus.error : "";
         const liveState = data.airspaceMonitoring === false
           ? "live av"
@@ -3923,6 +4753,11 @@ function renderIndexHtml(): string {
         els.previewMeta.textContent = "Oppdatert " + new Date(data.updatedAt).toLocaleTimeString() + " · " + flights.length + " treff · " + displayMode + " · " + liveState;
         if (sourceError) {
           els.previewMeta.textContent += " · " + sourceError;
+        }
+        if (displayMode === "clock") {
+          const timezone = data.clock && data.clock.timezone ? data.clock.timezone : (els.timezone.value || "Europe/Oslo");
+          els.flightList.innerHTML = '<div class="empty">Klokkemodus aktiv. Emulatoren viser Gorgy-inspirert klokke i 63 x 63 px med farge ' + escapeHtml(els.clockColor.value) + ' og tidssone ' + escapeHtml(timezone) + '.</div>';
+          return;
         }
         if (!flights.length) {
           if (idleScreens.length) {
@@ -3954,9 +4789,22 @@ function renderIndexHtml(): string {
             : '<div class="flight-logo missing"></div>';
           return '<article class="flight"><div class="flight-row">' + logo + '<div><strong>' + title + '</strong><span>' + escapeHtml(line) + '</span></div></div></article>';
         }).join("");
+        void loadAvinorPreview();
       } catch (error) {
         els.previewMeta.textContent = "";
         els.flightList.innerHTML = '<div class="empty error">' + escapeHtml(error.message || "Ukjent feil") + '</div>';
+      }
+    }
+
+    async function loadAvinorPreview() {
+      try {
+        const avinorRes = await apiFetch("/api/avinor-board?ts=" + Date.now());
+        const avinorData = await avinorRes.json();
+        if (avinorRes.ok) {
+          renderAvinorRaw(avinorData);
+        }
+      } catch {
+        els.avinorRaw.innerHTML = "";
       }
     }
 
@@ -3965,7 +4813,7 @@ function renderIndexHtml(): string {
       els.flightList.innerHTML = "";
       els.avinorRaw.innerHTML = "";
       try {
-        const avinorRes = await fetch("/api/avinor-board?ts=" + Date.now());
+        const avinorRes = await apiFetch("/api/avinor-board?ts=" + Date.now());
         const avinorData = await avinorRes.json();
         if (!avinorRes.ok) throw new Error(avinorData.error || "Kunne ikke hente Avinor-data");
         renderAvinorRaw(avinorData);
@@ -4084,6 +4932,12 @@ function renderIndexHtml(): string {
       }
 
       if (els.emuSource.value === "live") {
+        if (els.displayMode.value === "clock" || displayMode === "clock") {
+          drawClockLayout(sourceCtx);
+          applyDisplayBrightness(sourceCtx);
+          drawLedPanel(ctx, source);
+          return;
+        }
         const flight = displayFlights[currentFlightIndex] || displayFlights[0];
         if (flight) {
           drawLiveFlightLayout(sourceCtx, flight);
@@ -4217,13 +5071,15 @@ function renderIndexHtml(): string {
       const colors = getLineColors();
       const route = (flight.lines && flight.lines.route) || [flight.from, flight.to].filter(Boolean).join("-");
       const detailPhase = getFollowDetailPhase();
+      const detailPhaseStartedAt = getFollowDetailPhaseStartedAt();
       const etaLine = flight.arrTime ? "ETA:" + flight.arrTime : "";
-      const topLine = detailPhase === "location" && etaLine ? etaLine : flight.flt || flight.cs || "";
-      const secondLine = route || flight.air || flight.airCode || "";
+      const airlineLine = (flight.lines && flight.lines.airline) || flight.air || flight.airCode || "";
+      const topLine = detailPhase === "location" && airlineLine ? airlineLine : flight.flt || flight.cs || "";
+      const secondLine = detailPhase === "location" && etaLine ? etaLine : route || airlineLine || "";
       const thirdLine = flight.ac || flight.reg || "";
-      drawDotText(ctx, topLine, 50, 5, colors.airline, { maxWidth: 75 });
-      drawDotText(ctx, secondLine, 50, 19, colors.route, { maxWidth: 75 });
-      drawDotText(ctx, thirdLine, 50, 33, colors.aircraft, { maxWidth: 75 });
+      drawTickerLineBoxed(ctx, topLine, 50, 5, colors.airline, 75, detailPhaseStartedAt);
+      drawTickerLineBoxed(ctx, secondLine, 50, 19, colors.route, 75, detailPhaseStartedAt);
+      drawTickerLineBoxed(ctx, thirdLine, 50, 33, colors.aircraft, 75, detailPhaseStartedAt);
       if (flight.followStatus) {
         const statusColor = flight.followStatus.color === "landed" ? "#00d46a" : getTimetableColors().header;
         drawTickerLine(ctx, flight.followStatus.text || "", 3, 47, statusColor, 122);
@@ -4248,9 +5104,139 @@ function renderIndexHtml(): string {
       drawTickerLine(ctx, secondMetricLine, 3, 56, colors.context, 122);
     }
 
+    function drawClockLayout(ctx) {
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, 128, 64);
+
+      const clockX = 32;
+      const clockY = 0;
+      const clockSize = 63;
+      const centerX = clockX + Math.floor(clockSize / 2);
+      const centerY = clockY + Math.floor(clockSize / 2);
+      const color = getClockColor();
+      const time = getClockTimeParts();
+      const outerDots = buildClockCirclePoints(centerX, centerY, 31, 12);
+      const secondDots = buildClockSecondPoints(centerX, centerY, 27);
+      const activeSecondDots = time.second === 0 ? 0 : time.second === 59 ? secondDots.length : time.second;
+
+      ensureClockAnimation();
+      ctx.fillStyle = color;
+      outerDots.forEach((point) => ctx.fillRect(point.x, point.y, 1, 1));
+      secondDots.slice(0, activeSecondDots).forEach((point) => ctx.fillRect(point.x, point.y, 1, 1));
+
+      drawClockTimeText(ctx, time.hour + ":" + time.minute, Math.round(centerX), Math.round(centerY), color);
+      els.emuMeta.textContent = "Clock layout: 63 x 63 px Gorgy-inspirert klokke, sentrert i 128 x 64 · sekund " + time.second + ".";
+    }
+
+    function getClockColor() {
+      return els.clockColor.value || "#ff2a23";
+    }
+
+    function getClockTimeParts() {
+      const now = new Date();
+      const parts = new Intl.DateTimeFormat("en-GB", {
+        timeZone: els.timezone.value || "Europe/Oslo",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false
+      }).formatToParts(now);
+      return {
+        hour: parts.find((part) => part.type === "hour")?.value || "00",
+        minute: parts.find((part) => part.type === "minute")?.value || "00",
+        second: Number(parts.find((part) => part.type === "second")?.value || "0")
+      };
+    }
+
+    function ensureClockAnimation() {
+      if (clockAnimationTimer) return;
+      const tick = () => {
+        clockAnimationTimer = null;
+        if (els.emuSource.value !== "live" || (els.displayMode.value !== "clock" && displayMode !== "clock")) return;
+        renderEmulator();
+        ensureClockAnimation();
+      };
+      clockAnimationTimer = setTimeout(tick, millisecondsUntilNextSecond());
+    }
+
+    function millisecondsUntilNextSecond() {
+      const now = new Date();
+      return Math.max(50, 1000 - now.getMilliseconds() + 20);
+    }
+
+    function buildClockCirclePoints(centerX, centerY, radius, count) {
+      const points = [];
+      const seen = new Set();
+      for (let index = 0; index < count; index += 1) {
+        const angle = (-Math.PI / 2) + (index / count) * Math.PI * 2;
+        const x = Math.round(centerX + Math.cos(angle) * radius);
+        const y = Math.round(centerY + Math.sin(angle) * radius);
+        const key = x + ":" + y;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        points.push({ x, y });
+      }
+      return points;
+    }
+
+    function buildClockSecondPoints(centerX, centerY, radius) {
+      const outline = buildMidpointCircleOutline(centerX, centerY, radius)
+        .sort((a, b) => a.angle - b.angle);
+      const points = [];
+      const offset = outline.findIndex((point) => point.x === centerX && point.y === centerY - radius);
+      const ordered = offset > 0 ? outline.slice(offset).concat(outline.slice(0, offset)) : outline;
+      const step = ordered.length / 60;
+      for (let index = 0; index < 60; index += 1) {
+        const point = ordered[Math.round(index * step) % ordered.length];
+        points.push({ x: point.x, y: point.y });
+      }
+      return points;
+    }
+
+    function buildMidpointCircleOutline(centerX, centerY, radius) {
+      const points = new Map();
+      let x = radius;
+      let y = 0;
+      let decision = 1 - x;
+      while (y <= x) {
+        [
+          [x, y], [y, x], [-y, x], [-x, y],
+          [-x, -y], [-y, -x], [y, -x], [x, -y]
+        ].forEach(([dx, dy]) => {
+          const px = centerX + dx;
+          const py = centerY + dy;
+          const angle = (Math.atan2(py - centerY, px - centerX) + Math.PI / 2 + Math.PI * 2) % (Math.PI * 2);
+          const key = px + ":" + py;
+          points.set(key, { x: px, y: py, angle, key });
+        });
+        y += 1;
+        if (decision <= 0) {
+          decision += 2 * y + 1;
+        } else {
+          x -= 1;
+          decision += 2 * (y - x) + 1;
+        }
+      }
+      return Array.from(points.values());
+    }
+
+    function drawClockTimeText(ctx, text, centerX, centerY, color) {
+      const value = normalizeLedText(text).toUpperCase();
+      const width = measureDotText(value);
+      const startX = centerX - Math.floor(width / 2);
+      const startY = centerY - 3;
+      drawDotText(ctx, value, startX, startY, color, { maxWidth: 63 });
+    }
+
     function getFollowDetailPhase() {
       const elapsed = Math.max(0, performance.now() - flightCycleStartedAt);
       return elapsed % 15000 < 10000 ? "metrics" : "location";
+    }
+
+    function getFollowDetailPhaseStartedAt() {
+      const elapsed = Math.max(0, performance.now() - flightCycleStartedAt);
+      const cycleIndex = Math.floor(elapsed / 15000);
+      return flightCycleStartedAt + cycleIndex * 15000 + (elapsed % 15000 < 10000 ? 0 : 10000);
     }
 
     function formatMetricsForEmulator(flight) {
@@ -4394,7 +5380,7 @@ function renderIndexHtml(): string {
     function normalizeGateStatusForDisplay(value) {
       const raw = String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
       if (!raw) return "";
-      if (raw.includes("gotogate")) return "To gate";
+      if (raw.includes("gotogate") || raw.includes("togate")) return "Go to gate";
       if (raw.includes("boarding")) return "Boarding";
       if (raw.includes("closing")) return "Closing";
       if (raw.includes("closed")) return "Closed";
@@ -4413,7 +5399,11 @@ function renderIndexHtml(): string {
       const hour = parts.find((part) => part.type === "hour")?.value || "00";
       const minute = parts.find((part) => part.type === "minute")?.value || "00";
       const second = Number(parts.find((part) => part.type === "second")?.value || "0");
-      drawDotTextRight(ctx, hour + (second % 2 === 0 ? ":" : " ") + minute, rightX, y, color, 32);
+      const textWidth = measureDotText("00:00");
+      const x = rightX - textWidth;
+      drawDotText(ctx, hour, x, y, color, { maxWidth: 12 });
+      if (second % 2 === 0) drawDotText(ctx, ":", x + measureDotText("00"), y, color, { maxWidth: 5 });
+      drawDotText(ctx, minute, x + measureDotText("00:"), y, color, { maxWidth: 12 });
     }
 
     function getTimetableColors() {
@@ -4439,8 +5429,11 @@ function renderIndexHtml(): string {
     function updateScreenStateUi() {
       const active = screenState && screenState.active !== false;
       const brightnessMode = screenState && screenState.brightnessMode === "night" ? "natt" : "dag";
+      const displayModeLabel = els.displayMode.value === "clock" ? "klokke" : "fly";
       const source = screenState && screenState.source ? " via " + screenState.source : "";
-      els.screenStateSummary.textContent = "Skjermstatus: " + (active ? "på" : "av") + " · lysmodus: " + brightnessMode + source;
+      els.screenStateSummary.textContent = "Skjermstatus: " + (active ? "på" : "av") + " · modus: " + displayModeLabel + " · lysmodus: " + brightnessMode + source;
+      els.screenToggle.textContent = active ? "Slå av skjerm" : "Slå på skjerm";
+      els.screenToggle.classList.toggle("danger", active);
       els.screenStateTimestamps.textContent =
         "Sist aktivert: " + formatScreenTimestamp(screenState && screenState.lastActivatedAt)
         + " · sist deaktivert: " + formatScreenTimestamp(screenState && screenState.lastDeactivatedAt)
@@ -4457,13 +5450,60 @@ function renderIndexHtml(): string {
       els.audioVolumeValue.textContent = String(Math.round(Number(els.audioVolumePercent.value || 0)));
     }
 
+    function updateFollowInputUi() {
+      els.followFlightsLabel.textContent = "Flightnummer";
+      els.followFlights.placeholder = "SK4673, DY1304, DOC45";
+      els.followFlightsHelp.textContent = "La stå av for å vise fly i området. Skru på for å følge bestemte fly.";
+    }
+
+    function bindRangeValues() {
+      [
+        els.radius,
+        els.audioVolumePercent,
+        els.deviceBrightness,
+        els.nightBrightness,
+        els.pollSeconds,
+        els.configRefreshSeconds,
+        els.cycleSeconds,
+        els.scrollSpeed,
+        els.timetableCycleSeconds,
+        els.timetableScrollSpeed,
+        els.timetableItemCount,
+        els.avinorWindowHours
+      ].forEach((input) => {
+        input.addEventListener("input", syncRangeValues);
+      });
+      syncRangeValues();
+    }
+
+    function syncRangeValues() {
+      const pairs = [
+        [els.radius, els.radiusValue],
+        [els.audioVolumePercent, els.audioVolumeValue],
+        [els.deviceBrightness, els.deviceBrightnessValue],
+        [els.nightBrightness, els.nightBrightnessValue],
+        [els.pollSeconds, els.pollSecondsValue],
+        [els.configRefreshSeconds, els.configRefreshSecondsValue],
+        [els.cycleSeconds, els.cycleSecondsValue],
+        [els.scrollSpeed, els.scrollSpeedValue],
+        [els.timetableCycleSeconds, els.timetableCycleSecondsValue],
+        [els.timetableScrollSpeed, els.timetableScrollSpeedValue],
+        [els.timetableItemCount, els.timetableItemCountValue],
+        [els.avinorWindowHours, els.avinorWindowHoursValue]
+      ];
+      pairs.forEach(([input, output]) => {
+        if (input && output) output.textContent = String(Math.round(Number(input.value || 0)));
+      });
+    }
+
     function getLineColors() {
       return {
         airline: els.airlineColor.value || "#f4f7ff",
         route: els.routeColor.value || "#f4f7ff",
         aircraft: els.aircraftColor.value || "#f4f7ff",
         context: els.contextColor.value || "#f4f7ff",
-        progress: els.progressColor.value || "#f7b500"
+        progress: els.progressColor.value || "#f7b500",
+        routeProgress: els.routeProgressColor.value || "#00d46a"
       };
     }
 
@@ -4493,19 +5533,19 @@ function renderIndexHtml(): string {
     }
 
     function drawProgressValue(ctx, progress, y = 0) {
-      const width = Math.max(1, Math.min(122, Math.round(122 * progress)));
+      const width = Math.max(0, Math.min(128, Math.floor(128 * progress)));
       ctx.fillStyle = "#07101c";
-      ctx.fillRect(3, y, 122, 1);
+      ctx.fillRect(0, y, 128, 1);
       ctx.fillStyle = getLineColors().progress;
-      ctx.fillRect(3, y, width, 1);
+      ctx.fillRect(0, y, width, 1);
     }
 
     function drawRouteProgressValue(ctx, progress, y = 0) {
-      const width = Math.max(1, Math.min(122, Math.round(122 * progress)));
+      const width = Math.max(0, Math.min(128, Math.floor(128 * progress)));
       ctx.fillStyle = "#3c3c3c";
-      ctx.fillRect(3, y, 122, 1);
-      ctx.fillStyle = "#00d46a";
-      ctx.fillRect(3, y, width, 1);
+      ctx.fillRect(0, y, 128, 1);
+      ctx.fillStyle = getLineColors().routeProgress;
+      ctx.fillRect(0, y, width, 1);
     }
 
     function loadLogoForFlight(flight) {
@@ -4599,8 +5639,28 @@ function renderIndexHtml(): string {
       if (!text) return;
       ensureTickerAnimation();
       const textWidth = measureDotText(text);
-      const overflow = Math.max(0, textWidth - width);
+      const fitsRestingWidth = textWidth <= width;
+      const fitsFullWidth = textWidth + Math.max(0, x) <= 128;
+      const overflow = fitsRestingWidth || fitsFullWidth ? 0 : Math.max(1, textWidth + Math.max(0, x) - 128);
       const offset = overflow > 0 ? getTickerOffset(overflow) : 0;
+      ctx.save();
+      ctx.beginPath();
+      if (overflow > 0) {
+        ctx.rect(0, y, 128, 8);
+      } else {
+        ctx.rect(x, y, fitsFullWidth ? 128 - Math.max(0, x) : width, 8);
+      }
+      ctx.clip();
+      drawDotText(ctx, text, x - offset, y, color, { maxWidth: textWidth });
+      ctx.restore();
+    }
+
+    function drawTickerLineBoxed(ctx, text, x, y, color, width, startedAt) {
+      if (!text) return;
+      ensureTickerAnimation();
+      const textWidth = measureDotText(text);
+      const overflow = textWidth <= width ? 0 : Math.max(1, textWidth - width);
+      const offset = overflow > 0 ? getTickerForwardOffset(overflow, startedAt) : 0;
       ctx.save();
       ctx.beginPath();
       ctx.rect(x, y, width, 8);
@@ -4632,8 +5692,25 @@ function renderIndexHtml(): string {
       return Math.round((1 - ((t - holdMs - travelMs - holdMs) / travelMs)) * overflow);
     }
 
+    function getTickerForwardOffset(overflow, startedAt) {
+      const holdMs = 900;
+      const pxPerSecond = Math.max(2, Number(els.scrollSpeed.value || 9));
+      const travelMs = Math.max(1200, (overflow / pxPerSecond) * 1000);
+      const cycleMs = holdMs + travelMs + holdMs;
+      const t = (performance.now() - startedAt) % cycleMs;
+      if (t < holdMs) return 0;
+      if (t < holdMs + travelMs) return Math.round(((t - holdMs) / travelMs) * overflow);
+      return overflow;
+    }
+
     function measureDotText(text) {
-      return normalizeLedText(text).length * 6;
+      return Array.from(normalizeLedText(text)).reduce((width, char) => width + dotCharAdvance(char), 0);
+    }
+
+    function dotCharAdvance(char) {
+      if (char === " ") return 4;
+      if (char === ":") return 5;
+      return 6;
     }
 
     function drawDotTextRight(ctx, text, rightX, y, color, maxWidth) {
@@ -4699,7 +5776,7 @@ function renderIndexHtml(): string {
             if (rows[row][col] === "1") ctx.fillRect(cursor + col, y + row, 1, 1);
           }
         }
-        cursor += 6;
+        cursor += dotCharAdvance(char);
       }
     }
 
@@ -4842,7 +5919,7 @@ function corsHeaders(): HeadersInit {
   return {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type,Authorization"
+    "Access-Control-Allow-Headers": "Content-Type,Authorization,X-Flight-Admin-Token,X-Flight-Device-Token"
   };
 }
 

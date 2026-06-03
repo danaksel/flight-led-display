@@ -10,7 +10,7 @@ Prosjektet er bygget rundt ett hovedprinsipp: Cloudflare Worker skal gjøre mest
 Cloudflare Worker
   - Adminside og 128 x 64 emulator
   - Konfigurasjon i KV
-  - Valgbar livekilde: FR24 eller OpenSky Network
+  - FR24 livekilde for fly i luftrommet
   - Avinor-oppslag for gratis avgangs-/ankomsttavle
   - R2-logoer via /logos/{CODE}.png
   - Public device-surface via /public/*
@@ -21,7 +21,7 @@ ESP32-S3 + HUB75
   - Henter /public/sound-state for rask lydtest uten å hente flydata
   - Henter /public/display etter polling-intervall
   - Henter RGB565-logoer fra /public/logos-rgb565/{CODE}.rgb565
-  - Tegner payloaden uten egen API-logikk mot FR24/OpenSky/Avinor
+  - Tegner payloaden uten egen API-logikk mot FR24/Avinor
   - Spiller PA-lyd via ES8311/NS4150 når idle avbrytes av fly
 ```
 
@@ -43,9 +43,10 @@ Fungerende ende-til-ende på Waveshare ESP32-S3-RGB-Matrix og 128 x 64 HUB75-pan
 - Adminside med kart, posisjon, radius, flyplass, display-oppsett og lydvolum
 - Ekstern skjermstyring via Homey-endepunkter for skjerm av/på og dag-/natt-lysstyrke
 - Tydelig bryter for `Overvåk luftrommet`, som styrer om Worker får lov til å bruke live flydata
-- Valgbar livekilde: `Flightradar24` eller `OpenSky Network`
+- FR24 som eneste aktive livekilde
 - 128 x 64 emulator med runde LED-piksler og 42 x 42 logo-felt
 - Live flyvisning for fly i valgt radius
+- Kategorifilter for FR24-overvåkning, med `T GENERAL_AVIATION` av som standard
 - Follow mode for flightnummer/callsign
 - Follow-visning alternerer automatisk mellom live-målinger og `Flying over`
 - Topprad som progressbar ved follow-flight, med grønn fremdrift og grå rest
@@ -56,6 +57,7 @@ Fungerende ende-til-ende på Waveshare ESP32-S3-RGB-Matrix og 128 x 64 HUB75-pan
 - Arrival-status kan vise `Landed`
 - R2-basert logooppslag via `/logos/{CODE}.png` og ferdig RGB565-format til firmware
 - Fallback til `UNKNOWN.png` når logo mangler
+- Lokal oppstartsskjerm fra firmware med statusfelt over splash-bilde frem til første displaydata er hentet
 - Firmware matcher emulator-layouten for idle og live-visning
 - Firmware bruker config-styrt brightness, farger, polling, timezone og tidstabellinnstillinger
 - Når skjermen er av, er panelet svart og firmware henter ikke flydata, bare config/status
@@ -98,8 +100,20 @@ Fungerende ende-til-ende på Waveshare ESP32-S3-RGB-Matrix og 128 x 64 HUB75-pan
 - `/api/brightness-mode/night`
   POST-endepunkt for Homey: bruk natt-brightness.
 
+- `/api/display-mode`
+  GET/POST for aktiv displaymodus, `flight` eller `clock`.
+
+- `/api/display-mode/flight`
+  POST-endepunkt for Homey: bruk flight-display.
+
+- `/api/display-mode/clock`
+  POST-endepunkt for Homey: bruk klokke-display.
+
 - `/api/display`
   Payload som emulatoren bruker, og som ESP32 skal bruke senere. Dette endepunktet kan bruke valgt livekilde dersom skjerm og luftromsovervåking er aktiv.
+
+- `/pixel-editor`
+  Lokal tegneside for 128 x 64 pixelmaler. Brukes til å tegne klokke- og layoutreferanser med samme LED-spacing som emulatoren.
 
 - `/public/device-config`
   Public/device alias for `/api/device-config`. Denne er ment for ESP32 og skal ligge under samme Cloudflare Access-regel som `/public/*`.
@@ -135,7 +149,26 @@ ESP32 kan ikke bruke Google-login. All firmware-trafikk skal derfor gå via én 
 Sett Cloudflare Access-regelen på `/public/*`, enten som:
 
 - midlertidig bypass under utvikling
-- helst Service Auth / service token når dette skal stå mer permanent
+- bypass kombinert med `DEVICE_API_TOKEN`
+- eller Service Auth / service token hvis firmware senere settes opp med Cloudflare Access service headers
+
+I tillegg støtter Worker en enkel token-sperre som ekstra sikkerhetsnett hvis en Access-regel mangler eller endres feil:
+
+```bash
+cd cloudflare-worker
+npx wrangler secret put ADMIN_API_TOKEN
+npx wrangler secret put DEVICE_API_TOKEN
+```
+
+Når `ADMIN_API_TOKEN` er satt, må eksterne automasjoner sende token på styringsendepunktene under `/api/screen-state*` og `/api/brightness-mode*`. Adminpanelet er ment å beskyttes av Cloudflare Access/Google-login, ikke av dette tokenet.
+
+Når `DEVICE_API_TOKEN` er satt, må ESP32 sende samme verdi som headeren `X-Flight-Device-Token` på alle `/public/*`-kall. Legg token i `firmware-hub75/include/WiFiSecrets.h`:
+
+```cpp
+#define FLIGHT_DEVICE_TOKEN "samme-verdi-som-DEVICE_API_TOKEN"
+```
+
+Viktig: Cloudflare Access kjører før Worker. Hvis `/public/*` beskyttes med Google-login i Access, vil ESP32 stoppes før Worker får validert `DEVICE_API_TOKEN`. Bruk derfor enten Access-bypass for `/public/*` sammen med `DEVICE_API_TOKEN`, eller en egen Service Auth-regel og firmware-støtte for Cloudflare Access service-token.
 
 ESP32 skal ikke bruke admin-URL-ene direkte. Den skal bruke:
 
@@ -153,58 +186,94 @@ Skjermen styres eksternt fra Homey med POST-kall til Worker:
 ```text
 POST /api/screen-state/activate
 POST /api/screen-state/deactivate
+POST /api/display-mode/flight
+POST /api/display-mode/clock
 POST /api/brightness-mode/day
 POST /api/brightness-mode/night
 ```
+
+Når `ADMIN_API_TOKEN` er satt, må Homey sende samme token som header på disse kallene:
+
+```text
+X-Flight-Admin-Token: samme-verdi-som-ADMIN_API_TOKEN
+```
+
+Alternativt kan Homey sende:
+
+```text
+Authorization: Bearer samme-verdi-som-ADMIN_API_TOKEN
+```
+
+Hvis `/api/*` er beskyttet av Cloudflare Access med Google-login, vil Homey bli stoppet før Worker ser tokenet. For Homey må du da enten:
+
+- bruke Cloudflare Access Service Auth og konfigurere Homey til å sende `CF-Access-Client-Id` og `CF-Access-Client-Secret` i tillegg til `X-Flight-Admin-Token`
+- eller lage en mer spesifikk Access-bypass for Homey-endepunktene og la Workerens `ADMIN_API_TOKEN` være beskyttelsen der
 
 Alternativt kan generiske endepunkter brukes:
 
 ```text
 POST /api/screen-state       {"active": true}
+POST /api/display-mode       {"displayMode": "clock"}
 POST /api/brightness-mode    {"brightnessMode": "night"}
 ```
 
 Webpanelet viser siste aktivering/deaktivering og siste bytte mellom dag/natt. Når skjermen er deaktivert skal ESP32 vise svart skjerm, ikke hente `/public/display`, og bare hente config/status for å oppdage at skjermen skal på igjen.
 
+## Pixel-editor for klokke- og layoutmaler
+
+`/pixel-editor` er en egen tegneside for manuelle 128 x 64 pixelmaler. Den bruker samme LED-spacing, runde piksler og 128 x 64-panelstørrelse som emulatoren, slik at en tegnet mal kan brukes som presis referanse for klokke- eller displaylayout.
+
+Slik brukes den:
+
+- Åpne `/pixel-editor` i nettleseren.
+- Klikk på en mørk pixel for å tenne den hvit.
+- Klikk på en tent pixel for å slukke den.
+- Dra etter første klikk for å tegne eller slette flere pixler med samme handling.
+- Bruk de gule krysslinjene og rulerne for å se visuell rad/kolonne.
+- Ruler og hover-visning er 1-basert for enklere tegning: `x 1-128`, `y 1-64`.
+- Output-feltet er 0-basert og kodeklart: `x 0-127`, `y 0-63`.
+
+Når en ny klokkemal skal implementeres, send outputen fra `JSON coordinates`-formatet tilbake til Codex. Formatet ser slik ut:
+
+```json
+{
+  "width": 128,
+  "height": 64,
+  "pixels": [
+    [62, 0],
+    [63, 0]
+  ]
+}
+```
+
+Codex skal tolke disse koordinatene som 0-baserte panelkoordinater og bruke dem direkte som pixelmal. Ikke konverter til 1-basert før implementering, selv om editoren viser 1-baserte koordinater visuelt.
+
 ## Livekilder og kredittkontroll
 
-Prosjektet støtter to livekilder:
+Prosjektet bruker `Flightradar24` som livekilde for fly i luftrommet.
 
-- `Flightradar24` - dagens mest komplette kilde for rute, aircraft, callsign og posisjon.
-- `OpenSky Network` - samme posisjonskilde som originalprosjektet bruker for `states/all`.
-
-OpenSky gir primært state vectors: callsign, posisjon, høyde, fart, track, vertical rate, origin country og on-ground. Den gir ikke like komplett rute-/airline-info alene. Derfor bruker vi fortsatt Avinor og egne R2-logoer som gratis berikelse rundt dette.
-
-Originalprosjektet bruker OpenSky for live posisjon og AeroAPI/FlightAware for ekstra flightinfo. Vi har foreløpig ikke lagt inn AeroAPI, fordi målet nå er å teste billigere liveposisjon uten å introdusere en ny betalt kilde.
-
-FR24 er betalt datakilde, så dette prosjektet er lagt opp for å ikke brenne credits unødvendig.
+FR24 er betalt datakilde, så dette prosjektet er lagt opp for å ikke brenne credits unødvendig. Avinor brukes fortsatt gratis til avgangs-/ankomsttavle, status og berikelse rundt fulgte flights.
 
 Når skjermen viser fly i valgt radius bruker Worker FR24 `full`, fordi den visningen trenger rute, flytype, operator og metadata for ukjente fly i området. Når du følger et konkret flightnummer bruker Worker FR24 `full` kun for å hente statiske felt som flytype, registrering, rute og operator første gang den aktuelle flygningen lastes. Disse feltene caches for dagen. Etterpå bruker follow-visningen FR24 `light`, som holder for live-posisjon, høyde, fart, track og vertical rate.
+
+FR24-kategorier kan filtreres i kontrollpanelet under `Flytyper i overvåkning`. Filteret gjelder automatisk fly-i-radius, ikke eksplisitt follow-flight. Standard er alle kategorier på unntatt `T GENERAL_AVIATION`, slik at private småfly, ambulanse-/survey-/treningsfly og kalibreringsfly ikke avbryter idle-visningen.
 
 Worker skal ikke hente FR24-data bare fordi adminwebben åpnes. FR24 brukes bare når:
 
 1. `/api/display` eller `/api/flights` kalles.
 2. `Skjermen er på` er aktiv.
-3. Det ikke er aktiv nattmodus med natt-lysstyrke `0`.
-4. `Overvåk luftrommet` er aktiv.
+3. `Overvåk luftrommet` er aktiv.
 
 Hvis `Overvåk luftrommet` er av, kan polling fortsatt skje, men Worker hopper over livekilden og viser Avinor-tavle/idle-data i stedet.
+
+Dag-/natt-brightness styrer bare lysstyrken på panelet. Den skal ikke stoppe datainnhenting. Bruk skjermstatus `inactive` for å stoppe firmware fra å hente `/public/display` og for å stoppe livekilden.
 
 Anbefalt bruk:
 
 - La Avinor-data hente fritt.
 - Bruk `Overvåk luftrommet` aktivt når skjermen faktisk skal vise live fly.
-- Bruk nattmodus med `0` natt-lysstyrke for å stoppe FR24-kall om natten.
+- Slå skjermen inaktiv når live-datahenting skal stoppes helt.
 - Ikke sett polling lavere enn nødvendig. 60-120 sekunder er fornuftig for vanlig bruk.
-
-OpenSky krever egne credentials:
-
-```bash
-npx wrangler secret put OPENSKY_CLIENT_ID
-npx wrangler secret put OPENSKY_CLIENT_SECRET
-```
-
-Hvis OpenSky OAuth er midlertidig utilgjengelig, prøver Worker anonym OpenSky-henting i stedet for å feile hele displayet. Det gir lavere kvote, men er bedre enn at skjermen stopper.
 
 ## Avinor-data
 
@@ -324,8 +393,6 @@ Eksempel:
 ```text
 FR24_API_KEY=din_nokkel_her
 AVIATIONSTACK_API_KEY=din_aviationstack_nokkel_her
-OPENSKY_CLIENT_ID=din_opensky_client_id
-OPENSKY_CLIENT_SECRET=din_opensky_client_secret
 ```
 
 Typecheck:
@@ -352,13 +419,6 @@ Aviationstack-nøkkelen brukes som fallback for fulgte fremtidige flights når F
 
 ```bash
 npx wrangler secret put AVIATIONSTACK_API_KEY
-```
-
-OpenSky-credentials skal ligge som Worker secrets hvis OpenSky brukes:
-
-```bash
-npx wrangler secret put OPENSKY_CLIENT_ID
-npx wrangler secret put OPENSKY_CLIENT_SECRET
 ```
 
 ## Git- og deployflyt
@@ -391,9 +451,8 @@ Nøkler som skal beholdes:
 - `airport-coords:v1:*` - koordinater for flyplasser til route progress
 - `geocode:v2:*` - reverse geocode for `Flying over`
 - `avinor:raw:v2:*` og `avinor:board:v3:*` - kortlevd Avinor-cache
-- `flights:fr24:v1:*`, `flights:opensky:v1:*`, `follow:fr24:v4:*` og `follow:opensky:v1:*` - kortlevd live-cache
+- `flights:fr24:v1:*` og `follow:fr24:v4:*` - kortlevd live-cache
 - `follow:fr24:static:v1:*` - statiske FR24 follow-felt som flytype, registrering, rute og operator, cachet per dag
-- `opensky:token:v1` - kortlevd OAuth-token for OpenSky
 - `follow:landed:v1:*` - landed-status for fulgte fly, beholdes i to timer etter landing
 
 Gamle versjoner som `airport:v1:*`, `airport:v2:*`, `airport:avinor:v1:*` og `geocode:v1:*` er ryddet bort.
@@ -419,6 +478,7 @@ Gjennomført rekkefølge:
 Firmware gjør dette:
 
 - koble til Wi-Fi
+- vise lokal boot-splash fra `firmware-hub75/src/splash_image.h`
 - hente `/public/device-config`
 - hente `/public/sound-state` for rask testlyd uten flydatahenting
 - respektere skjerm av/på, brightness, dag/natt-modus, farger, timezone og polling-intervall
@@ -472,4 +532,4 @@ Testlyd ved 5 % var praktisk talt uhørbar på denne lydveien. Første bekrefted
 
 ## Referanse
 
-`firmware-original/` er beholdt som referanse til TheFlightWall OSS. Dette prosjektet bruker samme overordnede ide, men annen arkitektur: Cloudflare Worker som datalag, Avinor som gratis rutekilde, FR24/OpenSky som kontrollerte livekilder, R2 for logoer og ESP32 som enkel displayklient.
+`firmware-original/` er beholdt som referanse til TheFlightWall OSS. Dette prosjektet bruker samme overordnede ide, men annen arkitektur: Cloudflare Worker som datalag, Avinor som gratis rutekilde, FR24 som kontrollert livekilde, R2 for logoer og ESP32 som enkel displayklient.
