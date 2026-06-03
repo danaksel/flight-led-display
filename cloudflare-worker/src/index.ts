@@ -51,6 +51,8 @@ type DeviceSettings = {
   allowedAircraftCategories: AircraftCategoryCode[];
   brightness: number;
   audioVolumePercent: number;
+  clockTickEnabled: boolean;
+  clockTickVolumePercent: number;
   pollSeconds: number;
   displayCycleSeconds: number;
   timetableCycleSeconds: number;
@@ -75,6 +77,7 @@ type DeviceSettings = {
     routeProgress: string;
   };
   clockColor: string;
+  clockTopColor: string;
   timetableColors: {
     header: string;
     data: string;
@@ -165,6 +168,7 @@ type ClockPayload = {
   style: "gorgy";
   timezone: string;
   color: string;
+  topColor: string;
   width: number;
   height: number;
   centered: boolean;
@@ -480,7 +484,8 @@ export default {
       const authFailure = authorizeRequest(request, env, url.pathname);
       if (authFailure) return authFailure;
 
-      if (url.pathname === "/") return htmlResponse(renderIndexHtml());
+      if (url.pathname === "/") return serveAppShell(request, env);
+      if (url.pathname === "/legacy-admin") return htmlResponse(renderIndexHtml());
       if (url.pathname === "/pixel-editor") return htmlResponse(renderPixelEditorHtml());
       if (url.pathname === "/public/realtime") return realtimeResponse(request, env);
       if (url.pathname === "/public/realtime-state" && request.method === "GET") return realtimeStateResponse(env);
@@ -510,6 +515,10 @@ export default {
       if (url.pathname === "/api/brightness-mode" && request.method === "POST") return saveBrightnessMode(request, env);
       if (url.pathname === "/api/brightness-mode/day" && request.method === "POST") return writeScreenState(env, { brightnessMode: "day" }, "homey-api");
       if (url.pathname === "/api/brightness-mode/night" && request.method === "POST") return writeScreenState(env, { brightnessMode: "night" }, "homey-api");
+      if (url.pathname === "/api/clock-tick" && request.method === "GET") return clockTickStateResponse(env);
+      if (url.pathname === "/api/clock-tick" && request.method === "POST") return saveClockTickSettings(request, env);
+      if (url.pathname === "/api/clock-tick/enable" && request.method === "POST") return writeClockTickSettings(env, { clockTickEnabled: true }, "homey-api");
+      if (url.pathname === "/api/clock-tick/disable" && request.method === "POST") return writeClockTickSettings(env, { clockTickEnabled: false }, "homey-api");
       if (url.pathname === "/api/sound-test" && request.method === "POST") return triggerSoundTest(request, env);
       if (url.pathname === "/api/flights" && request.method === "GET") return flightsResponse(env, false);
       if (url.pathname === "/api/display" && request.method === "GET") return flightsResponse(env, true);
@@ -573,7 +582,9 @@ function isAutomationApiPath(pathname: string): boolean {
     || pathname === "/api/display-mode"
     || pathname.startsWith("/api/display-mode/")
     || pathname === "/api/brightness-mode"
-    || pathname.startsWith("/api/brightness-mode/");
+    || pathname.startsWith("/api/brightness-mode/")
+    || pathname === "/api/clock-tick"
+    || pathname.startsWith("/api/clock-tick/");
 }
 
 function requestHasToken(request: Request, expectedToken: string, headerName: string): boolean {
@@ -716,7 +727,9 @@ async function configResponse(env: Env): Promise<Response> {
     screenState,
     soundState: {
       ...soundState,
-      volumePercent: normalizedDevice.audioVolumePercent
+      volumePercent: normalizedDevice.audioVolumePercent,
+      clockTickEnabled: normalizedDevice.clockTickEnabled,
+      clockTickVolumePercent: normalizedDevice.clockTickVolumePercent
     },
     aviationstackApiKeyConfigured: Boolean(aviationstackApiKey)
   }, 200, { "Cache-Control": "no-store" });
@@ -774,7 +787,9 @@ async function deviceConfigResponse(env: Env): Promise<Response> {
     screenState,
     audio: {
       testNonce: soundState.testNonce,
-      volumePercent: normalizedDevice.audioVolumePercent
+      volumePercent: normalizedDevice.audioVolumePercent,
+      clockTickEnabled: normalizedDevice.clockTickEnabled,
+      clockTickVolumePercent: normalizedDevice.clockTickVolumePercent
     }
   }, 200, {
     "Cache-Control": "no-store"
@@ -786,7 +801,9 @@ async function soundStateResponse(env: Env): Promise<Response> {
   const normalizedDevice = normalizeDeviceSettings(config.device);
   return jsonResponse({
     ...soundState,
-    volumePercent: normalizedDevice.audioVolumePercent
+    volumePercent: normalizedDevice.audioVolumePercent,
+    clockTickEnabled: normalizedDevice.clockTickEnabled,
+    clockTickVolumePercent: normalizedDevice.clockTickVolumePercent
   }, 200, {
     "Cache-Control": "no-store"
   });
@@ -800,7 +817,9 @@ async function realtimeStateResponse(env: Env): Promise<Response> {
     configVersion: config.updatedAt || "",
     screenVersion: screenState.updatedAt || "",
     soundTestNonce: soundState.testNonce,
-    volumePercent: normalizedDevice.audioVolumePercent
+    volumePercent: normalizedDevice.audioVolumePercent,
+    clockTickEnabled: normalizedDevice.clockTickEnabled,
+    clockTickVolumePercent: normalizedDevice.clockTickVolumePercent
   }, 200, {
     "Cache-Control": "no-store"
   });
@@ -830,6 +849,18 @@ async function displayModeResponse(env: Env): Promise<Response> {
   const device = normalizeDeviceSettings(config.device);
   return jsonResponse({
     displayMode: device.displayMode,
+    updatedAt: config.updatedAt || null
+  }, 200, {
+    "Cache-Control": "no-store"
+  });
+}
+
+async function clockTickStateResponse(env: Env): Promise<Response> {
+  const config = await getConfig(env);
+  const device = normalizeDeviceSettings(config.device);
+  return jsonResponse({
+    enabled: device.clockTickEnabled,
+    volumePercent: device.clockTickVolumePercent,
     updatedAt: config.updatedAt || null
   }, 200, {
     "Cache-Control": "no-store"
@@ -988,8 +1019,65 @@ async function triggerSoundTest(request: Request, env: Env): Promise<Response> {
   });
   return jsonResponse({
     ...soundState,
-    volumePercent: normalizedDevice.audioVolumePercent
+    volumePercent: normalizedDevice.audioVolumePercent,
+    clockTickEnabled: normalizedDevice.clockTickEnabled,
+    clockTickVolumePercent: normalizedDevice.clockTickVolumePercent
   }, 200, { "Cache-Control": "no-store" });
+}
+
+async function writeClockTickSettings(
+  env: Env,
+  patch: Partial<Pick<DeviceSettings, "clockTickEnabled" | "clockTickVolumePercent">>,
+  source = "api"
+): Promise<Response> {
+  const config = await getConfig(env);
+  const device = normalizeDeviceSettings(config.device);
+  const updatedAt = new Date().toISOString();
+  const nextDevice: DeviceSettings = {
+    ...device,
+    clockTickEnabled: typeof patch.clockTickEnabled === "boolean" ? patch.clockTickEnabled : device.clockTickEnabled,
+    clockTickVolumePercent: patch.clockTickVolumePercent === undefined
+      ? device.clockTickVolumePercent
+      : clampNumber(patch.clockTickVolumePercent, 0, 100, device.clockTickVolumePercent)
+  };
+
+  await env.FLIGHT_DISPLAY_KV.put(CONFIG_KEY, JSON.stringify({
+    ...config,
+    device: nextDevice,
+    updatedAt
+  }));
+  await broadcastRealtime(env, {
+    type: "config_changed",
+    updatedAt,
+    source: source.slice(0, 80)
+  });
+  return jsonResponse({
+    enabled: nextDevice.clockTickEnabled,
+    volumePercent: nextDevice.clockTickVolumePercent,
+    updatedAt
+  }, 200, { "Cache-Control": "no-store" });
+}
+
+async function saveClockTickSettings(request: Request, env: Env): Promise<Response> {
+  let body: unknown = {};
+  try {
+    body = await request.json();
+  } catch {
+    return jsonResponse({ error: "Expected JSON body" }, 400, { "Cache-Control": "no-store" });
+  }
+
+  const record = body && typeof body === "object" ? body as Record<string, unknown> : {};
+  const enabled = firstBoolean(record, ["enabled", "active", "on"]);
+  const volumeValue = firstNumber(record, ["volumePercent", "volume"]);
+  if (enabled === undefined && volumeValue === undefined) {
+    return jsonResponse({ error: "Expected enabled and/or volumePercent" }, 400, { "Cache-Control": "no-store" });
+  }
+
+  const source = firstString(record, ["source"]) || "api";
+  return writeClockTickSettings(env, {
+    clockTickEnabled: enabled,
+    clockTickVolumePercent: volumeValue === undefined ? undefined : clamp(volumeValue, 0, 100)
+  }, source);
 }
 
 async function avinorBoardResponse(env: Env): Promise<Response> {
@@ -1234,6 +1322,10 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
     allowedAircraftCategories: normalizeAircraftCategoryFilter((v as { allowedAircraftCategories?: unknown }).allowedAircraftCategories),
     brightness: clampNumber(v.brightness, 1, 100, 80),
     audioVolumePercent: clampNumber((v as { audioVolumePercent?: unknown }).audioVolumePercent, 0, 100, 35),
+    clockTickEnabled: typeof (v as { clockTickEnabled?: unknown }).clockTickEnabled === "boolean"
+      ? Boolean((v as { clockTickEnabled?: unknown }).clockTickEnabled)
+      : false,
+    clockTickVolumePercent: clampNumber((v as { clockTickVolumePercent?: unknown }).clockTickVolumePercent, 0, 100, 20),
     pollSeconds: clampNumber(v.pollSeconds, 30, 900, 90),
     displayCycleSeconds: clampNumber(v.displayCycleSeconds, 2, 30, 5),
     timetableCycleSeconds: clampNumber((v as { timetableCycleSeconds?: unknown }).timetableCycleSeconds, 2, 60, 7),
@@ -1246,6 +1338,7 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
     followUnits: normalizeFollowUnits((v as { followUnits?: unknown }).followUnits),
     lineColors: normalizeLineColors((v as { lineColors?: unknown }).lineColors),
     clockColor: normalizeHexColor((v as { clockColor?: unknown }).clockColor, "#081b6b"),
+    clockTopColor: normalizeHexColor((v as { clockTopColor?: unknown }).clockTopColor, "#ffffff"),
     timetableColors: normalizeTimetableColors((v as { timetableColors?: unknown }).timetableColors),
     nightMode: {
       enabled: typeof night.enabled === "boolean" ? night.enabled : true,
@@ -1909,6 +2002,7 @@ function buildClockPayload(device: DeviceSettings): ClockPayload {
     style: "gorgy",
     timezone: device.timezone || "Europe/Oslo",
     color: device.clockColor || "#081b6b",
+    topColor: device.clockTopColor || "#ffffff",
     width: 63,
     height: 63,
     centered: true
@@ -3907,11 +4001,6 @@ function renderIndexHtml(): string {
             </select>
             <div class="field-help">Kan også styres eksternt fra Homey med eget POST-endepunkt.</div>
           </div>
-          <div>
-            <label for="clockColor">Gradientbunn</label>
-            <input id="clockColor" type="color">
-            <div class="field-help">Sekundlinjen er hvit. Minuttblokken fader mot denne fargen nederst.</div>
-          </div>
         </div>
         <button id="screenToggle" class="secondary" type="button">Slå av skjerm</button>
         <div class="field-help" id="soundTestStatus">Lydtest: aldri</div>
@@ -3960,6 +4049,36 @@ function renderIndexHtml(): string {
             </div>
           </div>
         </details>
+        </div>
+      </details>
+      <details class="card clock-card">
+        <summary class="section-head">
+          <h2>Klokke</h2>
+        </summary>
+        <div class="section-content">
+        <p class="section-note">Alle valg for klokkemodus samlet på ett sted: gradient, sekundtick og egen lydstyrke.</p>
+        <div class="row">
+          <div>
+            <label for="clockTopColor">Gradienttopp</label>
+            <input id="clockTopColor" type="color">
+            <div class="field-help">Telleraden og nye linjer starter i denne fargen.</div>
+          </div>
+          <div>
+            <label for="clockColor">Gradientbunn</label>
+            <input id="clockColor" type="color">
+            <div class="field-help">Eldre linjer og nederste del av klokkefeltet går mot denne fargen.</div>
+          </div>
+        </div>
+        <label class="inline-toggle" for="clockTickEnabled">
+          <input id="clockTickEnabled" type="checkbox">
+          <span>Klokketick aktiv</span>
+        </label>
+        <div class="range-label">
+          <label for="clockTickVolumePercent">Klokketick-volum</label>
+          <span class="range-value"><span id="clockTickVolumeValue">20</span>%</span>
+        </div>
+        <input id="clockTickVolumePercent" type="range" min="0" max="100" step="1">
+        <div class="field-help">Spilles for hver ny sekund-dot i klokkemodus. Kan også styres fra Homey.</div>
         </div>
       </details>
       <details class="card flight-card">
@@ -4285,11 +4404,15 @@ function renderIndexHtml(): string {
       screenStateTimestamps: document.querySelector("#screenStateTimestamps"),
       screenToggle: document.querySelector("#screenToggle"),
       displayMode: document.querySelector("#displayMode"),
+      clockTopColor: document.querySelector("#clockTopColor"),
       clockColor: document.querySelector("#clockColor"),
       soundTestStatus: document.querySelector("#soundTestStatus"),
       soundTest: document.querySelector("#soundTest"),
       audioVolumePercent: document.querySelector("#audioVolumePercent"),
       audioVolumeValue: document.querySelector("#audioVolumeValue"),
+      clockTickEnabled: document.querySelector("#clockTickEnabled"),
+      clockTickVolumePercent: document.querySelector("#clockTickVolumePercent"),
+      clockTickVolumeValue: document.querySelector("#clockTickVolumeValue"),
       deviceBrightness: document.querySelector("#deviceBrightness"),
       deviceBrightnessValue: document.querySelector("#deviceBrightnessValue"),
       nightBrightness: document.querySelector("#nightBrightness"),
@@ -4352,17 +4475,21 @@ function renderIndexHtml(): string {
     let tickerStartedAt = performance.now();
     let clockAnimationTimer = null;
     let clockLastMinute = null;
+    let clockLastSecond = null;
     let clockFallingMinuteIndex = null;
     let clockFallingStartedAt = 0;
     let emulatorPollTimer = null;
     let emulatorPolling = false;
     let emulatorPollInFlight = false;
     let formIsDirty = false;
+    let emulatorAudioContext = null;
+    let emulatorTickBuffer = null;
 	    let screenState = { active: true, brightnessMode: "day", lastActivatedAt: null, lastDeactivatedAt: null, lastBrightnessModeChangedAt: null, updatedAt: null, source: null };
 	    let soundState = { testNonce: 0, lastTriggeredAt: null, source: null };
 	    const logoCache = new Map();
 	    const adminTokenStorageKey = "flightDisplayAdminToken";
 	    const defaultAircraftCategories = ["P", "C", "M", "J", "H", "B", "G", "D", "V", "O", "N"];
+      const emulatorTickPcmBase64 = "/v/+/wIA//8DAPv/BQD6/wQAAAACAPf/BwACAPr/BgD3/wcA/f8BAP7/AQD9/wEAAQD9/wQA+v8FAP3/AgAAAAAA/v8DAPz/AwD9/woA6v8iAM//RQCb/5AARP/KAGv/LQA8AID/oQBc/6cAbP9mABYATf8cAd7+3ACI//X/pgB+/nQCDP2/Agv+/wDa/3z/EAFh/toBUf47AaX/Zf8eAdX+RQF7/vABiv2QAtH9igHs/rQAnf8xAPD/DgDz/xQA+v8HAAIA///7/wAABQALAAAA9f8IAAIA+/8FAPz/BAACAPj/AAAGAPn/BgD+//3/BQD7/wcA+v8FAP3///8HAPb/CAD6/wQA/v/+/wQA+v8CAAIA/v8BAAAAAgD7/wUA/v///wEA//8EAP3/AgABAP//AQD+/wIA/f8DAAAA/v8FAPz/AQABAP7/AAACAP7/AgABAP//AAABAAAA/f8EAPz/AgAAAP//AQAAAAAAAAABAP7/AgD+/wEAAAD//wEAAAAAAAAAAQD//wEA//8BAP//AAAAAAAAAAAAAP//AQD//wEAAAD//wEAAAAAAAAAAAAAAAAA//8BAP//AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
     init();
 
@@ -4422,7 +4549,13 @@ function renderIndexHtml(): string {
         input.addEventListener("input", markDirty);
         input.addEventListener("change", markDirty);
       });
+      ["pointerdown", "keydown", "touchstart"].forEach((eventName) => {
+        window.addEventListener(eventName, () => {
+          ensureEmulatorAudioReady();
+        }, { passive: true });
+      });
       els.audioVolumePercent.addEventListener("input", updateAudioVolumeUi);
+      els.clockTickVolumePercent.addEventListener("input", updateClockTickVolumeUi);
       bindRangeValues();
       renderEmulator();
     }
@@ -4463,9 +4596,13 @@ function renderIndexHtml(): string {
       els.deviceBrightness.value = device.brightness ?? 80;
       els.displayMode.value = device.displayMode || "flight";
       displayMode = device.displayMode || displayMode;
+      els.clockTopColor.value = device.clockTopColor || "#ffffff";
       els.clockColor.value = device.clockColor || "#081b6b";
       els.audioVolumePercent.value = device.audioVolumePercent ?? 35;
+      els.clockTickEnabled.checked = device.clockTickEnabled === true;
+      els.clockTickVolumePercent.value = device.clockTickVolumePercent ?? 20;
       updateAudioVolumeUi();
+      updateClockTickVolumeUi();
       els.nightBrightness.value = night.brightness ?? 0;
       els.pollSeconds.value = device.pollSeconds ?? 90;
       els.cycleSeconds.value = device.displayCycleSeconds ?? 5;
@@ -4516,8 +4653,10 @@ function renderIndexHtml(): string {
 	          allowedAircraftCategories: els.aircraftCategoryInputs
 	            .filter((input) => input.checked)
 	            .map((input) => input.dataset.aircraftCategory),
-	          brightness: Number(els.deviceBrightness.value),
+          brightness: Number(els.deviceBrightness.value),
           audioVolumePercent: Number(els.audioVolumePercent.value),
+          clockTickEnabled: els.clockTickEnabled.checked,
+          clockTickVolumePercent: Number(els.clockTickVolumePercent.value),
           pollSeconds: Number(els.pollSeconds.value),
           displayCycleSeconds: Number(els.cycleSeconds.value),
           timetableCycleSeconds: Number(els.timetableCycleSeconds.value),
@@ -4541,6 +4680,7 @@ function renderIndexHtml(): string {
             progress: els.progressColor.value,
             routeProgress: els.routeProgressColor.value
           },
+          clockTopColor: els.clockTopColor.value,
           clockColor: els.clockColor.value,
           timetableColors: {
             header: els.timetableHeaderColor.value,
@@ -4668,6 +4808,7 @@ function renderIndexHtml(): string {
     els.imageUpload.addEventListener("change", handleImageUpload);
     [
       els.deviceBrightness,
+      els.clockTopColor,
       els.clockColor,
       els.scrollSpeed,
       els.timetableScrollSpeed,
@@ -4682,6 +4823,7 @@ function renderIndexHtml(): string {
       els.progressColor,
       els.routeProgressColor,
       els.displayMode,
+      els.clockTickEnabled,
       els.timetableHeaderColor,
       els.timetableDataColor,
       els.timetableTimeColor,
@@ -4759,7 +4901,7 @@ function renderIndexHtml(): string {
         }
         if (displayMode === "clock") {
           const timezone = data.clock && data.clock.timezone ? data.clock.timezone : (els.timezone.value || "Europe/Oslo");
-          els.flightList.innerHTML = '<div class="empty">Klokkemodus aktiv. Emulatoren viser hvit sekundlinje, minuttstabel med valgt gradientbunn og tredelt klokke ved kolonne 70 i tidssone ' + escapeHtml(timezone) + '.</div>';
+          els.flightList.innerHTML = '<div class="empty">Klokkemodus aktiv. Emulatoren viser valgt gradienttopp i telleraden, valgt gradientbunn nederst og tredelt klokke ved kolonne 70 i tidssone ' + escapeHtml(timezone) + '.</div>';
           return;
         }
         if (!flights.length) {
@@ -4928,6 +5070,7 @@ function renderIndexHtml(): string {
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
       if (screenState && screenState.active === false) {
+        resetClockEmulatorState();
         applyDisplayBrightness(sourceCtx);
         drawLedPanel(ctx, source);
         els.emuMeta.textContent = "Skjermen er deaktivert eksternt og skal være svart.";
@@ -4941,6 +5084,7 @@ function renderIndexHtml(): string {
           drawLedPanel(ctx, source);
           return;
         }
+        resetClockEmulatorState();
         const flight = displayFlights[currentFlightIndex] || displayFlights[0];
         if (flight) {
           drawLiveFlightLayout(sourceCtx, flight);
@@ -4955,6 +5099,7 @@ function renderIndexHtml(): string {
       }
 
       if (!uploadedImage) {
+        resetClockEmulatorState();
         drawPlaceholder(sourceCtx);
         applyDisplayBrightness(sourceCtx);
         drawLedPanel(ctx, source);
@@ -5114,6 +5259,8 @@ function renderIndexHtml(): string {
       const time = getClockTimeParts();
       const completedMinutes = Math.max(0, Math.min(59, Number(time.minute)));
       const activeSeconds = Math.max(0, Math.min(60, time.second + 1));
+      const clockTopColor = els.clockTopColor.value || "#ffffff";
+      const clockBottomColor = els.clockColor.value || "#081b6b";
       updateClockFallState(completedMinutes);
       const falling = isClockRowFalling();
 
@@ -5122,7 +5269,7 @@ function renderIndexHtml(): string {
       for (let index = 0; index < completedMinutes; index += 1) {
         if (falling && index === clockFallingMinuteIndex) continue;
         const y = 62 - index;
-        ctx.fillStyle = getClockMinuteRowColor(completedMinutes - index);
+        ctx.fillStyle = getClockMinuteRowColor(completedMinutes - index, clockTopColor, clockBottomColor);
         ctx.fillRect(4, y, 60, 1);
       }
 
@@ -5130,7 +5277,7 @@ function renderIndexHtml(): string {
         const targetY = 62 - clockFallingMinuteIndex;
         const elapsed = Math.min(400, performance.now() - clockFallingStartedAt);
         const y = Math.round(3 + ((targetY - 3) * elapsed) / 400);
-        ctx.fillStyle = getClockMinuteRowColor(1);
+        ctx.fillStyle = getClockMinuteRowColor(1, clockTopColor, clockBottomColor);
         ctx.fillRect(4, y, 60, 1);
       } else if (clockFallingMinuteIndex !== null) {
         clockFallingMinuteIndex = null;
@@ -5138,12 +5285,20 @@ function renderIndexHtml(): string {
       }
 
       if (activeSeconds > 0) {
-        ctx.fillStyle = "#ffffff";
+        ctx.fillStyle = clockTopColor;
         ctx.fillRect(4, 3, activeSeconds, 1);
       }
 
-      drawClockTimeStack(ctx, 70, time);
+      drawClockTimeStack(ctx, 70, time, clockTopColor, clockBottomColor);
+      maybePlayEmulatorClockTick(time.second);
       els.emuMeta.textContent = "Clock layout: sekundlinje fra kolonne 4-63, minutter stablet nederst, HH/MM/SS fra kolonne 70 · " + time.hour + ":" + time.minute + ":" + time.second.toString().padStart(2, "0") + ".";
+    }
+
+    function resetClockEmulatorState() {
+      clockLastMinute = null;
+      clockLastSecond = null;
+      clockFallingMinuteIndex = null;
+      clockFallingStartedAt = 0;
     }
 
     function updateClockFallState(completedMinutes) {
@@ -5166,29 +5321,55 @@ function renderIndexHtml(): string {
       return clockFallingMinuteIndex !== null && performance.now() - clockFallingStartedAt < 400;
     }
 
-    function getClockMinuteRowColor(depth) {
+    function getClockMinuteRowColor(depth, topColor, bottomColor) {
       const step = Math.max(1, Math.min(60, depth));
-      return interpolateHexColor("#ffffff", els.clockColor.value || "#081b6b", step, 60);
+      return interpolateHexColor(topColor, bottomColor, step, 60);
     }
 
-    function drawClockTimeStack(ctx, x, time) {
-      drawScaledDotText(ctx, time.hour, x, 3, "#ffffff", 2);
-      drawScaledDotText(ctx, time.minute, x, 27, "#ffffff", 2);
-      drawScaledDotText(ctx, time.second.toString().padStart(2, "0"), x, 49, "#ffffff", 2);
+    function drawClockTimeStack(ctx, x, time, topColor, bottomColor) {
+      drawThinClockPair(ctx, time.hour, x, 3, getClockTextRowColor(11, topColor, bottomColor));
+      drawThinClockPair(ctx, time.minute, x, 24, getClockTextRowColor(32, topColor, bottomColor));
+      drawThinClockPair(ctx, time.second.toString().padStart(2, "0"), x, 45, getClockTextRowColor(53, topColor, bottomColor));
     }
 
-    function drawScaledDotText(ctx, text, x, y, color, scale) {
-      const source = document.createElement("canvas");
-      source.width = 128;
-      source.height = 64;
-      const sourceCtx = source.getContext("2d", { willReadFrequently: true });
-      sourceCtx.imageSmoothingEnabled = false;
-      sourceCtx.fillStyle = "#000";
-      sourceCtx.fillRect(0, 0, source.width, source.height);
-      drawDotText(sourceCtx, text, 0, 0, color, { maxWidth: 24 });
-      const sourceWidth = measureDotText(text);
-      ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(source, 0, 0, sourceWidth, 7, x, y, sourceWidth * scale, 7 * scale);
+    function getClockTextRowColor(centerY, topColor, bottomColor) {
+      const step = Math.max(0, Math.min(58, centerY - 3));
+      return interpolateHexColor(topColor, bottomColor, step, 58);
+    }
+
+    function drawThinClockPair(ctx, text, x, y, color) {
+      const value = String(text || "--").padStart(2, "-").slice(0, 2);
+      drawThinClockChar(ctx, value[0], x, y, color);
+      drawThinClockChar(ctx, value[1], x + 9, y, color);
+    }
+
+    function drawThinClockChar(ctx, char, x, y, color) {
+      const segmentsByDigit = {
+        "0": ["a", "b", "c", "d", "e", "f"],
+        "1": ["b", "c"],
+        "2": ["a", "b", "g", "e", "d"],
+        "3": ["a", "b", "g", "c", "d"],
+        "4": ["f", "g", "b", "c"],
+        "5": ["a", "f", "g", "c", "d"],
+        "6": ["a", "f", "g", "e", "c", "d"],
+        "7": ["a", "b", "c"],
+        "8": ["a", "b", "c", "d", "e", "f", "g"],
+        "9": ["a", "b", "c", "d", "f", "g"],
+        "-": ["g"]
+      };
+      const segments = segmentsByDigit[char] || [];
+      ctx.fillStyle = color;
+      segments.forEach((segment) => drawThinClockSegment(ctx, segment, x, y));
+    }
+
+    function drawThinClockSegment(ctx, segment, x, y) {
+      if (segment === "a") ctx.fillRect(x + 1, y, 5, 1);
+      if (segment === "b") ctx.fillRect(x + 6, y + 1, 1, 7);
+      if (segment === "c") ctx.fillRect(x + 6, y + 9, 1, 7);
+      if (segment === "d") ctx.fillRect(x + 1, y + 16, 5, 1);
+      if (segment === "e") ctx.fillRect(x, y + 9, 1, 7);
+      if (segment === "f") ctx.fillRect(x, y + 1, 1, 7);
+      if (segment === "g") ctx.fillRect(x + 1, y + 8, 5, 1);
     }
 
     function interpolateHexColor(from, to, step, steps) {
@@ -5241,6 +5422,68 @@ function renderIndexHtml(): string {
     function millisecondsUntilNextSecond() {
       const now = new Date();
       return Math.max(50, 1000 - now.getMilliseconds() + 20);
+    }
+
+    async function ensureEmulatorAudioReady() {
+      try {
+        if (!emulatorAudioContext) {
+          const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+          if (!AudioContextCtor) return null;
+          emulatorAudioContext = new AudioContextCtor();
+        }
+        if (emulatorAudioContext.state === "suspended") {
+          await emulatorAudioContext.resume();
+        }
+        if (!emulatorTickBuffer) {
+          emulatorTickBuffer = buildEmulatorTickBuffer(emulatorAudioContext);
+        }
+        return emulatorAudioContext;
+      } catch {
+        return null;
+      }
+    }
+
+    function buildEmulatorTickBuffer(audioContext) {
+      const binary = atob(emulatorTickPcmBase64);
+      const pcmBytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) {
+        pcmBytes[index] = binary.charCodeAt(index);
+      }
+      const frameCount = Math.floor(pcmBytes.length / 2);
+      const audioBuffer = audioContext.createBuffer(1, frameCount, 16000);
+      const channel = audioBuffer.getChannelData(0);
+      for (let frame = 0; frame < frameCount; frame += 1) {
+        const low = pcmBytes[frame * 2];
+        const high = pcmBytes[frame * 2 + 1];
+        const sample = (high << 8) | low;
+        const signed = sample > 0x7fff ? sample - 0x10000 : sample;
+        channel[frame] = signed / 32768;
+      }
+      return audioBuffer;
+    }
+
+    function maybePlayEmulatorClockTick(second) {
+      if (clockLastSecond === null) {
+        clockLastSecond = second;
+        return;
+      }
+      if (second === clockLastSecond) return;
+      clockLastSecond = second;
+      if (!els.clockTickEnabled.checked) return;
+      playEmulatorClockTick();
+    }
+
+    async function playEmulatorClockTick() {
+      const audioContext = await ensureEmulatorAudioReady();
+      if (!audioContext || !emulatorTickBuffer) return;
+
+      const source = audioContext.createBufferSource();
+      source.buffer = emulatorTickBuffer;
+      const gain = audioContext.createGain();
+      gain.gain.value = Math.max(0, Math.min(1, Number(els.clockTickVolumePercent.value || 0) / 100));
+      source.connect(gain);
+      gain.connect(audioContext.destination);
+      source.start();
     }
 
     function buildClockCirclePoints(centerX, centerY, radius, count) {
@@ -5529,6 +5772,10 @@ function renderIndexHtml(): string {
       els.audioVolumeValue.textContent = String(Math.round(Number(els.audioVolumePercent.value || 0)));
     }
 
+    function updateClockTickVolumeUi() {
+      els.clockTickVolumeValue.textContent = String(Math.round(Number(els.clockTickVolumePercent.value || 0)));
+    }
+
     function updateFollowInputUi() {
       els.followFlightsLabel.textContent = "Flightnummer";
       els.followFlights.placeholder = "SK4673, DY1304, DOC45";
@@ -5539,6 +5786,7 @@ function renderIndexHtml(): string {
       [
         els.radius,
         els.audioVolumePercent,
+        els.clockTickVolumePercent,
         els.deviceBrightness,
         els.nightBrightness,
         els.pollSeconds,
@@ -5559,6 +5807,7 @@ function renderIndexHtml(): string {
       const pairs = [
         [els.radius, els.radiusValue],
         [els.audioVolumePercent, els.audioVolumeValue],
+        [els.clockTickVolumePercent, els.clockTickVolumeValue],
         [els.deviceBrightness, els.deviceBrightnessValue],
         [els.nightBrightness, els.nightBrightnessValue],
         [els.pollSeconds, els.pollSecondsValue],
@@ -5992,6 +6241,12 @@ function htmlResponse(body: string): Response {
       "Cache-Control": "no-store"
     }
   });
+}
+
+function serveAppShell(request: Request, env: Env): Promise<Response> {
+  const assetUrl = new URL(request.url);
+  assetUrl.pathname = "/index.html";
+  return env.ASSETS.fetch(new Request(assetUrl.toString(), request));
 }
 
 function corsHeaders(): HeadersInit {

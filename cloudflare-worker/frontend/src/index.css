@@ -1,0 +1,71 @@
+@import url("https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap");
+@import "leaflet/dist/leaflet.css";
+
+:root {
+  color-scheme: light;
+  font-family: "Outfit", sans-serif;
+  --background: #dfdad7;
+  --foreground: #3c2415;
+  --primary: #3c2415;
+  --primary-foreground: #ffffff;
+  --secondary: #c1b4ac;
+  --muted: #eae6e3;
+  --muted-foreground: #6b5d52;
+  --card: #ffffff;
+  --border-soft: rgba(60, 36, 21, 0.15);
+  --border-mid: rgba(60, 36, 21, 0.3);
+  --shadow: 0 24px 64px rgba(34, 20, 12, 0.14);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100%;
+  background:
+    radial-gradient(circle at top, rgba(255, 255, 255, 0.82), transparent 32%),
+    linear-gradient(180deg, #f2ece8 0%, var(--background) 38%, #d8d1cd 100%);
+  color: var(--foreground);
+}
+
+body {
+  min-height: 100vh;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+a {
+  color: inherit;
+}
+
+.leaflet-container {
+  height: 100%;
+  width: 100%;
+  font-family: "Outfit", sans-serif;
+}
+
+.leaflet-control-attribution {
+  display: none;
+}
+
+.skyframe-logo {
+  width: auto;
+  max-width: 244px;
+  height: 28px;
+  color: var(--primary);
+}
+
+.section-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+}

@@ -12,8 +12,6 @@ FR24_FOLLOW_ENDPOINT = "/live/flight-positions/light"
 FR24_AIRLINE_ENDPOINT_TEMPLATE = "/static/airlines/{icao}/light"
 FR24_AIRPORT_ENDPOINT_TEMPLATE = "/static/airports/{code}/light"
 AVIATIONSTACK_API_BASE_URL = "https://api.aviationstack.com/v1"
-OPENSKY_TOKEN_URL = "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token"
-OPENSKY_BASE_URL = "https://opensky-network.org"
 HOME_AIRPORT_IATA = "OSL"
 DEFAULT_LAT = "59.9139"
 DEFAULT_LON = "10.7522"
@@ -28,3 +26,11 @@ id = "075d6ed547f64f1ab5129a88f48e25ca"
 [[r2_buckets]]
 binding = "AIRLINE_LOGOS"
 bucket_name = "flight-display-airline-logos"
+
+[[durable_objects.bindings]]
+name = "REALTIME_HUB"
+class_name = "RealtimeHub"
+
+[[migrations]]
+tag = "v1-realtime-hub"
+new_sqlite_classes = ["RealtimeHub"]

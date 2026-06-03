@@ -5,15 +5,28 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
+    "build:web": "vite build --config frontend/vite.config.ts",
     "deploy": "wrangler deploy",
     "logos:rgb565": "node scripts/convert-logos-rgb565.mjs",
     "logos:backfill-r2": "node scripts/backfill-r2-rgb565.mjs",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "leaflet": "^1.9.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260516.0",
+    "@types/leaflet": "^1.9.21",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
     "sharp": "^0.34.5",
     "typescript": "^5.8.3",
+    "vite": "^5.4.10",
+    "vitest": "^4.1.8",
     "wrangler": "^4.16.1"
   }
 }
