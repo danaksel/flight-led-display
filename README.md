@@ -8,8 +8,10 @@ Prosjektet er bygget rundt ett hovedprinsipp: Cloudflare Worker skal gjøre mest
 
 ```text
 Cloudflare Worker
-  - Adminside og 128 x 64 emulator
+  - React-basert mobil webapp og 128 x 64 emulator
+  - Legacy adminside på /legacy-admin
   - Konfigurasjon i KV
+  - Realtime-hub via Durable Object/WebSocket
   - FR24 livekilde for fly i luftrommet
   - Avinor-oppslag for gratis avgangs-/ankomsttavle
   - R2-logoer via /logos/{CODE}.png
@@ -18,20 +20,21 @@ Cloudflare Worker
 
 ESP32-S3 + HUB75
   - Henter /public/device-config
-  - Henter /public/sound-state for rask lydtest uten å hente flydata
+  - Lytter på /public/realtime og poller /public/realtime-state som fallback
+  - Henter /public/sound-state for lydstatus/test uten å hente flydata
   - Henter /public/display etter polling-intervall
   - Henter RGB565-logoer fra /public/logos-rgb565/{CODE}.rgb565
   - Tegner payloaden uten egen API-logikk mot FR24/Avinor
-  - Spiller PA-lyd via ES8311/NS4150 når idle avbrytes av fly
+  - Spiller PA-lyd og klokketick via ES8311/NS4150
 ```
 
 ## Prosjektstruktur
 
 ```text
-cloudflare-worker/   Worker API, webinterface, emulator og Cloudflare config
-firmware-hub75/      Kommende firmware for Waveshare ESP32-S3-RGB-Matrix + HUB75
+cloudflare-worker/   Worker API, React-webapp, emulator og Cloudflare config
+firmware-hub75/      PlatformIO-firmware for Waveshare ESP32-S3-RGB-Matrix + HUB75
 firmware-original/   Original TheFlightWall OSS-firmware som referanse
-assets/              Lokale logo-kilder, eksportfiler og kandidatmapper
+assets/              Genererte logo-/eksportmapper. Ignorert i Git; R2 er fasit for logoer
 hardware/            Notater om skjerm, kort og hardwarevalg
 ```
 
@@ -40,8 +43,10 @@ hardware/            Notater om skjerm, kort og hardwarevalg
 Fungerende ende-til-ende på Waveshare ESP32-S3-RGB-Matrix og 128 x 64 HUB75-panel:
 
 - Cloudflare Worker deployet som `flight-display-server.dan-aksel.workers.dev`
-- Adminside med kart, posisjon, radius, flyplass, display-oppsett og lydvolum
+- React mobil-webapp med kart, posisjon, radius, flyplass, display-oppsett, emulator og lydvolum
+- Gammel adminside finnes fortsatt på `/legacy-admin` som referanse/debug
 - Ekstern skjermstyring via Homey-endepunkter for skjerm av/på og dag-/natt-lysstyrke
+- Realtime-varsling via Durable Object/WebSocket, med HTTP polling som fallback
 - Tydelig bryter for `Overvåk luftrommet`, som styrer om Worker får lov til å bruke live flydata
 - FR24 som eneste aktive livekilde
 - 128 x 64 emulator med runde LED-piksler og 42 x 42 logo-felt
@@ -62,13 +67,17 @@ Fungerende ende-til-ende på Waveshare ESP32-S3-RGB-Matrix og 128 x 64 HUB75-pan
 - Firmware bruker config-styrt brightness, farger, polling, timezone og tidstabellinnstillinger
 - Når skjermen er av, er panelet svart og firmware henter ikke flydata, bare config/status
 - Lydtest og PA-varsel styres fra webpanelets lydvolum
+- Klokketick har egen enable/volume og bruker separat tic-volum i firmware
 - PA-lyden spilles bare når skjermen går fra idle/ingen fly til live flyvisning, ikke for hvert fly i samme live-periode
-- KV-cache for config, airline-navn, airport-navn, Avinor-data, live flydata og geokoding
+- KV-cache for config, screen/sound state, airline-navn, airport-navn, Avinor-data, live flydata og geokoding
 
 ## Viktige endepunkter
 
 - `/`
-  Adminside, kart, data-preview og LED-emulator.
+  React mobil-webapp med seksjonsmeny, kart, data-preview, konfigurasjon og LED-emulator i skjermramme.
+
+- `/legacy-admin`
+  Gammel Worker-renderet adminside. Beholdes som referanse/debug for emulator og eldre kontroller.
 
 - `/api/config`
   Leser og lagrer full konfigurasjon fra webpanelet.
@@ -76,11 +85,17 @@ Fungerende ende-til-ende på Waveshare ESP32-S3-RGB-Matrix og 128 x 64 HUB75-pan
 - `/api/device-config`
   Lett konfigurasjon for ESP32-firmware. Inneholder blant annet brightness, polling, timezone, farger, skjermstatus og lydvolum.
 
+- `/api/realtime-state`
+  Lett state for firmware fallback-polling. Inneholder config-/screen-versjoner, lydtest-`nonce` og clock tick-/lydstatus.
+
 - `/api/sound-state`
   Lett status for lydtest. ESP32 poller dette raskt slik at `Test lyd nå` ikke må vente på neste full config-henting.
 
 - `/api/sound-test`
   POST-endepunkt som øker lydtest-`nonce`. ESP32 spiller testlyd når den ser en ny `nonce`. Testen bruker lydvolumet som er lagret i config.
+
+- `/api/clock-tick`
+  GET/POST for klokketick aktivert/deaktivert og eget klokketick-volum.
 
 - `/api/screen-state`
   GET/POST for skjerm av/på fra eksterne systemer. Når skjermen er av, skal ESP32 holde panelet svart og ikke hente live flydata.
@@ -118,6 +133,12 @@ Fungerende ende-til-ende på Waveshare ESP32-S3-RGB-Matrix og 128 x 64 HUB75-pan
 - `/public/device-config`
   Public/device alias for `/api/device-config`. Denne er ment for ESP32 og skal ligge under samme Cloudflare Access-regel som `/public/*`.
 
+- `/public/realtime`
+  WebSocket-endepunkt for ESP32. Brukes for raske `config_changed`, `display_changed` og `sound_test`-hendelser.
+
+- `/public/realtime-state`
+  Public/device alias for `/api/realtime-state`. Firmware poller dette som fallback ved siden av WebSocket.
+
 - `/public/sound-state`
   Public/device alias for `/api/sound-state`. ESP32 bruker denne for rask testlyd uten å hente flydata.
 
@@ -131,7 +152,7 @@ Fungerende ende-til-ende på Waveshare ESP32-S3-RGB-Matrix og 128 x 64 HUB75-pan
   Server logo fra R2 for flyselskap. Faller tilbake til Worker assets og deretter eventuell ekstern logo-base hvis konfigurert.
 
 - `/logos-rgb565/{CODE}.rgb565`
-  Fremtidig ESP32-vennlig logoformat. Server ferdig genererte 42 x 42 RGB565 little-endian bytes fra R2. ESP32 skal kunne laste ned filen, cache den og tegne pikslene direkte uten PNG-dekoding.
+  ESP32-vennlig logoformat. Server ferdig genererte 42 x 42 RGB565 little-endian bytes fra R2. ESP32 laster ned filen, cacher den og tegner pikslene direkte uten PNG-dekoding.
 
 - `/public/logos-rgb565/{CODE}.rgb565`
   Public/device alias for RGB565-logoer. ESP32 skal bruke denne URL-en.
@@ -173,11 +194,15 @@ Viktig: Cloudflare Access kjører før Worker. Hvis `/public/*` beskyttes med Go
 ESP32 skal ikke bruke admin-URL-ene direkte. Den skal bruke:
 
 ```text
+/public/realtime
+/public/realtime-state
 /public/device-config
 /public/sound-state
 /public/display
 /public/logos-rgb565/{CODE}.rgb565
 ```
+
+Firmware bruker WebSocket på `/public/realtime` for raske endringer. Hvis realtime faller ut, poller den `/public/realtime-state` hvert 5. sekund og henter full config/display når versjoner endrer seg. `configRefreshSeconds` i webpanelet er derfor normal/fallback-refresh, ikke eneste mekanisme for å oppdage endringer. Når skjermen er av, poller firmware config/status hyppigere en periode for rask reaktivering, men henter ikke `/public/display`.
 
 ## Homey-styring
 
@@ -218,6 +243,8 @@ POST /api/brightness-mode    {"brightnessMode": "night"}
 ```
 
 Webpanelet viser siste aktivering/deaktivering og siste bytte mellom dag/natt. Når skjermen er deaktivert skal ESP32 vise svart skjerm, ikke hente `/public/display`, og bare hente config/status for å oppdage at skjermen skal på igjen.
+
+Natt-tidspunkt styres utenfor webpanelet, typisk via Homey og `brightness-mode`. Webpanelet eksponerer fortsatt `Night brightness`, men ikke start-/sluttid for nattmodus.
 
 ## Pixel-editor for klokke- og layoutmaler
 
@@ -337,7 +364,7 @@ For fly som mangler tydelig airline-kode, faller Worker tilbake til flightnummer
 
 Viktig: samme logo kan brukes av flere koder gjennom mapping i Worker, for eksempel cargo-operasjoner som skal bruke moderselskapets logo.
 
-For ESP32-firmware skal logoene ikke dekodes fra PNG på kortet i første versjon. Worker/API-et har derfor et eget planlagt binærformat:
+For ESP32-firmware dekodes ikke PNG på kortet. Worker/API-et server derfor et ferdig binærformat:
 
 ```text
 /logos-rgb565/{CODE}.rgb565
@@ -367,7 +394,7 @@ cd cloudflare-worker
 npm run logos:rgb565
 ```
 
-Kommandoen leser som standard `assets/airline-logos/r2-source/*.png` og skriver ferdige filer til `assets/airline-logos/rgb565/`.
+Kommandoen leser som standard `assets/airline-logos/r2-source/*.png` og skriver ferdige filer til `assets/airline-logos/rgb565/`. Hele `assets/airline-logos/` er ignorert i Git fordi dette er genererte/eksporterte artefakter. R2-bucketen er source of truth.
 
 Viktig: `cloudflare-worker/public/logos/` er bare fallback/dev-fixtures og skal ikke behandles som fasit. Hvis den brukes til testkonvertering, må det gjøres eksplisitt:
 
@@ -376,14 +403,14 @@ cd cloudflare-worker
 npm run logos:rgb565 -- --input cloudflare-worker/public/logos
 ```
 
-Dette skal være et arkiv av ferdig genererte filer, ikke PNG-konvertering på hver forespørsel. Grunnen er at ESP32 da slipper PNG-dekoder, og Worker slipper tung bildebehandling i request-pathen.
+Dette skal være et arkiv av ferdig genererte filer, ikke PNG-konvertering på hver forespørsel. Grunnen er at ESP32 slipper PNG-dekoder, og Worker slipper tung bildebehandling i request-pathen.
 
 ## Lokal utvikling
 
 ```bash
 cd cloudflare-worker
 npm install
-npm run dev
+npm run dev -- --port 8788
 ```
 
 Legg lokale secrets i `cloudflare-worker/.dev.vars`. Den filen er ignorert av Git og skal ikke committes.
@@ -400,6 +427,13 @@ Typecheck:
 ```bash
 cd cloudflare-worker
 npm run typecheck
+```
+
+Bygg React-webappen inn i Worker assets:
+
+```bash
+cd cloudflare-worker
+npm run build:web
 ```
 
 Deploy:
@@ -423,10 +457,10 @@ npx wrangler secret put AVIATIONSTACK_API_KEY
 
 ## Git- og deployflyt
 
-Fast arbeidsflyt for alle Worker-/serverendringer:
+Fast arbeidsflyt for Worker-/serverendringer:
 
 1. Gjør endring lokalt.
-2. Kjør typecheck.
+2. Kjør `npm run typecheck` og `npm run build:web`.
 3. Commit til Git.
 4. Push til GitHub.
 5. Deploy til Cloudflare.
@@ -434,6 +468,19 @@ Fast arbeidsflyt for alle Worker-/serverendringer:
 Dette er en stående regel: GitHub skal oppdateres før Cloudflare deployes. Cloudflare skal ikke være eneste sted siste fungerende versjon finnes.
 
 Unntak er bare hvis brukeren eksplisitt ber om en direkte hotfix-deploy. Da skal endringen fortsatt commit'es og pushes til GitHub rett etterpå.
+
+For firmwareendringer:
+
+```bash
+pio run -d firmware-hub75
+pio run -d firmware-hub75 -t upload
+```
+
+Per nå er verifisert upload-/monitor-port:
+
+```text
+/dev/cu.usbmodem101
+```
 
 ## KV
 
@@ -474,21 +521,27 @@ Gjennomført rekkefølge:
 7. Logo virker: ESP32 henter og tegner `/public/logos-rgb565/{CODE}.rgb565`.
 8. Skjermstyring virker: Homey/API kan sette skjerm av/på og dag/natt-brightness.
 9. Lyd virker: testlyd og PA-varsel spiller via ES8311/NS4150.
+10. Realtime virker: firmware får config/display/sound-hendelser via WebSocket og fallback-polling.
+11. Klokkemodus virker: firmware tegner samme sekundlinje/minuttstack/7-segment-layout som emulatoren og kan spille tic-lyd.
 
 Firmware gjør dette:
 
 - koble til Wi-Fi
 - vise lokal boot-splash fra `firmware-hub75/src/splash_image.h`
 - hente `/public/device-config`
+- koble til `/public/realtime` og bruke `/public/realtime-state` som fallback
 - hente `/public/sound-state` for rask testlyd uten flydatahenting
 - respektere skjerm av/på, brightness, dag/natt-modus, farger, timezone og polling-intervall
 - hente `/public/display`
 - laste logo fra `/public/logos-rgb565/{CODE}.rgb565`
 - tegne 128 x 64 layout lokalt på HUB75-panelet
 - rotere mellom fly basert på payload og Worker-innstillinger
+- alternere follow-flight mellom live-målinger og `Flying over`
+- tegne klokkemodus lokalt med config-styrt gradient
 - vise gul blinkende pixel øverst til høyre når den henter config/status mens skjermen er av
 - la panelet være helt svart når skjermen er deaktivert
 - spille PA-lyd når idle avbrytes av et fly
+- spille klokketick med eget tic-volum, uavhengig av PA-/flightlydvolum
 - ikke kalle FR24, Avinor eller geokoding direkte
 
 Skjermen skal altså ikke ha egen forretningslogikk. Den skal bare presentere Workerens ferdige svar.
@@ -528,7 +581,7 @@ PA_CTRL    IO11
 
 Viktig: Arduino `I2S`-wrapperen setter ikke MCLK på dette oppsettet. Firmware bruker derfor ESP-IDF I2S-driveren direkte for lyd, med I2S0 og eksplisitt `mck_io_num = 12`. HUB75-biblioteket bruker I2S1.
 
-Testlyd ved 5 % var praktisk talt uhørbar på denne lydveien. Første bekreftede hørbare nivå var 35 %, og lydvolumet styres nå fra webpanelet.
+Testlyd ved 5 % var praktisk talt uhørbar på denne lydveien. Første bekreftede hørbare nivå var 35 %. PA-/testlydvolum styres med `Audio volume` i webpanelet. Klokketick styres separat med `Clock tick enabled` og `Clock tick volume`; firmware skalerer tic-samplene uavhengig av PA-volumet.
 
 ## Referanse
 
