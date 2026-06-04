@@ -161,6 +161,7 @@ uint32_t lastClockRenderAt = 0;
 uint32_t clockFallingStartedAt = 0;
 int8_t lastClockMinute = -1;
 int8_t lastClockSecond = -1;
+int8_t lastClockTickSecond = -1;
 int8_t fallingClockMinuteIndex = -1;
 size_t audioPlaybackOffset = 0;
 int16_t audioChunkBuffer[AudioChunkFrames * 2] = {};
@@ -197,10 +198,12 @@ bool requestConfigFetch();
 bool requestDisplayFetch();
 void queuePaSound(const char *reason);
 void queueClockTickSound();
+void updateClockTickSound();
 void handleRemoteSoundState(uint32_t remoteSoundTestNonce, uint8_t nextAudioVolumePercent,
                             bool nextClockTickEnabled, uint8_t nextClockTickVolumePercent);
 uint8_t percentToEs8311Volume(uint8_t percent);
 bool ensureAudioReady();
+bool readLocalTime(struct tm &timeinfo);
 void drawFetchIndicator();
 
 void startRealtimeTaskIfNeeded()
@@ -636,6 +639,32 @@ void queueClockTickSound()
     audioPlaying = false;
 }
 
+void updateClockTickSound()
+{
+    if (!screenActive || !clockLayoutActive || !clockTickEnabled || clockTickVolumePercent == 0)
+    {
+        lastClockTickSecond = -1;
+        return;
+    }
+
+    struct tm timeinfo;
+    if (!readLocalTime(timeinfo))
+    {
+        lastClockTickSecond = -1;
+        return;
+    }
+
+    if (lastClockTickSecond < 0)
+    {
+        lastClockTickSecond = timeinfo.tm_sec;
+        return;
+    }
+
+    if (timeinfo.tm_sec == lastClockTickSecond) return;
+    lastClockTickSecond = timeinfo.tm_sec;
+    queueClockTickSound();
+}
+
 String normalizeLedText(const String &value)
 {
     String result = value;
@@ -887,7 +916,6 @@ void drawClockMode()
     const bool hasTime = readLocalTime(timeinfo);
     const uint16_t topColor = panelColor(clockGradientTopR, clockGradientTopG, clockGradientTopB);
     const bool wasClockLayoutActive = clockLayoutActive;
-    bool shouldPlayTick = false;
 
     idleLayoutActive = false;
     liveLayoutActive = false;
@@ -903,10 +931,6 @@ void drawClockMode()
             lastClockSecond = timeinfo.tm_sec;
             fallingClockMinuteIndex = -1;
             clockFallingStartedAt = 0;
-        }
-        else if (lastClockSecond >= 0 && timeinfo.tm_sec != lastClockSecond)
-        {
-            shouldPlayTick = true;
         }
 
         if (lastClockMinute < 0)
@@ -981,10 +1005,6 @@ void drawClockMode()
 
     drawFetchIndicator();
     presentFrame();
-    if (shouldPlayTick)
-    {
-        queueClockTickSound();
-    }
 }
 
 uint16_t tickerOffset(uint16_t overflow)
@@ -2795,6 +2815,7 @@ void loop()
         lastClockRenderAt = now;
         drawClockMode();
     }
+    updateClockTickSound();
 
     delay(MainLoopDelayMs);
 }

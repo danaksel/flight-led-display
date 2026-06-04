@@ -1165,7 +1165,7 @@ function SliderField(props: { label: string; value: number; min: number; max: nu
         step={props.step ?? 1}
         value={props.value}
         onChange={(event) => props.onChange(Number(event.target.value))}
-        style={{ background: `linear-gradient(90deg, #050403 0%, #050403 ${progress}%, rgba(5, 4, 3, 0.18) ${progress}%, rgba(5, 4, 3, 0.18) 100%)` }}
+        style={{ background: `linear-gradient(90deg, var(--primary) 0%, var(--primary) ${progress}%, rgba(60, 36, 21, 0.18) ${progress}%, rgba(60, 36, 21, 0.18) 100%)` }}
       />
     </div>
   );
@@ -1230,7 +1230,7 @@ function MapPicker(props: { lat: number; lon: number; radiusKm: number; onChange
   return <div ref={containerRef} style={{ height: "220px", overflow: "hidden", borderRadius: "15px", border: "1px solid rgba(60, 36, 21, 0.2)" }} />;
 }
 
-function EmulatorPreview(props: { config: Config; preview: PreviewState; screenState: ScreenState }) {
+function EmulatorPreview(props: { config: Config; preview: PreviewState; screenState: ScreenState; soundEnabled: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const logoCacheRef = useRef<Map<string, HTMLImageElement | null>>(new Map());
   const [logoVersion, setLogoVersion] = useState(0);
@@ -1313,7 +1313,7 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
   }, []);
 
   useEffect(() => {
-    if (!props.screenState.active) return;
+    if (!props.screenState.active || !props.soundEnabled) return;
     if (props.config.device.displayMode !== "clock") return;
     if (!props.config.device.clockTickEnabled || props.config.device.clockTickVolumePercent <= 0) return;
 
@@ -1329,7 +1329,7 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
 
     scheduleNextTick();
     return () => window.clearTimeout(timer);
-  }, [props.config.device.clockTickEnabled, props.config.device.clockTickVolumePercent, props.config.device.displayMode, props.screenState.active]);
+  }, [props.config.device.clockTickEnabled, props.config.device.clockTickVolumePercent, props.config.device.displayMode, props.screenState.active, props.soundEnabled]);
 
   useEffect(() => {
     if (!props.screenState.active) return;
@@ -1531,6 +1531,7 @@ export default function App() {
   const [activeSection, setActiveSection] = useState(0);
   const [busy, setBusy] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
+  const [emulatorSoundEnabled, setEmulatorSoundEnabled] = useState(true);
   const slidesRef = useRef<HTMLDivElement | null>(null);
   const navRef = useRef<HTMLDivElement | null>(null);
   const navDragRef = useRef({ active: false, pointerId: -1, x: 0, left: 0, moved: false, pressedIndex: -1 });
@@ -1709,7 +1710,7 @@ export default function App() {
         </div>
       </header>
 
-      <EmulatorPreview config={config} preview={preview} screenState={screenState} />
+      <EmulatorPreview config={config} preview={preview} screenState={screenState} soundEnabled={emulatorSoundEnabled} />
 
       <div
         ref={navRef}
@@ -1994,6 +1995,9 @@ export default function App() {
               <div style={cardStyle()}>
                 <div style={{ fontSize: "14px", fontWeight: 600 }}>Display preview</div>
                 <div style={{ marginTop: "6px", fontSize: "12px", color: "var(--muted-foreground)" }}>{preview.meta || "Ingen data lastet"}</div>
+                <div style={{ marginTop: "12px" }}>
+                  <ToggleRow label="Lyd i emulator" hint="Slår bare av/på lyd i web-previewen. Skjermen styres fortsatt av Clock/aircraft-lydinnstillingene." checked={emulatorSoundEnabled} onChange={setEmulatorSoundEnabled} />
+                </div>
                 <div style={{ display: "flex", gap: "10px", marginTop: "12px" }}>
                   <button type="button" onClick={() => void loadPreview()} style={{ flex: 1, height: "40px", borderRadius: "8px", border: 0, background: "var(--primary)", color: "#fff" }}>
                     Oppdater skjermdata
