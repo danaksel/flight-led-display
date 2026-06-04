@@ -291,14 +291,16 @@ const appStyles = {
     position: "relative",
     margin: "0 auto",
     display: "flex",
-    height: "100vh",
-    width: "100%",
-    maxWidth: "393px",
+    minHeight: "100dvh",
+    height: "100dvh",
+    width: "100vw",
+    maxWidth: "480px",
     flexDirection: "column" as const,
     overflow: "hidden",
     background: "var(--background)",
     color: "var(--foreground)",
-    boxShadow: "var(--shadow)"
+    boxShadow: "var(--shadow)",
+    isolation: "isolate" as const
   },
   header: {
     flexShrink: 0,
@@ -328,7 +330,22 @@ const appStyles = {
     minWidth: "100%",
     flex: "0 0 100%",
     overflowY: "auto" as const,
-    padding: "0 20px 112px"
+    padding: "0 20px 168px"
+  },
+  saveDock: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 1000,
+    minHeight: "150px",
+    display: "flex",
+    flexDirection: "column" as const,
+    justifyContent: "flex-end",
+    padding: "0 20px max(16px, env(safe-area-inset-bottom))",
+    background: "linear-gradient(180deg, rgba(223, 218, 215, 0) 0%, rgba(223, 218, 215, 0.86) 42%, var(--background) 72%)",
+    pointerEvents: "auto" as const,
+    transform: "translateZ(0)"
   }
 };
 
@@ -1652,6 +1669,7 @@ export default function App() {
                   Sist byttet lysmodus: {formatTimestamp(screenState.lastBrightnessModeChangedAt)}
                 </div>
               </div>
+              <ToggleRow label="Display enabled" checked={config.device.enabled} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, enabled: value } }))} />
               <Field label="Display mode">
                 <SelectInput value={config.device.displayMode} onChange={(event) => updateConfig((current) => ({ ...current, device: { ...current.device, displayMode: event.target.value as "flight" | "clock" } }))}>
                   <option value="flight">Flight display</option>
@@ -1676,6 +1694,15 @@ export default function App() {
                 </div>
                 <ToggleRow label="Clock tick enabled" checked={config.device.clockTickEnabled} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, clockTickEnabled: value } }))} />
                 <SliderField label="Clock tick volume" value={config.device.clockTickVolumePercent} min={0} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, clockTickVolumePercent: value } }))} />
+                <ToggleRow label="Night mode enabled" checked={config.device.nightMode.enabled} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, nightMode: { ...current.device.nightMode, enabled: value } } }))} />
+                <div style={{ display: "grid", gap: "12px", gridTemplateColumns: "1fr 1fr" }}>
+                  <Field label="Night start">
+                    <TextInput type="time" value={config.device.nightMode.start} onChange={(event) => updateConfig((current) => ({ ...current, device: { ...current.device, nightMode: { ...current.device.nightMode, start: event.target.value } } }))} />
+                  </Field>
+                  <Field label="Night end">
+                    <TextInput type="time" value={config.device.nightMode.end} onChange={(event) => updateConfig((current) => ({ ...current, device: { ...current.device, nightMode: { ...current.device.nightMode, end: event.target.value } } }))} />
+                  </Field>
+                </div>
                 <SliderField label="Night brightness" value={config.device.nightMode.brightness} min={0} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, nightMode: { ...current.device.nightMode, brightness: value } } }))} />
                 <SliderField label="Config refresh" value={config.device.configRefreshSeconds} min={60} max={3600} step={30} suffix=" s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, configRefreshSeconds: value } }))} />
               </Advanced>
@@ -1890,7 +1917,7 @@ export default function App() {
         </div>
       </main>
 
-      <div style={{ position: "absolute", left: "20px", right: "20px", bottom: "20px", zIndex: 20 }}>
+      <div style={appStyles.saveDock}>
         <button
           type="button"
           onClick={() => void saveConfig()}
@@ -1904,7 +1931,10 @@ export default function App() {
             color: "#fff",
             fontSize: "16px",
             fontWeight: 600,
-            boxShadow: "0 18px 30px rgba(60, 36, 21, 0.22)"
+            boxShadow: "0 18px 30px rgba(60, 36, 21, 0.22)",
+            pointerEvents: "auto",
+            position: "relative" as const,
+            zIndex: 1
           }}
         >
           {busy ? "Lagrer..." : "Save settings"}
@@ -1914,7 +1944,10 @@ export default function App() {
             marginTop: "10px",
             textAlign: "center",
             fontSize: "12px",
-            color: statusTone === "error" ? "#9d3a23" : statusTone === "success" ? "#214b25" : "var(--muted-foreground)"
+            color: statusTone === "error" ? "#9d3a23" : statusTone === "success" ? "#214b25" : "var(--muted-foreground)",
+            pointerEvents: "auto",
+            position: "relative" as const,
+            zIndex: 1
           }}
         >
           {status}
