@@ -335,15 +335,16 @@ const appStyles = {
   slides: {
     display: "flex",
     height: "100%",
-    overflowX: "auto" as const,
-    scrollSnapType: "x mandatory" as const,
+    overflowX: "hidden" as const,
     scrollbarWidth: "none" as const,
-    scrollBehavior: "auto" as const
+    scrollBehavior: "auto" as const,
+    touchAction: "pan-y" as const
   },
   slide: {
     minWidth: "100%",
     flex: "0 0 100%",
     overflowY: "auto" as const,
+    touchAction: "pan-y" as const,
     padding: "0 20px 168px"
   },
   saveDock: {
@@ -1014,7 +1015,8 @@ function drawLiveFlightLayoutExact(ctx: CanvasRenderingContext2D, flight: Displa
 }
 
 function applyDisplayBrightness(ctx: CanvasRenderingContext2D, config: Config) {
-  const brightnessPercent = clamp(config.device.brightness, 1, 100) / 100;
+  const calibratedPercent = 11 + (clamp(config.device.brightness, 1, 100) - 1) * (89 / 99);
+  const brightnessPercent = calibratedPercent / 100;
   const brightness = 0.1 + 0.9 * Math.pow(brightnessPercent, 0.45);
   if (brightness >= 0.995) return;
   const imageData = ctx.getImageData(0, 0, 128, 64);
@@ -1163,7 +1165,7 @@ function SliderField(props: { label: string; value: number; min: number; max: nu
         step={props.step ?? 1}
         value={props.value}
         onChange={(event) => props.onChange(Number(event.target.value))}
-        style={{ background: `linear-gradient(90deg, var(--primary) 0%, var(--primary) ${progress}%, rgba(60, 36, 21, 0.22) ${progress}%, rgba(60, 36, 21, 0.22) 100%)` }}
+        style={{ background: `linear-gradient(90deg, #050403 0%, #050403 ${progress}%, rgba(5, 4, 3, 0.18) ${progress}%, rgba(5, 4, 3, 0.18) 100%)` }}
       />
     </div>
   );
@@ -1237,7 +1239,6 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
   const followPhaseStartedAtRef = useRef(0);
   const tickerStartedAtRef = useRef(0);
   const clockLastMinuteRef = useRef<number | null>(null);
-  const clockLastSecondRef = useRef<number | null>(null);
   const clockFallingMinuteIndexRef = useRef<number | null>(null);
   const clockFallingStartedAtRef = useRef(0);
   const lastFlightSignatureRef = useRef("");
@@ -1256,7 +1257,6 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
     followPhaseStartedAtRef.current = now;
     tickerStartedAtRef.current = now;
     clockLastMinuteRef.current = null;
-    clockLastSecondRef.current = null;
     clockFallingMinuteIndexRef.current = null;
     clockFallingStartedAtRef.current = 0;
     lastFlightSignatureRef.current = "";
@@ -1298,17 +1298,6 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
     source.start();
   }
 
-  function maybePlayEmulatorClockTick(second: number) {
-    if (clockLastSecondRef.current === null) {
-      clockLastSecondRef.current = second;
-      return;
-    }
-    if (second === clockLastSecondRef.current) return;
-    clockLastSecondRef.current = second;
-    if (!props.config.device.clockTickEnabled || props.config.device.clockTickVolumePercent <= 0) return;
-    void playEmulatorClockTick();
-  }
-
   useEffect(() => {
     const unlockAudio = () => {
       void ensureEmulatorAudioReady();
@@ -1322,6 +1311,25 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
       window.removeEventListener("touchstart", unlockAudio);
     };
   }, []);
+
+  useEffect(() => {
+    if (!props.screenState.active) return;
+    if (props.config.device.displayMode !== "clock") return;
+    if (!props.config.device.clockTickEnabled || props.config.device.clockTickVolumePercent <= 0) return;
+
+    let timer = 0;
+    const scheduleNextTick = () => {
+      const now = Date.now();
+      const delay = Math.max(20, 1000 - (now % 1000));
+      timer = window.setTimeout(() => {
+        void playEmulatorClockTick();
+        scheduleNextTick();
+      }, delay);
+    };
+
+    scheduleNextTick();
+    return () => window.clearTimeout(timer);
+  }, [props.config.device.clockTickEnabled, props.config.device.clockTickVolumePercent, props.config.device.displayMode, props.screenState.active]);
 
   useEffect(() => {
     if (!props.screenState.active) return;
@@ -1403,7 +1411,6 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
           clockLastMinuteRef.current = completedMinutes;
         }
         drawClockLayoutExact(renderCtx, props.config, clockFallingMinuteIndexRef.current, clockFallingStartedAtRef.current, now);
-        maybePlayEmulatorClockTick(time.second);
       } else if (activeFlight) {
         const isFollowLayout = activeFlight.layout === "follow_cycle" || activeFlight.layout === "follow_status";
         const detailCycleStartedAt = isFollowLayout ? followPhaseStartedAtRef.current : currentFlightCycleStartedAt;
