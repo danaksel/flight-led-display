@@ -187,13 +187,25 @@ type Section = {
 };
 
 const sections: Section[] = [
-  { id: "location", label: "LOCATION", icon: IconMapPin },
   { id: "display", label: "DISPLAY", icon: IconDisplay },
-  { id: "clock", label: "CLOCK", icon: IconClock },
   { id: "aircraft", label: "AIRCRAFT", icon: IconPlane },
+  { id: "clock", label: "CLOCK", icon: IconClock },
   { id: "timetable", label: "TIME TABLE", icon: IconTimetable },
+  { id: "location", label: "LOCATION", icon: IconMapPin },
   { id: "api", label: "API DATA", icon: IconApi }
 ];
+
+const slideOrder: SectionId[] = ["location", "display", "clock", "aircraft", "timetable", "api"];
+
+function slideIndexForSection(sectionIndex: number): number {
+  const section = sections[clamp(sectionIndex, 0, sections.length - 1)];
+  return Math.max(0, slideOrder.indexOf(section.id));
+}
+
+function sectionIndexForSlide(slideIndex: number): number {
+  const sectionId = slideOrder[clamp(slideIndex, 0, slideOrder.length - 1)];
+  return Math.max(0, sections.findIndex((section) => section.id === sectionId));
+}
 
 const defaultAircraftCategories: AircraftCategoryCode[] = ["P", "C", "M", "J", "H", "B", "G", "D", "V", "O", "N"];
 
@@ -306,7 +318,7 @@ const appStyles = {
   header: {
     flexShrink: 0,
     background: "var(--secondary)",
-    padding: "16px 20px"
+    padding: "max(16px, env(safe-area-inset-top)) 20px 16px"
   },
   navScroller: {
     flexShrink: 0,
@@ -1132,7 +1144,7 @@ function Advanced(props: { title: string; children: React.ReactNode; defaultOpen
   return (
     <details open={props.defaultOpen === true} style={cardStyle("0")}>
       <summary style={{ padding: "14px", cursor: "pointer", fontSize: "12px", fontWeight: 500, letterSpacing: "0.08em", textTransform: "uppercase" }}>{props.title}</summary>
-      <div style={{ display: "grid", gap: "12px", borderTop: "1px solid rgba(60, 36, 21, 0.1)", padding: "6px 14px 14px" }}>{props.children}</div>
+      <div style={{ display: "grid", gap: "12px", borderTop: "1px solid rgba(60, 36, 21, 0.1)", padding: "15px 14px 14px" }}>{props.children}</div>
     </details>
   );
 }
@@ -1355,14 +1367,14 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
 
   return (
     <div style={{ flexShrink: 0, marginBottom: "20px" }}>
-      <div style={{ position: "relative", aspectRatio: "1536 / 1024", width: "100%", overflow: "hidden" }}>
+      <div style={{ position: "relative", aspectRatio: "1209 / 686", width: "100%", overflow: "hidden" }}>
         <div
           style={{
             position: "absolute",
-            left: "22.92%",
-            top: "27.83%",
-            width: "55.79%",
-            height: "43.85%",
+            left: "14.31%",
+            top: "17.06%",
+            width: "70.89%",
+            height: "65.45%",
             zIndex: 0,
             display: "flex",
             alignItems: "center",
@@ -1413,11 +1425,17 @@ export default function App() {
     const node = slidesRef.current;
     if (!node) return;
     const handleScroll = () => {
-      const index = Math.round(node.scrollLeft / node.clientWidth);
-      setActiveSection(clamp(index, 0, sections.length - 1));
+      const slideIndex = Math.round(node.scrollLeft / node.clientWidth);
+      setActiveSection(sectionIndexForSlide(slideIndex));
     };
     node.addEventListener("scroll", handleScroll, { passive: true });
     return () => node.removeEventListener("scroll", handleScroll);
+  }, []);
+
+  useEffect(() => {
+    const node = slidesRef.current;
+    if (!node) return;
+    node.scrollLeft = slideIndexForSection(0) * node.clientWidth;
   }, []);
 
   function markDirty(message = "Endringer ikke lagret") {
@@ -1534,7 +1552,7 @@ export default function App() {
   }
 
   function activateSection(index: number) {
-    slidesRef.current?.scrollTo({ left: index * (slidesRef.current?.clientWidth ?? 0), behavior: "smooth" });
+    slidesRef.current?.scrollTo({ left: slideIndexForSection(index) * (slidesRef.current?.clientWidth ?? 0), behavior: "smooth" });
     setActiveSection(index);
   }
 
