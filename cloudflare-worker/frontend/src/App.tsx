@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import L from "leaflet";
 import frameImage from "./assets/led-frame.png";
-import { IconApi, IconDisplay, IconMapPin, IconPlane, IconTimetable, SkyframeLogo } from "./components/Icons";
+import { IconApi, IconClock, IconDisplay, IconMapPin, IconPlane, IconTimetable, SkyframeLogo } from "./components/Icons";
 
 type AircraftCategoryCode = "P" | "C" | "M" | "J" | "T" | "H" | "B" | "G" | "D" | "V" | "O" | "N";
 
@@ -178,7 +178,7 @@ type PreviewState = {
   mode: string;
 };
 
-type SectionId = "location" | "display" | "aircraft" | "timetable" | "api";
+type SectionId = "location" | "display" | "clock" | "aircraft" | "timetable" | "api";
 
 type Section = {
   id: SectionId;
@@ -189,6 +189,7 @@ type Section = {
 const sections: Section[] = [
   { id: "location", label: "LOCATION", icon: IconMapPin },
   { id: "display", label: "DISPLAY", icon: IconDisplay },
+  { id: "clock", label: "CLOCK", icon: IconClock },
   { id: "aircraft", label: "AIRCRAFT", icon: IconPlane },
   { id: "timetable", label: "TIME TABLE", icon: IconTimetable },
   { id: "api", label: "API DATA", icon: IconApi }
@@ -983,7 +984,8 @@ function drawLiveFlightLayoutExact(ctx: CanvasRenderingContext2D, flight: Displa
 }
 
 function applyDisplayBrightness(ctx: CanvasRenderingContext2D, config: Config) {
-  const brightness = clamp(config.device.brightness, 1, 100) / 100;
+  const brightnessPercent = clamp(config.device.brightness, 1, 100) / 100;
+  const brightness = 0.1 + 0.9 * Math.pow(brightnessPercent, 0.45);
   if (brightness >= 0.995) return;
   const imageData = ctx.getImageData(0, 0, 128, 64);
   const data = imageData.data;
@@ -1068,10 +1070,11 @@ function TextInput(props: React.InputHTMLAttributes<HTMLInputElement>) {
         width: "100%",
         borderRadius: "8px",
         border: "1px solid var(--border-mid)",
-        background: "var(--card)",
+        background: props.disabled ? "rgba(255, 255, 255, 0.48)" : "var(--card)",
         padding: "0 12px",
         fontSize: "16px",
-        color: "var(--foreground)"
+        color: props.disabled ? "var(--muted-foreground)" : "var(--foreground)",
+        opacity: props.disabled ? 0.72 : 1
       }}
     />
   );
@@ -1129,7 +1132,7 @@ function Advanced(props: { title: string; children: React.ReactNode; defaultOpen
   return (
     <details open={props.defaultOpen === true} style={cardStyle("0")}>
       <summary style={{ padding: "14px", cursor: "pointer", fontSize: "12px", fontWeight: 500, letterSpacing: "0.08em", textTransform: "uppercase" }}>{props.title}</summary>
-      <div style={{ display: "grid", gap: "12px", borderTop: "1px solid rgba(60, 36, 21, 0.1)", padding: "0 14px 14px" }}>{props.children}</div>
+      <div style={{ display: "grid", gap: "12px", borderTop: "1px solid rgba(60, 36, 21, 0.1)", padding: "6px 14px 14px" }}>{props.children}</div>
     </details>
   );
 }
@@ -1649,20 +1652,27 @@ export default function App() {
                   <TextInput value={config.lon} inputMode="decimal" onChange={(event) => updateConfig((current) => ({ ...current, lon: Number(event.target.value) || 0 }))} />
                 </Field>
               </div>
-              <Advanced title="Location settings">
-                <Field label="Airport for timetable">
-                  <TextInput value={config.homeAirportIata} maxLength={4} onChange={(event) => updateConfig((current) => ({ ...current, homeAirportIata: event.target.value.toUpperCase() }))} />
-                </Field>
-                <Field label="Timezone">
-                  <TextInput value={config.device.timezone} onChange={(event) => updateConfig((current) => ({ ...current, device: { ...current.device, timezone: event.target.value } }))} />
-                </Field>
-                <SliderField label="Radius" value={config.radiusKm} min={1} max={250} suffix=" km" onChange={(value) => updateConfig((current) => ({ ...current, radiusKm: value }))} />
-              </Advanced>
+              <Field label="Airport for timetable">
+                <TextInput value={config.homeAirportIata} maxLength={4} onChange={(event) => updateConfig((current) => ({ ...current, homeAirportIata: event.target.value.toUpperCase() }))} />
+              </Field>
+              <Field label="Timezone">
+                <TextInput value={config.device.timezone} onChange={(event) => updateConfig((current) => ({ ...current, device: { ...current.device, timezone: event.target.value } }))} />
+              </Field>
+              <SliderField label="Radius" value={config.radiusKm} min={1} max={250} suffix=" km" onChange={(value) => updateConfig((current) => ({ ...current, radiusKm: value }))} />
             </div>
           </section>
 
           <section style={appStyles.slide}>
             <div style={{ display: "grid", gap: "14px" }}>
+              <Field label="Display mode">
+                <SelectInput value={config.device.displayMode} onChange={(event) => updateConfig((current) => ({ ...current, device: { ...current.device, displayMode: event.target.value as "flight" | "clock" } }))}>
+                  <option value="flight">Flight display</option>
+                  <option value="clock">Clock</option>
+                </SelectInput>
+              </Field>
+              <SliderField label="Brightness day" value={config.device.brightness} min={1} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, brightness: value } }))} />
+              <SliderField label="Night brightness" value={config.device.nightMode.brightness} min={0} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, nightMode: { ...current.device.nightMode, brightness: value } } }))} />
+              <SliderField label="Config refresh" value={config.device.configRefreshSeconds} min={60} max={3600} step={30} suffix=" s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, configRefreshSeconds: value } }))} />
               <div style={cardStyle()}>
                 <div style={{ fontSize: "14px", lineHeight: 1.45 }}>{screenSummary}</div>
                 <div style={{ marginTop: "8px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>
@@ -1673,33 +1683,21 @@ export default function App() {
                   Sist byttet lysmodus: {formatTimestamp(screenState.lastBrightnessModeChangedAt)}
                 </div>
               </div>
-              <Field label="Display mode">
-                <SelectInput value={config.device.displayMode} onChange={(event) => updateConfig((current) => ({ ...current, device: { ...current.device, displayMode: event.target.value as "flight" | "clock" } }))}>
-                  <option value="flight">Flight display</option>
-                  <option value="clock">Clock</option>
-                </SelectInput>
-              </Field>
-              <SliderField label="Audio volume" value={config.device.audioVolumePercent} min={0} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, audioVolumePercent: value } }))} />
-              <button type="button" onClick={() => void triggerSoundTest()} style={{ height: "42px", borderRadius: "8px", border: "1px solid var(--border-mid)", background: "var(--card)", color: "var(--foreground)" }}>
-                Test lyd nå
-              </button>
-              <div style={{ fontSize: "12px", color: "var(--muted-foreground)" }}>Lydtest: {formatTimestamp(soundState.lastTriggeredAt)}</div>
-              <SliderField label="Brightness day" value={config.device.brightness} min={1} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, brightness: value } }))} />
-              <SliderField label="Fetch interval" value={config.device.pollSeconds} min={30} max={900} step={5} suffix=" s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, pollSeconds: value } }))} />
-              <Advanced title="Clock and night mode">
-                <div style={{ display: "grid", gap: "12px", gridTemplateColumns: "1fr 1fr" }}>
-                  <Field label="Clock top">
-                    <ColorInput value={config.device.clockTopColor} onChange={(event) => updateConfig((current) => ({ ...current, device: { ...current.device, clockTopColor: event.target.value } }))} />
-                  </Field>
-                  <Field label="Clock bottom">
-                    <ColorInput value={config.device.clockColor} onChange={(event) => updateConfig((current) => ({ ...current, device: { ...current.device, clockColor: event.target.value } }))} />
-                  </Field>
-                </div>
-                <ToggleRow label="Clock tick enabled" checked={config.device.clockTickEnabled} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, clockTickEnabled: value } }))} />
-                <SliderField label="Clock tick volume" value={config.device.clockTickVolumePercent} min={0} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, clockTickVolumePercent: value } }))} />
-                <SliderField label="Night brightness" value={config.device.nightMode.brightness} min={0} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, nightMode: { ...current.device.nightMode, brightness: value } } }))} />
-                <SliderField label="Config refresh" value={config.device.configRefreshSeconds} min={60} max={3600} step={30} suffix=" s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, configRefreshSeconds: value } }))} />
-              </Advanced>
+            </div>
+          </section>
+
+          <section style={appStyles.slide}>
+            <div style={{ display: "grid", gap: "14px" }}>
+              <div style={{ display: "grid", gap: "12px", gridTemplateColumns: "1fr 1fr" }}>
+                <Field label="Clock top">
+                  <ColorInput value={config.device.clockTopColor} onChange={(event) => updateConfig((current) => ({ ...current, device: { ...current.device, clockTopColor: event.target.value } }))} />
+                </Field>
+                <Field label="Clock bottom">
+                  <ColorInput value={config.device.clockColor} onChange={(event) => updateConfig((current) => ({ ...current, device: { ...current.device, clockColor: event.target.value } }))} />
+                </Field>
+              </div>
+              <ToggleRow label="Clock tick enabled" checked={config.device.clockTickEnabled} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, clockTickEnabled: value } }))} />
+              <SliderField label="Clock tick volume" value={config.device.clockTickVolumePercent} min={0} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, clockTickVolumePercent: value } }))} />
             </div>
           </section>
 
@@ -1711,26 +1709,44 @@ export default function App() {
                 checked={config.device.airspaceMonitoringEnabled}
                 onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, airspaceMonitoringEnabled: value } }))}
               />
-              <ToggleRow label="Følg flightnummer" checked={config.follow.enabled} onChange={(value) => updateConfig((current) => ({ ...current, follow: { ...current.follow, enabled: value } }))} />
-              <Field label="Flight numbers">
-                <TextInput
-                  value={config.follow.flights.join(", ")}
-                  placeholder="SK4673, DY1304, DOC45"
-                  onChange={(event) =>
-                    updateConfig((current) => ({
-                      ...current,
-                      follow: {
-                        ...current.follow,
-                        flights: event.target.value
-                          .split(/[,\s]+/)
-                          .map((value) => value.trim().toUpperCase())
-                          .filter(Boolean)
-                          .slice(0, 3)
-                      }
-                    }))
-                  }
-                />
-              </Field>
+              <SliderField label="Fetch interval" value={config.device.pollSeconds} min={30} max={900} step={5} suffix=" s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, pollSeconds: value } }))} />
+              <SliderField label="Audio volume" value={config.device.audioVolumePercent} min={0} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, audioVolumePercent: value } }))} />
+              <button type="button" onClick={() => void triggerSoundTest()} style={{ height: "42px", borderRadius: "8px", border: "1px solid var(--border-mid)", background: "var(--card)", color: "var(--foreground)" }}>
+                Test flight-lyd
+              </button>
+              <div style={{ fontSize: "12px", color: "var(--muted-foreground)" }}>Siste flight-lydtest: {formatTimestamp(soundState.lastTriggeredAt)}</div>
+              <div style={{ ...cardStyle(), display: "grid", gap: "12px" }}>
+                <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", cursor: "pointer" }}>
+                  <span style={{ minWidth: 0, flex: "1 1 auto" }}>
+                    <span style={{ display: "block", fontSize: "14px" }}>Følg flightnummer</span>
+                    <span style={{ display: "block", marginTop: "4px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.4 }}>Når dette er av ignoreres listen under.</span>
+                  </span>
+                  <span style={{ position: "relative", width: "46px", minWidth: "46px", flex: "0 0 46px", height: "28px", borderRadius: "999px", background: config.follow.enabled ? "var(--primary)" : "var(--secondary)", transition: "background 160ms ease" }}>
+                    <input type="checkbox" checked={config.follow.enabled} onChange={(event) => updateConfig((current) => ({ ...current, follow: { ...current.follow, enabled: event.target.checked } }))} style={{ position: "absolute", inset: 0, opacity: 0 }} />
+                    <span style={{ position: "absolute", top: "3px", left: config.follow.enabled ? "21px" : "3px", width: "22px", height: "22px", borderRadius: "999px", background: "#fff", transition: "left 160ms ease" }} />
+                  </span>
+                </label>
+                <Field label="Flight numbers">
+                  <TextInput
+                    value={config.follow.flights.join(", ")}
+                    disabled={!config.follow.enabled}
+                    placeholder="SK4673, DY1304, DOC45"
+                    onChange={(event) =>
+                      updateConfig((current) => ({
+                        ...current,
+                        follow: {
+                          ...current.follow,
+                          flights: event.target.value
+                            .split(/[,\s]+/)
+                            .map((value) => value.trim().toUpperCase())
+                            .filter(Boolean)
+                            .slice(0, 3)
+                        }
+                      }))
+                    }
+                  />
+                </Field>
+              </div>
               <Advanced title="Flight filters">
                 <div style={{ display: "grid", gap: "10px" }}>
                   {Object.entries(categoryLabels).map(([code, info]) => {
@@ -1838,11 +1854,14 @@ export default function App() {
                 <div style={{ marginTop: "6px", fontSize: "12px", color: "var(--muted-foreground)" }}>{preview.meta || "Ingen data lastet"}</div>
                 <div style={{ display: "flex", gap: "10px", marginTop: "12px" }}>
                   <button type="button" onClick={() => void loadPreview()} style={{ flex: 1, height: "40px", borderRadius: "8px", border: 0, background: "var(--primary)", color: "#fff" }}>
-                    Hent data
+                    Oppdater skjermdata
                   </button>
                   <button type="button" onClick={() => void loadAvinor()} style={{ flex: 1, height: "40px", borderRadius: "8px", border: "1px solid var(--border-mid)", background: "var(--card)", color: "var(--foreground)" }}>
-                    Hent Avinor
+                    Oppdater Avinor
                   </button>
+                </div>
+                <div style={{ marginTop: "10px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>
+                  Skjermdata bruker samme endepunkt som LED-panelet. Avinor oppdaterer tidstabellgrunnlaget alene.
                 </div>
               </div>
               {preview.flights.length ? (

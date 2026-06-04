@@ -255,12 +255,16 @@ bool screenActive = true;
 String brightnessMode = "day";
 uint8_t effectiveBrightness = Brightness;
 uint32_t screenInactiveSince = 0;
-uint32_t lastOffIndicatorAt = 0;
 bool lastOffIndicatorVisible = false;
 
 uint16_t colorHeader()
 {
     return timetableHeaderColor ? timetableHeaderColor : panelColor(0xF7, 0xB5, 0x00);
+}
+
+uint16_t colorFetchIndicator()
+{
+    return panelColor(0x03, 0x03, 0x03);
 }
 
 uint16_t colorData()
@@ -1202,17 +1206,11 @@ void drawStartupSplashStatus(const char *title, const char *line1, const char *l
 void updateOffFetchIndicator()
 {
     if (screenActive) return;
+    if (!lastOffIndicatorVisible) return;
 
-    const uint32_t now = millis();
-    if (now - lastOffIndicatorAt < 120) return;
-    lastOffIndicatorAt = now;
-
-    const bool visible = configFetchActive && ((now / 300UL) % 2 == 0);
-    if (visible == lastOffIndicatorVisible) return;
-
-    display->drawPixel(PanelWidth - 1, 0, visible ? colorHeader() : panelColor(0, 0, 0));
+    display->drawPixel(PanelWidth - 1, 0, panelColor(0, 0, 0));
     presentFrame();
-    lastOffIndicatorVisible = visible;
+    lastOffIndicatorVisible = false;
 }
 
 uint32_t inactiveConfigPollSeconds()
@@ -1232,9 +1230,11 @@ bool hasActiveContentLayout()
 void drawFetchIndicator()
 {
     if (!(configFetchActive || displayFetchActive)) return;
+    if (!screenActive) return;
     if ((millis() / 300UL) % 2 != 0) return;
 
-    display->drawPixel(PanelWidth - 1, 0, colorHeader());
+    display->drawPixel(PanelWidth - 1, 0, colorFetchIndicator());
+    lastOffIndicatorVisible = true;
 }
 
 void redrawActiveContent()

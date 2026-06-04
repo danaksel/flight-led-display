@@ -72,6 +72,20 @@ export function IconDisplay({ className }: { className?: string }) {
   );
 }
 
+export function IconClock({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 20 20">
+      <path
+        d="M10 2.75a7.25 7.25 0 1 0 0 14.5a7.25 7.25 0 0 0 0-14.5ZM10 6.25v4.1l2.65 1.55"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.7"
+      />
+    </svg>
+  );
+}
+
 export function IconPlane({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" viewBox="0 0 20 20">
