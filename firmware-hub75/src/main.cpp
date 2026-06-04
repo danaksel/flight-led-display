@@ -7,8 +7,10 @@
 #include <WebSocketsClient.h>
 #include <Wire.h>
 #include <driver/i2s.h>
+#include <sys/time.h>
 #include "WiFiSecrets.h"
 #include "pa_audio.h"
+#include "tic_audio.h"
 #include "splash_image.h"
 
 #ifndef FLIGHT_DEVICE_TOKEN
@@ -58,12 +60,17 @@ constexpr uint8_t ClockStackTopY = 4;
 constexpr uint8_t ClockStackBottomY = 62;
 constexpr uint8_t ClockTextStartX = 70;
 constexpr uint8_t ClockTextTopY = 3;
-constexpr uint8_t ClockTextMiddleY = 27;
-constexpr uint8_t ClockTextBottomY = 49;
+constexpr uint8_t ClockTextMiddleY = 24;
+constexpr uint8_t ClockTextBottomY = 45;
+constexpr uint8_t ClockDigitWidth = 7;
+constexpr uint8_t ClockDigitHeight = 17;
+constexpr uint8_t ClockDigitAdvance = 9;
 constexpr uint16_t ClockMinuteFallMs = 400;
 constexpr uint16_t TickerHoldMs = 900;
 constexpr uint32_t AudioSampleRate = 16000;
 constexpr uint8_t AudioVolumePercentDefault = 5;
+constexpr uint8_t ClockTickVolumePercentDefault = 20;
+constexpr uint8_t ClockRenderIntervalMs = 15;
 constexpr uint8_t RealtimeStatePollSeconds = 5;
 constexpr uint8_t MainLoopDelayMs = 20;
 constexpr uint8_t WifiReconnectSeconds = 30;
@@ -144,12 +151,16 @@ bool audioPlaying = false;
 bool liveFlightsPreviouslyVisible = false;
 bool audioTestNonceSeen = false;
 uint8_t audioVolumePercent = AudioVolumePercentDefault;
+uint8_t activeAudioVolumePercent = AudioVolumePercentDefault;
+bool clockTickEnabled = false;
+uint8_t clockTickVolumePercent = ClockTickVolumePercentDefault;
 int8_t audioI2cSdaPin = -1;
 int8_t audioI2cSclPin = -1;
 uint32_t lastSoundTestNonce = 0;
 uint32_t lastClockRenderAt = 0;
 uint32_t clockFallingStartedAt = 0;
 int8_t lastClockMinute = -1;
+int8_t lastClockSecond = -1;
 int8_t fallingClockMinuteIndex = -1;
 size_t audioPlaybackOffset = 0;
 int16_t audioChunkBuffer[AudioChunkFrames * 2] = {};
@@ -185,6 +196,10 @@ void realtimeTask(void *);
 bool requestConfigFetch();
 bool requestDisplayFetch();
 void queuePaSound(const char *reason);
+void queueClockTickSound();
+void handleRemoteSoundState(uint32_t remoteSoundTestNonce, uint8_t nextAudioVolumePercent,
+                            bool nextClockTickEnabled, uint8_t nextClockTickVolumePercent);
+uint8_t percentToEs8311Volume(uint8_t percent);
 bool ensureAudioReady();
 void drawFetchIndicator();
 
@@ -231,6 +246,9 @@ uint16_t lineRouteProgressColor = 0;
 uint8_t clockGradientBottomR = 0x08;
 uint8_t clockGradientBottomG = 0x1B;
 uint8_t clockGradientBottomB = 0x6B;
+uint8_t clockGradientTopR = 0xFF;
+uint8_t clockGradientTopG = 0xFF;
+uint8_t clockGradientTopB = 0xFF;
 String deviceTimeZone = "Europe/Oslo";
 String deviceTimeZonePosix = OsloTimeZone;
 bool screenActive = true;
@@ -331,6 +349,13 @@ bool audioWriteRegisterChecked(uint8_t reg, uint8_t value)
     return ok;
 }
 
+void setCodecVolume(uint8_t percent)
+{
+    activeAudioVolumePercent = constrain(percent, static_cast<uint8_t>(0), static_cast<uint8_t>(100));
+    if (!audioReady) return;
+    audioWriteRegisterChecked(0x32, percentToEs8311Volume(activeAudioVolumePercent));
+}
+
 uint8_t percentToEs8311Volume(uint8_t percent)
 {
     if (percent == 0) return 0;
@@ -342,8 +367,7 @@ uint8_t percentToEs8311Volume(uint8_t percent)
 void applyAudioVolume(uint8_t percent)
 {
     audioVolumePercent = constrain(percent, static_cast<uint8_t>(0), static_cast<uint8_t>(100));
-    if (!audioReady) return;
-    audioWriteRegisterChecked(0x32, percentToEs8311Volume(audioVolumePercent));
+    setCodecVolume(audioVolumePercent);
 }
 
 bool initEs8311CodecFromMclk()
@@ -522,24 +546,34 @@ bool ensureAudioReady()
     return true;
 }
 
-void playPaSoundBlocking()
+void playRawSoundBlocking(const unsigned char *rawData, size_t rawLength, uint8_t codecVolumePercent, uint8_t sampleVolumePercent = 100)
 {
+    const uint8_t restoreVolume = activeAudioVolumePercent;
+    const uint8_t requestedVolume = constrain(codecVolumePercent, static_cast<uint8_t>(0), static_cast<uint8_t>(100));
+    const uint8_t sampleVolume = constrain(sampleVolumePercent, static_cast<uint8_t>(0), static_cast<uint8_t>(100));
+    if (requestedVolume != restoreVolume)
+    {
+        setCodecVolume(requestedVolume);
+    }
+
     audioPlaybackOffset = 0;
     uint16_t zeroWriteCount = 0;
 
-    while (audioReady && audioPlaybackOffset < pa_audio_mono_16k_raw_len)
+    while (audioReady && audioPlaybackOffset < rawLength)
     {
-        const size_t remainingFrames = (pa_audio_mono_16k_raw_len - audioPlaybackOffset) / 2;
+        const size_t remainingFrames = (rawLength - audioPlaybackOffset) / 2;
         const size_t framesToWrite = min(remainingFrames, AudioChunkFrames);
 
         for (size_t i = 0; i < framesToWrite; ++i)
         {
             const size_t byteIndex = audioPlaybackOffset + i * 2;
             const int16_t monoSample = static_cast<int16_t>(
-                static_cast<uint16_t>(pa_audio_mono_16k_raw[byteIndex]) |
-                (static_cast<uint16_t>(pa_audio_mono_16k_raw[byteIndex + 1]) << 8));
-            audioChunkBuffer[i * 2] = monoSample;
-            audioChunkBuffer[i * 2 + 1] = monoSample;
+                static_cast<uint16_t>(rawData[byteIndex]) |
+                (static_cast<uint16_t>(rawData[byteIndex + 1]) << 8));
+            const int16_t scaledSample = static_cast<int16_t>(
+                constrain((static_cast<int32_t>(monoSample) * sampleVolume) / 100L, -32768L, 32767L));
+            audioChunkBuffer[i * 2] = scaledSample;
+            audioChunkBuffer[i * 2 + 1] = scaledSample;
         }
 
         const size_t targetBytes = framesToWrite * sizeof(int16_t) * 2;
@@ -562,6 +596,15 @@ void playPaSoundBlocking()
     }
 
     audioPlaybackOffset = 0;
+    if (activeAudioVolumePercent != restoreVolume)
+    {
+        setCodecVolume(restoreVolume);
+    }
+}
+
+void playPaSoundBlocking()
+{
+    playRawSoundBlocking(pa_audio_mono_16k_raw, pa_audio_mono_16k_raw_len, audioVolumePercent);
 }
 
 void queuePaSound(const char *reason)
@@ -575,6 +618,18 @@ void queuePaSound(const char *reason)
     playPaSoundBlocking();
     audioPlaying = false;
     Serial.println("PA sound finished");
+}
+
+void queueClockTickSound()
+{
+    if (!clockTickEnabled) return;
+    if (clockTickVolumePercent == 0) return;
+    if (!ensureAudioReady()) return;
+    if (audioPlaying) return;
+
+    audioPlaying = true;
+    playRawSoundBlocking(tic_audio_mono_16k_raw, tic_audio_mono_16k_raw_len, 100, clockTickVolumePercent);
+    audioPlaying = false;
 }
 
 String normalizeLedText(const String &value)
@@ -741,23 +796,59 @@ uint16_t lerpClockColor(uint8_t fromR, uint8_t fromG, uint8_t fromB,
 uint16_t minuteStackColorForDepth(uint8_t depth)
 {
     const uint8_t step = static_cast<uint8_t>(min<uint8_t>(60, max<uint8_t>(1, depth)));
-    return lerpClockColor(0xFF, 0xFF, 0xFF, clockGradientBottomR, clockGradientBottomG, clockGradientBottomB, step, 60);
+    return lerpClockColor(clockGradientTopR, clockGradientTopG, clockGradientTopB,
+                          clockGradientBottomR, clockGradientBottomG, clockGradientBottomB, step, 60);
 }
 
-void drawClockTextGlyphs(int16_t x, int16_t y, const char *text, uint8_t size)
+uint16_t clockTextFieldColor(uint8_t centerY)
 {
-    const uint16_t white = panelColor(0xFF, 0xFF, 0xFF);
-    const uint16_t black = panelColor(0, 0, 0);
-    int16_t cursorX = x;
-    for (size_t i = 0; text[i] != '\0'; ++i)
+    const uint8_t step = static_cast<uint8_t>(min<uint8_t>(58, max<uint8_t>(0, centerY - ClockTextTopY)));
+    return lerpClockColor(clockGradientTopR, clockGradientTopG, clockGradientTopB,
+                          clockGradientBottomR, clockGradientBottomG, clockGradientBottomB, step, 58);
+}
+
+void drawThinClockSegment(int16_t x, int16_t y, char segment, uint16_t color)
+{
+    if (segment == 'a') display->drawFastHLine(x + 1, y, 5, color);
+    if (segment == 'b') display->drawFastVLine(x + 6, y + 1, 7, color);
+    if (segment == 'c') display->drawFastVLine(x + 6, y + 9, 7, color);
+    if (segment == 'd') display->drawFastHLine(x + 1, y + 16, 5, color);
+    if (segment == 'e') display->drawFastVLine(x, y + 9, 7, color);
+    if (segment == 'f') display->drawFastVLine(x, y + 1, 7, color);
+    if (segment == 'g') display->drawFastHLine(x + 1, y + 8, 5, color);
+}
+
+void drawThinClockChar(int16_t x, int16_t y, char c, uint16_t color)
+{
+    const char *segments = "";
+    switch (c)
     {
-        const char c = text[i];
-        if (c != ' ')
-        {
-            display->drawChar(cursorX, y, c, white, black, size);
-        }
-        cursorX += charAdvance(c) * size;
+        case '0': segments = "abcedf"; break;
+        case '1': segments = "bc"; break;
+        case '2': segments = "abged"; break;
+        case '3': segments = "abgcd"; break;
+        case '4': segments = "fgbc"; break;
+        case '5': segments = "afgcd"; break;
+        case '6': segments = "afgecd"; break;
+        case '7': segments = "abc"; break;
+        case '8': segments = "abgcdef"; break;
+        case '9': segments = "abgcdf"; break;
+        case '-': segments = "g"; break;
+        default: return;
     }
+
+    for (size_t i = 0; segments[i] != '\0'; ++i)
+    {
+        drawThinClockSegment(x, y, segments[i], color);
+    }
+}
+
+void drawThinClockPair(int16_t x, int16_t y, const char *text, uint16_t color)
+{
+    const char first = text && text[0] ? text[0] : '-';
+    const char second = text && text[1] ? text[1] : '-';
+    drawThinClockChar(x, y, first, color);
+    drawThinClockChar(x + ClockDigitAdvance, y, second, color);
 }
 
 void drawClockRight(int16_t rightX, int16_t y, uint16_t color)
@@ -790,7 +881,9 @@ void drawClockMode()
 {
     struct tm timeinfo;
     const bool hasTime = readLocalTime(timeinfo);
-    const uint16_t white = panelColor(0xFF, 0xFF, 0xFF);
+    const uint16_t topColor = panelColor(clockGradientTopR, clockGradientTopG, clockGradientTopB);
+    const bool wasClockLayoutActive = clockLayoutActive;
+    bool shouldPlayTick = false;
 
     idleLayoutActive = false;
     liveLayoutActive = false;
@@ -800,6 +893,18 @@ void drawClockMode()
     if (hasTime)
     {
         const uint32_t now = millis();
+        if (!wasClockLayoutActive)
+        {
+            lastClockMinute = timeinfo.tm_min;
+            lastClockSecond = timeinfo.tm_sec;
+            fallingClockMinuteIndex = -1;
+            clockFallingStartedAt = 0;
+        }
+        else if (lastClockSecond >= 0 && timeinfo.tm_sec != lastClockSecond)
+        {
+            shouldPlayTick = true;
+        }
+
         if (lastClockMinute < 0)
         {
             lastClockMinute = timeinfo.tm_min;
@@ -844,7 +949,7 @@ void drawClockMode()
         const uint8_t litSeconds = min<uint8_t>(60, static_cast<uint8_t>(timeinfo.tm_sec + 1));
         if (litSeconds > 0)
         {
-            display->drawFastHLine(ClockSecondsStartX, ClockActiveRowY, litSeconds, white);
+            display->drawFastHLine(ClockSecondsStartX, ClockActiveRowY, litSeconds, topColor);
         }
 
         char hourText[3] = {};
@@ -854,22 +959,28 @@ void drawClockMode()
         snprintf(minuteText, sizeof(minuteText), "%02d", timeinfo.tm_min);
         snprintf(secondText, sizeof(secondText), "%02d", timeinfo.tm_sec);
         display->setFont(nullptr);
-        drawClockTextGlyphs(ClockTextStartX, ClockTextTopY, hourText, 2);
-        drawClockTextGlyphs(ClockTextStartX, ClockTextMiddleY, minuteText, 2);
-        drawClockTextGlyphs(ClockTextStartX, ClockTextBottomY, secondText, 2);
+        drawThinClockPair(ClockTextStartX, ClockTextTopY, hourText, clockTextFieldColor(ClockTextTopY + ClockDigitHeight / 2));
+        drawThinClockPair(ClockTextStartX, ClockTextMiddleY, minuteText, clockTextFieldColor(ClockTextMiddleY + ClockDigitHeight / 2));
+        drawThinClockPair(ClockTextStartX, ClockTextBottomY, secondText, clockTextFieldColor(ClockTextBottomY + ClockDigitHeight / 2));
+        lastClockSecond = timeinfo.tm_sec;
     }
     else
     {
         lastClockMinute = -1;
+        lastClockSecond = -1;
         fallingClockMinuteIndex = -1;
         display->setFont(nullptr);
-        drawClockTextGlyphs(ClockTextStartX, ClockTextTopY, "--", 2);
-        drawClockTextGlyphs(ClockTextStartX, ClockTextMiddleY, "--", 2);
-        drawClockTextGlyphs(ClockTextStartX, ClockTextBottomY, "--", 2);
+        drawThinClockPair(ClockTextStartX, ClockTextTopY, "--", clockTextFieldColor(ClockTextTopY + ClockDigitHeight / 2));
+        drawThinClockPair(ClockTextStartX, ClockTextMiddleY, "--", clockTextFieldColor(ClockTextMiddleY + ClockDigitHeight / 2));
+        drawThinClockPair(ClockTextStartX, ClockTextBottomY, "--", clockTextFieldColor(ClockTextBottomY + ClockDigitHeight / 2));
     }
 
     drawFetchIndicator();
     presentFrame();
+    if (shouldPlayTick)
+    {
+        queueClockTickSound();
+    }
 }
 
 uint16_t tickerOffset(uint16_t overflow)
@@ -1319,9 +1430,12 @@ bool fetchText(const char *url, String &body, int &httpCode, TickType_t lockWait
     return httpCode >= 200 && httpCode < 300;
 }
 
-void handleRemoteSoundState(uint32_t remoteSoundTestNonce, uint8_t nextAudioVolumePercent)
+void handleRemoteSoundState(uint32_t remoteSoundTestNonce, uint8_t nextAudioVolumePercent,
+                            bool nextClockTickEnabled, uint8_t nextClockTickVolumePercent)
 {
     applyAudioVolume(nextAudioVolumePercent);
+    clockTickEnabled = nextClockTickEnabled;
+    clockTickVolumePercent = constrain(nextClockTickVolumePercent, static_cast<uint8_t>(0), static_cast<uint8_t>(100));
 
     if (!audioTestNonceSeen)
     {
@@ -1357,8 +1471,10 @@ void fetchSoundState()
     }
 
     const uint8_t nextAudioVolumePercent = constrain(doc["volumePercent"] | AudioVolumePercentDefault, 0, 100);
+    const bool nextClockTickEnabled = doc["clockTickEnabled"] | false;
+    const uint8_t nextClockTickVolumePercent = constrain(doc["clockTickVolumePercent"] | ClockTickVolumePercentDefault, 0, 100);
     const uint32_t remoteSoundTestNonce = doc["testNonce"] | 0;
-    handleRemoteSoundState(remoteSoundTestNonce, nextAudioVolumePercent);
+    handleRemoteSoundState(remoteSoundTestNonce, nextAudioVolumePercent, nextClockTickEnabled, nextClockTickVolumePercent);
 }
 
 void fetchRealtimeState()
@@ -1386,6 +1502,8 @@ void fetchRealtimeState()
     const String screenVersion = valueOr(doc["screenVersion"]);
     const uint32_t soundNonce = doc["soundTestNonce"] | 0;
     const uint8_t nextAudioVolumePercent = constrain(doc["volumePercent"] | AudioVolumePercentDefault, 0, 100);
+    const bool nextClockTickEnabled = doc["clockTickEnabled"] | clockTickEnabled;
+    const uint8_t nextClockTickVolumePercent = constrain(doc["clockTickVolumePercent"] | clockTickVolumePercent, 0, 100);
 
     if (!realtimeStateSeen)
     {
@@ -1393,7 +1511,7 @@ void fetchRealtimeState()
         lastRealtimeScreenVersion = screenVersion;
         lastRealtimeSoundNonce = soundNonce;
         realtimeStateSeen = true;
-        handleRemoteSoundState(soundNonce, nextAudioVolumePercent);
+        handleRemoteSoundState(soundNonce, nextAudioVolumePercent, nextClockTickEnabled, nextClockTickVolumePercent);
         return;
     }
 
@@ -1414,7 +1532,12 @@ void fetchRealtimeState()
     if (soundNonce > lastRealtimeSoundNonce)
     {
         lastRealtimeSoundNonce = soundNonce;
-        handleRemoteSoundState(soundNonce, nextAudioVolumePercent);
+        handleRemoteSoundState(soundNonce, nextAudioVolumePercent, nextClockTickEnabled, nextClockTickVolumePercent);
+    }
+    else
+    {
+        clockTickEnabled = nextClockTickEnabled;
+        clockTickVolumePercent = nextClockTickVolumePercent;
     }
 }
 
@@ -1490,7 +1613,7 @@ void handleRealtimeText(const uint8_t *payload, size_t length)
     {
         const uint8_t nextAudioVolumePercent = constrain(doc["volumePercent"] | AudioVolumePercentDefault, 0, 100);
         const uint32_t remoteSoundTestNonce = doc["testNonce"] | 0;
-        handleRemoteSoundState(remoteSoundTestNonce, nextAudioVolumePercent);
+        handleRemoteSoundState(remoteSoundTestNonce, nextAudioVolumePercent, clockTickEnabled, clockTickVolumePercent);
     }
 }
 
@@ -1881,11 +2004,15 @@ bool applyDeviceConfigPayload(const String &body, int httpCode, bool httpOk)
     lineContextColor = parseHexColorOr(valueOr(lineColors["context"]), defaultDataColor);
     lineProgressColor = parseHexColorOr(valueOr(lineColors["progress"]), defaultHeaderColor);
     lineRouteProgressColor = parseHexColorOr(valueOr(lineColors["routeProgress"]), panelColor(0x00, 0xD4, 0x6A));
+    const String nextClockTopColor = valueOr(device["clockTopColor"], "#ffffff");
     const String nextClockColor = valueOr(device["clockColor"], "#081b6b");
+    parseHexRgb(nextClockTopColor, clockGradientTopR, clockGradientTopG, clockGradientTopB);
     parseHexRgb(nextClockColor, clockGradientBottomR, clockGradientBottomG, clockGradientBottomB);
 
     JsonObject audio = doc["audio"];
     const uint8_t nextAudioVolumePercent = constrain(audio["volumePercent"] | AudioVolumePercentDefault, 0, 100);
+    const bool nextClockTickEnabled = audio["clockTickEnabled"] | false;
+    const uint8_t nextClockTickVolumePercent = constrain(audio["clockTickVolumePercent"] | ClockTickVolumePercentDefault, 0, 100);
     const uint32_t remoteSoundTestNonce = audio["testNonce"] | 0;
 
     const bool timezoneChanged = nextTimeZonePosix != deviceTimeZonePosix;
@@ -1898,7 +2025,7 @@ bool applyDeviceConfigPayload(const String &body, int httpCode, bool httpOk)
 
     effectiveBrightness = requestedBrightness;
     applySafeBrightness(effectiveBrightness);
-    handleRemoteSoundState(remoteSoundTestNonce, nextAudioVolumePercent);
+    handleRemoteSoundState(remoteSoundTestNonce, nextAudioVolumePercent, nextClockTickEnabled, nextClockTickVolumePercent);
 
     if (!screenActive && previousScreenActive)
     {
@@ -2663,7 +2790,7 @@ void loop()
         }
     }
 
-    if (clockLayoutActive && now - lastClockRenderAt >= 50)
+    if (clockLayoutActive && now - lastClockRenderAt >= ClockRenderIntervalMs)
     {
         lastClockRenderAt = now;
         drawClockMode();

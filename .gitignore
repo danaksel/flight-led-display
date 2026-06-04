@@ -7,6 +7,7 @@ cloudflare-worker/.dev.vars
 cloudflare-worker/.wrangler/
 cloudflare-worker/node_modules/
 cloudflare-worker/dist/
+cloudflare-worker/tmp/
 .wrangler/
 
 # PlatformIO / firmware
@@ -15,6 +16,7 @@ firmware-hub75/.pio/
 firmware-hub75/include/WiFiSecrets.h
 
 # Generated/exported airline logo artifacts
+assets/airline-logos/
 assets/airline-logos/r2-source/
 assets/airline-logos/rgb565/
 assets/airline-logos/rgb565-fixture-test/
