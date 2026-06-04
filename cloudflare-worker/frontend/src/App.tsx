@@ -298,6 +298,7 @@ const defaultSoundState: SoundState = {
 };
 
 const adminTokenStorageKey = "flightDisplayAdminToken";
+const emulatorTickPcmBase64 = "sf+x/08A2P93ADr/xgAS/58AAABPAJv+FgFPABL/7gCb/hYBif8oALH/KACJ/ygAKACJ/58AEv/GAIn/TwAAAAAAsf93AGH/dwCJ/40Bl/xFBWj4sgpY8FIW3OJQH+fo+gZNCSns9RiU5uMZD+nQD2kDQeQGLAzTGiJm7Uv+uxkrxFlh0Ir5bFeyhycc+orrKiqsv3pJMb3UMOXx+edVLKfRYTKzw+NMWJ6wZVmpEz041ecbp/CYB4X9LAL8/RoDEv8WAU8A2P86/wAAxgC1AQAAS/49AU8AOv/GAGH/nwBPAMP+AADuAOr+7gCx/4n/xgA6/xYBEv/GAIn/2P8WAXP+PQES/58Asf+x/58AEv9PAE8Asf8oAAAATwA6/8YAsf/Y/ygA2P+fAIn/TwAoANj/KACx/08Aif93AAAAsf/GAGH/KAAoALH/AABPALH/TwAoANj/AAAoAAAAif+fAGH/TwAAANj/KAAAAAAAAAAoALH/TwCx/ygAAADY/ygAAAAAAAAAKADY/ygA2P8oANj/AAAAAAAAAAAAANj/KADY/ygAAADY/ygAAAAAAAAAAAAAAAAA2P8oANj/KAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
 const appStyles = {
   shell: {
@@ -337,7 +338,7 @@ const appStyles = {
     overflowX: "auto" as const,
     scrollSnapType: "x mandatory" as const,
     scrollbarWidth: "none" as const,
-    scrollBehavior: "smooth" as const
+    scrollBehavior: "auto" as const
   },
   slide: {
     minWidth: "100%",
@@ -361,6 +362,23 @@ const appStyles = {
     transform: "translateZ(0)"
   }
 };
+
+function buildEmulatorTickBuffer(audioContext: AudioContext): AudioBuffer {
+  const binary = atob(emulatorTickPcmBase64);
+  const frameCount = Math.floor(binary.length / 2);
+  const audioBuffer = audioContext.createBuffer(1, frameCount, 16000);
+  const channel = audioBuffer.getChannelData(0);
+
+  for (let frame = 0; frame < frameCount; frame += 1) {
+    const low = binary.charCodeAt(frame * 2);
+    const high = binary.charCodeAt(frame * 2 + 1);
+    const sample = low | (high << 8);
+    const signed = sample > 0x7fff ? sample - 0x10000 : sample;
+    channel[frame] = signed / 32768;
+  }
+
+  return audioBuffer;
+}
 
 function normalizeConfig(input: Partial<Config> & Record<string, unknown>): Config {
   const device = (input.device as Partial<Config["device"]>) ?? {};
@@ -1126,6 +1144,8 @@ function ToggleRow(props: { label: string; hint?: string; checked: boolean; onCh
 }
 
 function SliderField(props: { label: string; value: number; min: number; max: number; step?: number; suffix?: string; onChange: (value: number) => void }) {
+  const range = props.max - props.min;
+  const progress = range > 0 ? clamp(((props.value - props.min) / range) * 100, 0, 100) : 0;
   return (
     <div style={{ ...cardStyle("12px 14px"), display: "grid", gap: "12px" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
@@ -1135,7 +1155,16 @@ function SliderField(props: { label: string; value: number; min: number; max: nu
           {props.suffix ?? ""}
         </span>
       </div>
-      <input type="range" min={props.min} max={props.max} step={props.step ?? 1} value={props.value} onChange={(event) => props.onChange(Number(event.target.value))} />
+      <input
+        className="skyframe-range"
+        type="range"
+        min={props.min}
+        max={props.max}
+        step={props.step ?? 1}
+        value={props.value}
+        onChange={(event) => props.onChange(Number(event.target.value))}
+        style={{ background: `linear-gradient(90deg, var(--primary) 0%, var(--primary) ${progress}%, rgba(60, 36, 21, 0.22) ${progress}%, rgba(60, 36, 21, 0.22) 100%)` }}
+      />
     </div>
   );
 }
@@ -1208,9 +1237,13 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
   const followPhaseStartedAtRef = useRef(0);
   const tickerStartedAtRef = useRef(0);
   const clockLastMinuteRef = useRef<number | null>(null);
+  const clockLastSecondRef = useRef<number | null>(null);
   const clockFallingMinuteIndexRef = useRef<number | null>(null);
   const clockFallingStartedAtRef = useRef(0);
   const lastFlightSignatureRef = useRef("");
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const tickBufferRef = useRef<AudioBuffer | null>(null);
+  const audioUnlockedRef = useRef(false);
   const runtimeSignature = useMemo(() => JSON.stringify({
     displayMode: props.config.device.displayMode,
     flights: props.preview.flights.map((flight) => makeFlightSignature(flight)),
@@ -1223,10 +1256,72 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
     followPhaseStartedAtRef.current = now;
     tickerStartedAtRef.current = now;
     clockLastMinuteRef.current = null;
+    clockLastSecondRef.current = null;
     clockFallingMinuteIndexRef.current = null;
     clockFallingStartedAtRef.current = 0;
     lastFlightSignatureRef.current = "";
   }, [runtimeSignature]);
+
+  async function ensureEmulatorAudioReady() {
+    try {
+      if (!audioContextRef.current) {
+        const audioWindow = window as typeof window & { webkitAudioContext?: typeof AudioContext };
+        const AudioContextCtor = audioWindow.AudioContext ?? audioWindow.webkitAudioContext;
+        if (!AudioContextCtor) return null;
+        audioContextRef.current = new AudioContextCtor();
+      }
+      if (audioContextRef.current.state === "suspended") {
+        await audioContextRef.current.resume();
+      }
+      if (!tickBufferRef.current) {
+        tickBufferRef.current = buildEmulatorTickBuffer(audioContextRef.current);
+      }
+      audioUnlockedRef.current = true;
+      return audioContextRef.current;
+    } catch {
+      return null;
+    }
+  }
+
+  async function playEmulatorClockTick() {
+    if (!audioUnlockedRef.current) return;
+    const audioContext = await ensureEmulatorAudioReady();
+    const tickBuffer = tickBufferRef.current;
+    if (!audioContext || !tickBuffer) return;
+
+    const source = audioContext.createBufferSource();
+    const gain = audioContext.createGain();
+    source.buffer = tickBuffer;
+    gain.gain.value = clamp(props.config.device.clockTickVolumePercent, 0, 100) / 100;
+    source.connect(gain);
+    gain.connect(audioContext.destination);
+    source.start();
+  }
+
+  function maybePlayEmulatorClockTick(second: number) {
+    if (clockLastSecondRef.current === null) {
+      clockLastSecondRef.current = second;
+      return;
+    }
+    if (second === clockLastSecondRef.current) return;
+    clockLastSecondRef.current = second;
+    if (!props.config.device.clockTickEnabled || props.config.device.clockTickVolumePercent <= 0) return;
+    void playEmulatorClockTick();
+  }
+
+  useEffect(() => {
+    const unlockAudio = () => {
+      void ensureEmulatorAudioReady();
+    };
+    window.addEventListener("pointerdown", unlockAudio, { passive: true });
+    window.addEventListener("keydown", unlockAudio);
+    window.addEventListener("touchstart", unlockAudio, { passive: true });
+    return () => {
+      window.removeEventListener("pointerdown", unlockAudio);
+      window.removeEventListener("keydown", unlockAudio);
+      window.removeEventListener("touchstart", unlockAudio);
+    };
+  }, []);
 
   useEffect(() => {
     if (!props.screenState.active) return;
@@ -1308,6 +1403,7 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
           clockLastMinuteRef.current = completedMinutes;
         }
         drawClockLayoutExact(renderCtx, props.config, clockFallingMinuteIndexRef.current, clockFallingStartedAtRef.current, now);
+        maybePlayEmulatorClockTick(time.second);
       } else if (activeFlight) {
         const isFollowLayout = activeFlight.layout === "follow_cycle" || activeFlight.layout === "follow_status";
         const detailCycleStartedAt = isFollowLayout ? followPhaseStartedAtRef.current : currentFlightCycleStartedAt;
@@ -1402,6 +1498,22 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
   );
 }
 
+function SkeletonBlock(props: { height: number; width?: string }) {
+  return <div className="skeleton-block" style={{ height: `${props.height}px`, width: props.width ?? "100%" }} />;
+}
+
+function LoadingSkeleton() {
+  return (
+    <div style={{ padding: "0 20px 168px", display: "grid", gap: "14px" }}>
+      <SkeletonBlock height={16} width="44%" />
+      <SkeletonBlock height={42} />
+      <SkeletonBlock height={82} />
+      <SkeletonBlock height={82} />
+      <SkeletonBlock height={112} />
+    </div>
+  );
+}
+
 export default function App() {
   const [config, setConfig] = useState<Config>(defaultConfig);
   const [screenState, setScreenState] = useState<ScreenState>(defaultScreenState);
@@ -1411,14 +1523,19 @@ export default function App() {
   const [statusTone, setStatusTone] = useState<"idle" | "dirty" | "error" | "success">("idle");
   const [activeSection, setActiveSection] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [initialLoading, setInitialLoading] = useState(true);
   const slidesRef = useRef<HTMLDivElement | null>(null);
   const navRef = useRef<HTMLDivElement | null>(null);
   const navDragRef = useRef({ active: false, pointerId: -1, x: 0, left: 0, moved: false, pressedIndex: -1 });
 
   useEffect(() => {
-    void loadConfig();
-    void loadPreview();
-    void loadAvinor();
+    let mounted = true;
+    void Promise.allSettled([loadConfig(), loadPreview(), loadAvinor()]).finally(() => {
+      if (mounted) setInitialLoading(false);
+    });
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   useEffect(() => {
@@ -1430,13 +1547,13 @@ export default function App() {
     };
     node.addEventListener("scroll", handleScroll, { passive: true });
     return () => node.removeEventListener("scroll", handleScroll);
-  }, []);
+  }, [initialLoading]);
 
   useEffect(() => {
     const node = slidesRef.current;
     if (!node) return;
     node.scrollLeft = slideIndexForSection(0) * node.clientWidth;
-  }, []);
+  }, [initialLoading]);
 
   function markDirty(message = "Endringer ikke lagret") {
     setStatus(message);
@@ -1552,7 +1669,7 @@ export default function App() {
   }
 
   function activateSection(index: number) {
-    slidesRef.current?.scrollTo({ left: slideIndexForSection(index) * (slidesRef.current?.clientWidth ?? 0), behavior: "smooth" });
+    slidesRef.current?.scrollTo({ left: slideIndexForSection(index) * (slidesRef.current?.clientWidth ?? 0), behavior: "auto" });
     setActiveSection(index);
   }
 
@@ -1643,12 +1760,12 @@ export default function App() {
       </div>
 
       <main style={{ minHeight: 0, flex: 1, overflow: "hidden" }}>
+        {initialLoading ? (
+          <LoadingSkeleton />
+        ) : (
         <div ref={slidesRef} style={appStyles.slides}>
           <section style={appStyles.slide}>
             <div style={{ display: "grid", gap: "14px" }}>
-              <Field label="Name of location">
-                <TextInput value={config.label} onChange={(event) => updateConfig((current) => ({ ...current, label: event.target.value }))} />
-              </Field>
               <MapPicker
                 lat={config.lat}
                 lon={config.lon}
@@ -1946,6 +2063,7 @@ export default function App() {
             </div>
           </section>
         </div>
+        )}
       </main>
 
       <div style={appStyles.saveDock}>

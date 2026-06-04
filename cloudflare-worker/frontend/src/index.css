@@ -49,6 +49,46 @@ textarea {
   font: inherit;
 }
 
+.skyframe-range {
+  width: 100%;
+  height: 18px;
+  appearance: none;
+  background: transparent;
+  accent-color: var(--primary);
+}
+
+.skyframe-range::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: transparent;
+}
+
+.skyframe-range::-webkit-slider-thumb {
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -6px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--primary);
+  box-shadow: 0 1px 4px rgba(60, 36, 21, 0.32);
+}
+
+.skyframe-range::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: transparent;
+}
+
+.skyframe-range::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--primary);
+  box-shadow: 0 1px 4px rgba(60, 36, 21, 0.32);
+}
+
 a {
   color: inherit;
 }
@@ -74,4 +114,21 @@ a {
   width: 18px;
   height: 18px;
   flex: 0 0 auto;
+}
+
+.skeleton-block {
+  border-radius: 14px;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.46), rgba(193, 180, 172, 0.42), rgba(255, 255, 255, 0.46));
+  background-size: 220% 100%;
+  animation: skeleton-shimmer 1.25s ease-in-out infinite;
+  border: 1px solid rgba(60, 36, 21, 0.08);
+}
+
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: 120% 0;
+  }
+  100% {
+    background-position: -120% 0;
+  }
 }
