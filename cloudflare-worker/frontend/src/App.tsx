@@ -535,11 +535,23 @@ function measureLedText(text: string): number {
 }
 
 function hexToRgb(hex: string): [number, number, number] {
-  const normalized = hex.replace("#", "");
-  const expanded = normalized.length === 3 ? normalized.split("").map((value) => value + value).join("") : normalized;
+  const normalized = String(hex || "").replace("#", "");
+  const expanded = normalized.length === 3
+    ? normalized.split("").map((value) => value + value).join("")
+    : normalized.padStart(6, "0").slice(0, 6);
   const value = Number.parseInt(expanded, 16);
   if (!Number.isFinite(value)) return [255, 255, 255];
   return [(value >> 16) & 255, (value >> 8) & 255, value & 255];
+}
+
+function interpolateHexColor(from: string, to: string, step: number, steps: number) {
+  const fromRgb = hexToRgb(from);
+  const toRgb = hexToRgb(to);
+  const ratio = steps <= 0 ? 1 : clamp(step / steps, 0, 1);
+  const r = Math.round(fromRgb[0] + (toRgb[0] - fromRgb[0]) * ratio);
+  const g = Math.round(fromRgb[1] + (toRgb[1] - fromRgb[1]) * ratio);
+  const b = Math.round(fromRgb[2] + (toRgb[2] - fromRgb[2]) * ratio);
+  return `rgb(${r}, ${g}, ${b})`;
 }
 
 function drawLedText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, color: string, maxWidth = 999) {
@@ -564,6 +576,63 @@ function drawLedTextRight(ctx: CanvasRenderingContext2D, text: string, rightX: n
   drawLedText(ctx, value, rightX - width, y, color, maxWidth);
 }
 
+function easeInOut(t: number): number {
+  return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+}
+
+function getTickerOffset(overflow: number, pxPerSecond: number, startedAt: number, now: number) {
+  const holdMs = 900;
+  const travelMs = Math.max(1200, (overflow / Math.max(2, pxPerSecond)) * 1000);
+  const cycleMs = holdMs + travelMs + holdMs + travelMs;
+  const t = (now - startedAt) % cycleMs;
+  if (t < holdMs) return 0;
+  if (t < holdMs + travelMs) return Math.round(((t - holdMs) / travelMs) * overflow);
+  if (t < holdMs + travelMs + holdMs) return overflow;
+  return Math.round((1 - ((t - holdMs - travelMs - holdMs) / travelMs)) * overflow);
+}
+
+function getTickerForwardOffset(overflow: number, pxPerSecond: number, startedAt: number, now: number) {
+  const holdMs = 900;
+  const travelMs = Math.max(1200, (overflow / Math.max(2, pxPerSecond)) * 1000);
+  const cycleMs = holdMs + travelMs + holdMs;
+  const t = (now - startedAt) % cycleMs;
+  if (t < holdMs) return 0;
+  if (t < holdMs + travelMs) return Math.round(((t - holdMs) / travelMs) * overflow);
+  return overflow;
+}
+
+function drawTickerLine(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, color: string, width: number, config: Config, startedAt: number, now: number) {
+  if (!text) return;
+  const textWidth = measureLedText(text);
+  const fitsRestingWidth = textWidth <= width;
+  const fitsFullWidth = textWidth + Math.max(0, x) <= 128;
+  const overflow = fitsRestingWidth || fitsFullWidth ? 0 : Math.max(1, textWidth + Math.max(0, x) - 128);
+  const offset = overflow > 0 ? getTickerOffset(overflow, config.device.scrollPixelsPerSecond, startedAt, now) : 0;
+  ctx.save();
+  ctx.beginPath();
+  if (overflow > 0) {
+    ctx.rect(0, y, 128, 8);
+  } else {
+    ctx.rect(x, y, fitsFullWidth ? 128 - Math.max(0, x) : width, 8);
+  }
+  ctx.clip();
+  drawLedText(ctx, text, x - offset, y, color, textWidth);
+  ctx.restore();
+}
+
+function drawTickerLineBoxed(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, color: string, width: number, config: Config, startedAt: number, now: number) {
+  if (!text) return;
+  const textWidth = measureLedText(text);
+  const overflow = textWidth <= width ? 0 : Math.max(1, textWidth - width);
+  const offset = overflow > 0 ? getTickerForwardOffset(overflow, config.device.scrollPixelsPerSecond, startedAt, now) : 0;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x, y, width, 8);
+  ctx.clip();
+  drawLedText(ctx, text, x - offset, y, color, textWidth);
+  ctx.restore();
+}
+
 function normalizeGateStatusForDisplay(value?: string): string {
   const raw = String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
   if (!raw) return "";
@@ -582,6 +651,105 @@ function drawLocalClock(ctx: CanvasRenderingContext2D, rightX: number, y: number
     hour12: false
   }).format(new Date());
   drawLedTextRight(ctx, value, rightX, y, color, 30);
+}
+
+function getClockTimeParts(timezone: string) {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: timezone || "Europe/Oslo",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  }).formatToParts(new Date());
+  return {
+    hour: parts.find((part) => part.type === "hour")?.value || "00",
+    minute: parts.find((part) => part.type === "minute")?.value || "00",
+    second: Number(parts.find((part) => part.type === "second")?.value || "0")
+  };
+}
+
+function getClockMinuteRowColor(depth: number, topColor: string, bottomColor: string) {
+  const step = Math.max(1, Math.min(60, depth));
+  return interpolateHexColor(topColor, bottomColor, step, 60);
+}
+
+function getClockTextRowColor(centerY: number, topColor: string, bottomColor: string) {
+  const step = Math.max(0, Math.min(58, centerY - 3));
+  return interpolateHexColor(topColor, bottomColor, step, 58);
+}
+
+function drawThinClockSegment(ctx: CanvasRenderingContext2D, segment: string, x: number, y: number) {
+  if (segment === "a") ctx.fillRect(x + 1, y, 5, 1);
+  if (segment === "b") ctx.fillRect(x + 6, y + 1, 1, 7);
+  if (segment === "c") ctx.fillRect(x + 6, y + 9, 1, 7);
+  if (segment === "d") ctx.fillRect(x + 1, y + 16, 5, 1);
+  if (segment === "e") ctx.fillRect(x, y + 9, 1, 7);
+  if (segment === "f") ctx.fillRect(x, y + 1, 1, 7);
+  if (segment === "g") ctx.fillRect(x + 1, y + 8, 5, 1);
+}
+
+function drawThinClockChar(ctx: CanvasRenderingContext2D, char: string, x: number, y: number, color: string) {
+  const segmentsByDigit: Record<string, string[]> = {
+    "0": ["a", "b", "c", "d", "e", "f"],
+    "1": ["b", "c"],
+    "2": ["a", "b", "g", "e", "d"],
+    "3": ["a", "b", "g", "c", "d"],
+    "4": ["f", "g", "b", "c"],
+    "5": ["a", "f", "g", "c", "d"],
+    "6": ["a", "f", "g", "e", "c", "d"],
+    "7": ["a", "b", "c"],
+    "8": ["a", "b", "c", "d", "e", "f", "g"],
+    "9": ["a", "b", "c", "d", "f", "g"],
+    "-": ["g"]
+  };
+  ctx.fillStyle = color;
+  (segmentsByDigit[char] || []).forEach((segment) => drawThinClockSegment(ctx, segment, x, y));
+}
+
+function drawThinClockPair(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, color: string) {
+  const value = String(text || "--").padStart(2, "-").slice(0, 2);
+  drawThinClockChar(ctx, value[0], x, y, color);
+  drawThinClockChar(ctx, value[1], x + 9, y, color);
+}
+
+function drawClockTimeStack(ctx: CanvasRenderingContext2D, x: number, time: ReturnType<typeof getClockTimeParts>, topColor: string, bottomColor: string) {
+  drawThinClockPair(ctx, time.hour, x, 3, getClockTextRowColor(11, topColor, bottomColor));
+  drawThinClockPair(ctx, time.minute, x, 24, getClockTextRowColor(32, topColor, bottomColor));
+  drawThinClockPair(ctx, time.second.toString().padStart(2, "0"), x, 45, getClockTextRowColor(53, topColor, bottomColor));
+}
+
+function drawClockLayoutExact(ctx: CanvasRenderingContext2D, config: Config, fallingMinuteIndex: number | null, fallingStartedAt: number, now: number) {
+  ctx.fillStyle = "#000000";
+  ctx.fillRect(0, 0, 128, 64);
+
+  const time = getClockTimeParts(config.device.timezone);
+  const completedMinutes = Math.max(0, Math.min(59, Number(time.minute)));
+  const activeSeconds = Math.max(0, Math.min(60, time.second + 1));
+  const topColor = config.device.clockTopColor || "#ffffff";
+  const bottomColor = config.device.clockColor || "#081b6b";
+  const falling = fallingMinuteIndex !== null && now - fallingStartedAt < 400;
+
+  for (let index = 0; index < completedMinutes; index += 1) {
+    if (falling && index === fallingMinuteIndex) continue;
+    const y = 62 - index;
+    ctx.fillStyle = getClockMinuteRowColor(completedMinutes - index, topColor, bottomColor);
+    ctx.fillRect(4, y, 60, 1);
+  }
+
+  if (falling && fallingMinuteIndex !== null) {
+    const targetY = 62 - fallingMinuteIndex;
+    const elapsed = Math.min(400, now - fallingStartedAt);
+    const y = Math.round(3 + ((targetY - 3) * elapsed) / 400);
+    ctx.fillStyle = getClockMinuteRowColor(1, topColor, bottomColor);
+    ctx.fillRect(4, y, 60, 1);
+  }
+
+  if (activeSeconds > 0) {
+    ctx.fillStyle = topColor;
+    ctx.fillRect(4, 3, activeSeconds, 1);
+  }
+
+  drawClockTimeStack(ctx, 70, time, topColor, bottomColor);
 }
 
 function drawIdleRowExact(ctx: CanvasRenderingContext2D, kind: string | undefined, row: IdleRow, x: number, y: number, colors: Config["device"]["timetableColors"]) {
@@ -614,7 +782,16 @@ function drawIdleRowExact(ctx: CanvasRenderingContext2D, kind: string | undefine
   }
 }
 
-function drawIdleLayoutExact(ctx: CanvasRenderingContext2D, screen: IdleScreen | undefined, config: Config) {
+function drawIdleRowsClipped(ctx: CanvasRenderingContext2D, kind: string | undefined, rows: IdleRow[], y: number, colors: Config["device"]["timetableColors"]) {
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, 15, 128, 49);
+  ctx.clip();
+  rows.slice(0, 4).forEach((row, index) => drawIdleRowExact(ctx, kind, row, 3, y + index * 11, colors));
+  ctx.restore();
+}
+
+function drawIdleLayoutExact(ctx: CanvasRenderingContext2D, screen: IdleScreen | undefined, config: Config, transitionOffset = 0, nextScreen?: IdleScreen | null) {
   const colors = config.device.timetableColors;
   ctx.fillStyle = "#000000";
   ctx.fillRect(0, 0, 128, 64);
@@ -636,12 +813,26 @@ function drawIdleLayoutExact(ctx: CanvasRenderingContext2D, screen: IdleScreen |
     return;
   }
 
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(0, 15, 128, 49);
-  ctx.clip();
-  rows.forEach((row, index) => drawIdleRowExact(ctx, screen.kind, row, 3, 20 + index * 11, colors));
-  ctx.restore();
+  drawIdleRowsClipped(ctx, screen.kind, rows, 20 - transitionOffset, colors);
+  if (nextScreen) {
+    drawIdleRowsClipped(ctx, nextScreen.kind, Array.isArray(nextScreen.rows) ? nextScreen.rows : [], 64 - transitionOffset, colors);
+  }
+}
+
+function getIdleTransition(screens: IdleScreen[], currentIndex: number, config: Config, cycleStartedAt: number, now: number) {
+  if (screens.length <= 1) return { offset: 0, nextScreen: null as IdleScreen | null };
+  const screen = screens[currentIndex];
+  const nextScreen = screens[(currentIndex + 1) % screens.length];
+  if (!screen || !nextScreen || screen.kind !== nextScreen.kind) return { offset: 0, nextScreen: null as IdleScreen | null };
+  const rowTravel = 44;
+  const cycleMs = Math.max(2000, config.device.timetableCycleSeconds * 1000);
+  const speed = Math.max(4, config.device.timetableScrollPixelsPerSecond);
+  const transitionMs = Math.min(cycleMs * 0.75, Math.max(400, (rowTravel / speed) * 1000));
+  const elapsed = Math.max(0, now - cycleStartedAt);
+  const transitionStart = Math.max(0, cycleMs - transitionMs);
+  if (elapsed < transitionStart) return { offset: 0, nextScreen: null as IdleScreen | null };
+  const progress = Math.min(1, (elapsed - transitionStart) / transitionMs);
+  return { offset: Math.round(rowTravel * easeInOut(progress)), nextScreen };
 }
 
 function drawPlaceholderLogo(ctx: CanvasRenderingContext2D, x: number, y: number, size: number) {
@@ -670,12 +861,12 @@ function getFlightLineColors(config: Config) {
   return config.device.lineColors;
 }
 
-function drawFlightTextColumn(ctx: CanvasRenderingContext2D, lines: { airline?: string; aircraft?: string; context?: string; route?: string }, config: Config) {
+function drawFlightTextColumn(ctx: CanvasRenderingContext2D, lines: { airline?: string; aircraft?: string; context?: string; route?: string }, config: Config, tickerStartedAt: number, now: number) {
   const colors = getFlightLineColors(config);
   drawLedText(ctx, lines.airline || "", 50, 5, colors.airline, 75);
   drawLedText(ctx, lines.route || "", 50, 19, colors.route, 75);
   drawLedText(ctx, lines.aircraft || "", 50, 33, colors.aircraft, 75);
-  drawLedText(ctx, lines.context || "", 3, 52, colors.context, 122);
+  drawTickerLine(ctx, lines.context || "", 3, 52, colors.context, 122, config, tickerStartedAt, now);
 }
 
 function formatCompactMetrics(flight: DisplayFlight) {
@@ -688,23 +879,32 @@ function formatCompactMetrics(flight: DisplayFlight) {
   };
 }
 
-function drawFollowFlightTextExact(ctx: CanvasRenderingContext2D, flight: DisplayFlight, config: Config) {
+function drawFollowFlightTextExact(ctx: CanvasRenderingContext2D, flight: DisplayFlight, config: Config, cycleStartedAt: number, tickerStartedAt: number, now: number) {
   const colors = getFlightLineColors(config);
   const route = flight.lines?.route || [flight.from || flight.origin, flight.to || flight.destination].filter(Boolean).join("-");
+  const elapsed = Math.max(0, now - cycleStartedAt);
+  const detailPhase = elapsed % 15000 < 10000 ? "metrics" : "location";
+  const phaseStartedAt = cycleStartedAt + Math.floor(elapsed / 15000) * 15000 + (detailPhase === "metrics" ? 0 : 10000);
   const etaLine = flight.arrTime ? `ETA:${flight.arrTime}` : "";
   const airlineLine = flight.lines?.airline || flight.air || flight.airCode || flight.airline || "";
-  const topLine = flight.flt || flight.flight || flight.cs || flight.callsign || "";
-  const secondLine = route || airlineLine || etaLine;
+  const topLine = detailPhase === "location" && airlineLine ? airlineLine : flight.flt || flight.flight || flight.cs || flight.callsign || "";
+  const secondLine = detailPhase === "location" && etaLine ? etaLine : route || airlineLine || "";
   const thirdLine = flight.ac || flight.aircraft || flight.reg || "";
 
-  drawLedText(ctx, topLine, 50, 5, colors.airline, 75);
-  drawLedText(ctx, secondLine, 50, 19, colors.route, 75);
-  drawLedText(ctx, thirdLine, 50, 33, colors.aircraft, 75);
+  drawTickerLineBoxed(ctx, topLine, 50, 5, colors.airline, 75, config, phaseStartedAt, now);
+  drawTickerLineBoxed(ctx, secondLine, 50, 19, colors.route, 75, config, phaseStartedAt, now);
+  drawTickerLineBoxed(ctx, thirdLine, 50, 33, colors.aircraft, 75, config, phaseStartedAt, now);
 
   if (flight.followStatus) {
     const statusColor = flight.followStatus.color === "landed" ? "#00d46a" : config.device.timetableColors.header;
-    drawLedText(ctx, flight.followStatus.text || "", 3, 47, statusColor, 122);
-    drawLedText(ctx, flight.followStatus.detail || "", 3, 56, statusColor, 122);
+    drawTickerLine(ctx, flight.followStatus.text || "", 3, 47, statusColor, 122, config, tickerStartedAt, now);
+    drawTickerLine(ctx, flight.followStatus.detail || "", 3, 56, statusColor, 122, config, tickerStartedAt, now);
+    return;
+  }
+
+  if (detailPhase === "location") {
+    drawLedText(ctx, flight.locationLabel || "Flying over", 3, 47, colors.context, 122);
+    drawTickerLine(ctx, flight.locationValue || "Unknown area", 3, 56, colors.context, 122, config, tickerStartedAt, now);
     return;
   }
 
@@ -718,11 +918,19 @@ function drawFollowFlightTextExact(ctx: CanvasRenderingContext2D, flight: Displa
     metrics.verticalRate ? `VR:${metrics.verticalRate}` : ""
   ].filter(Boolean).join(" ");
 
-  drawLedText(ctx, firstMetricLine || flight.locationLabel || "FLYING OVER", 3, 47, colors.context, 122);
-  drawLedText(ctx, secondMetricLine || flight.locationValue || "UNKNOWN AREA", 3, 56, colors.context, 122);
+  drawTickerLine(ctx, firstMetricLine || "NO LIVE METRICS", 3, 47, colors.context, 122, config, tickerStartedAt, now);
+  drawTickerLine(ctx, secondMetricLine, 3, 56, colors.context, 122, config, tickerStartedAt, now);
 }
 
-function drawLiveFlightLayoutExact(ctx: CanvasRenderingContext2D, flight: DisplayFlight, config: Config, logo: HTMLImageElement | null | undefined) {
+function drawProgressValue(ctx: CanvasRenderingContext2D, progress: number, y: number, color: string, background: string) {
+  const width = Math.max(0, Math.min(128, Math.floor(128 * progress)));
+  ctx.fillStyle = background;
+  ctx.fillRect(0, y, 128, 1);
+  ctx.fillStyle = color;
+  ctx.fillRect(0, y, width, 1);
+}
+
+function drawLiveFlightLayoutExact(ctx: CanvasRenderingContext2D, flight: DisplayFlight, config: Config, logo: HTMLImageElement | null | undefined, cycleStartedAt: number, tickerStartedAt: number, now: number, flightCount: number) {
   ctx.fillStyle = "#000000";
   ctx.fillRect(0, 0, 128, 64);
 
@@ -733,7 +941,10 @@ function drawLiveFlightLayoutExact(ctx: CanvasRenderingContext2D, flight: Displa
   }
 
   if (flight.layout === "follow_cycle" || flight.layout === "follow_status") {
-    drawFollowFlightTextExact(ctx, flight, config);
+    if (!flight.followStatus && typeof flight.routeProgress === "number") {
+      drawProgressValue(ctx, flight.routeProgress, 0, config.device.lineColors.routeProgress, "#3c3c3c");
+    }
+    drawFollowFlightTextExact(ctx, flight, config, cycleStartedAt, tickerStartedAt, now);
     return;
   }
 
@@ -746,7 +957,44 @@ function drawLiveFlightLayoutExact(ctx: CanvasRenderingContext2D, flight: Displa
     route: route || flight.flt || flight.flight || flight.cs || flight.callsign || "",
     aircraft,
     context
-  }, config);
+  }, config, tickerStartedAt, now);
+
+  if (flightCount > 1) {
+    const cycleMs = Math.max(2000, config.device.displayCycleSeconds * 1000);
+    drawProgressValue(ctx, Math.min(1, Math.max(0, now - cycleStartedAt) / cycleMs), 63, config.device.lineColors.progress, "#07101c");
+  }
+}
+
+function applyDisplayBrightness(ctx: CanvasRenderingContext2D, config: Config) {
+  const brightness = clamp(config.device.brightness, 1, 100) / 100;
+  if (brightness >= 0.995) return;
+  const imageData = ctx.getImageData(0, 0, 128, 64);
+  const data = imageData.data;
+  for (let index = 0; index < data.length; index += 4) {
+    data[index] = Math.round(data[index] * brightness);
+    data[index + 1] = Math.round(data[index + 1] * brightness);
+    data[index + 2] = Math.round(data[index + 2] * brightness);
+  }
+  ctx.putImageData(imageData, 0, 0);
+}
+
+function makeFlightSignature(flight: DisplayFlight | undefined) {
+  if (!flight) return "";
+  return [
+    flight.flight,
+    flight.callsign,
+    flight.cs,
+    flight.flt,
+    flight.logoUrl,
+    flight.layout,
+    flight.lines?.airline,
+    flight.lines?.route,
+    flight.lines?.aircraft,
+    flight.lines?.context,
+    flight.locationValue,
+    flight.followStatus?.text,
+    flight.followStatus?.detail
+  ].filter(Boolean).join("|");
 }
 
 function slideButton(active: boolean) {
@@ -925,12 +1173,39 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const logoCacheRef = useRef<Map<string, HTMLImageElement | null>>(new Map());
   const [logoVersion, setLogoVersion] = useState(0);
-  const activeFlight = props.preview.flights[0];
-  const timeNow = new Intl.DateTimeFormat("nb-NO", {
-    hour: "2-digit",
-    minute: "2-digit",
-    timeZone: props.config.device.timezone || "Europe/Oslo"
-  }).format(new Date());
+  const [animationFrame, setAnimationFrame] = useState(0);
+  const cycleStartedAtRef = useRef(0);
+  const tickerStartedAtRef = useRef(0);
+  const clockLastMinuteRef = useRef<number | null>(null);
+  const clockFallingMinuteIndexRef = useRef<number | null>(null);
+  const clockFallingStartedAtRef = useRef(0);
+  const lastFlightSignatureRef = useRef("");
+  const runtimeSignature = useMemo(() => JSON.stringify({
+    displayMode: props.config.device.displayMode,
+    flights: props.preview.flights.map((flight) => makeFlightSignature(flight)),
+    idleScreens: props.preview.idleScreens.map((screen) => `${screen.kind || ""}:${screen.title || ""}:${screen.rows?.map((row) => `${row.flightId || ""}/${row.airport || ""}/${row.time || ""}/${row.status || ""}/${row.gateMessage || ""}`).join(",") || ""}`)
+  }), [props.config.device.displayMode, props.preview.flights, props.preview.idleScreens]);
+
+  useEffect(() => {
+    const now = performance.now();
+    cycleStartedAtRef.current = now;
+    tickerStartedAtRef.current = now;
+    clockLastMinuteRef.current = null;
+    clockFallingMinuteIndexRef.current = null;
+    clockFallingStartedAtRef.current = 0;
+    lastFlightSignatureRef.current = "";
+  }, [runtimeSignature]);
+
+  useEffect(() => {
+    if (!props.screenState.active) return;
+    let frame = 0;
+    const tick = () => {
+      setAnimationFrame((value) => (value + 1) % 1000000);
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [props.screenState.active]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -951,6 +1226,22 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
     renderCtx.fillRect(0, 0, panelWidth, panelHeight);
 
     if (props.screenState.active) {
+      const now = performance.now();
+      if (!cycleStartedAtRef.current) cycleStartedAtRef.current = now;
+      if (!tickerStartedAtRef.current) tickerStartedAtRef.current = now;
+
+      const flights = props.preview.flights;
+      const flightCycleMs = Math.max(2000, props.config.device.displayCycleSeconds * 1000);
+      const flightElapsed = Math.max(0, now - cycleStartedAtRef.current);
+      const flightCycleNumber = Math.floor(flightElapsed / flightCycleMs);
+      const activeFlight = flights.length ? flights[flightCycleNumber % flights.length] : undefined;
+      const currentFlightCycleStartedAt = cycleStartedAtRef.current + flightCycleNumber * flightCycleMs;
+      const flightSignature = makeFlightSignature(activeFlight);
+      if (flightSignature !== lastFlightSignatureRef.current) {
+        lastFlightSignatureRef.current = flightSignature;
+        tickerStartedAtRef.current = now;
+      }
+
       const logoUrl = activeFlight?.logoUrl;
       const cachedLogo = logoUrl ? logoCacheRef.current.get(logoUrl) : undefined;
       if (logoUrl && cachedLogo === undefined) {
@@ -968,17 +1259,37 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
       }
 
       if (props.config.device.displayMode === "clock") {
-        const top = props.config.device.clockTopColor;
-        const bottom = props.config.device.clockColor;
-        drawLedText(renderCtx, "CLOCK MODE", 23, 10, top, 82);
-        drawLedText(renderCtx, timeNow, 34, 30, bottom, 60);
+        const time = getClockTimeParts(props.config.device.timezone);
+        const completedMinutes = Math.max(0, Math.min(59, Number(time.minute)));
+        if (clockLastMinuteRef.current === null) {
+          clockLastMinuteRef.current = completedMinutes;
+        } else if (completedMinutes !== clockLastMinuteRef.current) {
+          if (completedMinutes > 0) {
+            clockFallingMinuteIndexRef.current = completedMinutes - 1;
+            clockFallingStartedAtRef.current = now;
+          } else {
+            clockFallingMinuteIndexRef.current = null;
+            clockFallingStartedAtRef.current = 0;
+          }
+          clockLastMinuteRef.current = completedMinutes;
+        }
+        drawClockLayoutExact(renderCtx, props.config, clockFallingMinuteIndexRef.current, clockFallingStartedAtRef.current, now);
       } else if (activeFlight) {
-        drawLiveFlightLayoutExact(renderCtx, activeFlight, props.config, logoUrl ? logoCacheRef.current.get(logoUrl) : undefined);
+        drawLiveFlightLayoutExact(renderCtx, activeFlight, props.config, logoUrl ? logoCacheRef.current.get(logoUrl) : undefined, currentFlightCycleStartedAt, tickerStartedAtRef.current, now, flights.length);
       } else if (props.preview.idleScreens[0]?.rows?.length) {
-        drawIdleLayoutExact(renderCtx, props.preview.idleScreens[0], props.config);
+        const idleScreens = props.preview.idleScreens;
+        const idleCycleMs = Math.max(2000, props.config.device.timetableCycleSeconds * 1000);
+        const idleElapsed = Math.max(0, now - cycleStartedAtRef.current);
+        const idleCycleNumber = Math.floor(idleElapsed / idleCycleMs);
+        const idleIndex = idleScreens.length ? idleCycleNumber % idleScreens.length : 0;
+        const idleCycleStartedAt = cycleStartedAtRef.current + idleCycleNumber * idleCycleMs;
+        const transition = getIdleTransition(idleScreens, idleIndex, props.config, idleCycleStartedAt, now);
+        drawIdleLayoutExact(renderCtx, idleScreens[idleIndex], props.config, transition.offset, transition.nextScreen);
       } else {
         drawLedText(renderCtx, "NO DISPLAY DATA", 20, 27, "#f6b800", 88);
       }
+
+      applyDisplayBrightness(renderCtx, props.config);
     }
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -988,7 +1299,7 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
     const imageData = renderCtx.getImageData(0, 0, panelWidth, panelHeight).data;
     const pitchX = canvas.width / panelWidth;
     const pitchY = canvas.height / panelHeight;
-    const radius = Math.min(pitchX, pitchY) * 0.24;
+    const radius = Math.min(pitchX, pitchY) * 0.27;
 
     for (let y = 0; y < panelHeight; y += 1) {
       for (let x = 0; x < panelWidth; x += 1) {
@@ -1016,7 +1327,7 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
 
     ctx.fillStyle = "rgba(255,255,255,0.03)";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-  }, [activeFlight, logoVersion, props.config, props.preview.idleScreens, props.screenState.active, timeNow]);
+  }, [animationFrame, logoVersion, props.config, props.preview.flights, props.preview.idleScreens, props.screenState.active]);
 
   return (
     <div style={{ flexShrink: 0, marginBottom: "20px" }}>
