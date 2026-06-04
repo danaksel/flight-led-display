@@ -100,9 +100,20 @@ type DisplayFlight = {
   status?: string;
 };
 
+type IdleRow = {
+  flightId?: string;
+  airport?: string;
+  gate?: string;
+  gateMessage?: string;
+  message?: string;
+  status?: "scheduled" | "newTime" | "canceled" | "done" | "empty" | string;
+  time?: string;
+};
+
 type IdleScreen = {
+  kind?: "departures" | "arrivals" | string;
   title?: string;
-  rows?: string[];
+  rows?: IdleRow[];
 };
 
 type DisplayPayload = {
@@ -415,6 +426,13 @@ function formatIdleRow(row: unknown): string {
   return String(row ?? "");
 }
 
+function formatIdleRowForPreview(row: IdleRow): string {
+  if (row.status === "empty" || row.message) return String(row.message || "").replace("|", " / ");
+  const gate = row.gate ? `Gate ${row.gate}` : "";
+  const status = row.gateMessage || (row.status && row.status !== "scheduled" ? row.status : "");
+  return [row.flightId, row.airport, gate, row.time, status].filter(Boolean).join(" · ");
+}
+
 function normalizeLedText(value: string): string {
   return value
     .replace(/[æÆåÅäÄáÁàÀâÂ]/g, "A")
@@ -477,6 +495,10 @@ function ledCharAdvance(char: string): number {
   return 6;
 }
 
+function measureLedText(text: string): number {
+  return Array.from(normalizeLedText(text)).reduce((width, char) => width + ledCharAdvance(char), 0);
+}
+
 function hexToRgb(hex: string): [number, number, number] {
   const normalized = hex.replace("#", "");
   const expanded = normalized.length === 3 ? normalized.split("").map((value) => value + value).join("") : normalized;
@@ -499,6 +521,92 @@ function drawLedText(ctx: CanvasRenderingContext2D, text: string, x: number, y: 
     }
     cursor += advance;
   }
+}
+
+function drawLedTextRight(ctx: CanvasRenderingContext2D, text: string, rightX: number, y: number, color: string, maxWidth: number) {
+  const value = normalizeLedText(text);
+  const width = Math.min(measureLedText(value), maxWidth);
+  drawLedText(ctx, value, rightX - width, y, color, maxWidth);
+}
+
+function normalizeGateStatusForDisplay(value?: string): string {
+  const raw = String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+  if (!raw) return "";
+  if (raw.includes("gotogate") || raw.includes("togate")) return "Go to gate";
+  if (raw.includes("boarding")) return "Boarding";
+  if (raw.includes("closing")) return "Closing";
+  if (raw.includes("closed")) return "Closed";
+  return value || "";
+}
+
+function drawLocalClock(ctx: CanvasRenderingContext2D, rightX: number, y: number, color: string, timezone: string) {
+  const value = new Intl.DateTimeFormat("en-GB", {
+    timeZone: timezone || "Europe/Oslo",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).format(new Date());
+  drawLedTextRight(ctx, value, rightX, y, color, 30);
+}
+
+function drawIdleRowExact(ctx: CanvasRenderingContext2D, kind: string | undefined, row: IdleRow, x: number, y: number, colors: Config["device"]["timetableColors"]) {
+  const status = row.status || "scheduled";
+  if (status === "empty" || row.message) {
+    const parts = String(row.message || row.flightId || "").split("|");
+    drawLedText(ctx, parts[0] || "", x, y, colors.data, 122);
+    if (parts[1]) drawLedText(ctx, parts[1], x, y + 11, colors.data, 122);
+    return;
+  }
+
+  const gateBlinkOn = Math.floor(performance.now() / 1200) % 2 === 0;
+  const gateStatusText = kind === "departures" ? normalizeGateStatusForDisplay(row.gateMessage) : "";
+  const arrivalStatusText = kind === "arrivals" && status === "done" ? "Landed" : "";
+  const gateText = kind === "departures" && row.gate ? row.gate : "";
+  const airportText = kind === "departures" && gateText && !gateBlinkOn ? gateText : row.airport || "";
+  const timeColor = status === "canceled" ? colors.canceled : status === "newTime" ? colors.newTime : colors.time;
+  const rowColor = status === "canceled" ? colors.canceled : colors.data;
+  const alternateTimeText = gateStatusText || arrivalStatusText;
+  const timeText = alternateTimeText && !gateBlinkOn ? alternateTimeText : row.time || "";
+  const activeTimeColor = alternateTimeText && !gateBlinkOn ? colors.data : timeColor;
+
+  drawLedText(ctx, row.flightId || "", x, y, rowColor, 43);
+  drawLedText(ctx, airportText, x + 48, y, rowColor, 24);
+  drawLedTextRight(ctx, timeText, 125, y, activeTimeColor, 60);
+
+  if (status === "canceled") {
+    ctx.fillStyle = colors.canceled;
+    ctx.fillRect(x, y + 3, 122, 1);
+  }
+}
+
+function drawIdleLayoutExact(ctx: CanvasRenderingContext2D, screen: IdleScreen | undefined, config: Config) {
+  const colors = config.device.timetableColors;
+  ctx.fillStyle = "#000000";
+  ctx.fillRect(0, 0, 128, 64);
+
+  if (!screen) {
+    drawLedText(ctx, "No flights", 3, 9, colors.header, 122);
+    drawLedText(ctx, "No airport data", 3, 23, colors.data, 122);
+    return;
+  }
+
+  drawLedText(ctx, screen.title || "AIRPORT", 3, 3, colors.header, 86);
+  drawLocalClock(ctx, 125, 3, colors.time, config.device.timezone);
+  ctx.fillStyle = colors.header;
+  ctx.fillRect(3, 14, 122, 1);
+
+  const rows = Array.isArray(screen.rows) ? screen.rows.slice(0, 4) : [];
+  if (!rows.length) {
+    drawLedText(ctx, "No airport data", 3, 28, colors.data, 122);
+    return;
+  }
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, 15, 128, 49);
+  ctx.clip();
+  rows.forEach((row, index) => drawIdleRowExact(ctx, screen.kind, row, 3, 20 + index * 11, colors));
+  ctx.restore();
 }
 
 function slideButton(active: boolean) {
@@ -711,10 +819,7 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
         drawLedText(renderCtx, `${activeFlight.airline || "LIVE"} ${activeFlight.aircraft || ""}`, 3, 21, props.config.device.lineColors.aircraft, 122);
         drawLedText(renderCtx, `${activeFlight.contextLabel ? `${activeFlight.contextLabel} ` : ""}${activeFlight.contextValue || activeFlight.locationValue || activeFlight.status || "MONITORING ACTIVE"}`, 3, 36, props.config.device.lineColors.context, 122);
       } else if (props.preview.idleScreens[0]?.rows?.length) {
-        drawLedText(renderCtx, props.preview.idleScreens[0].title || "AIRPORT BOARD", 3, 6, props.config.device.timetableColors.header, 122);
-        props.preview.idleScreens[0].rows?.slice(0, 3).forEach((row, index) => {
-          drawLedText(renderCtx, formatIdleRow(row), 3, 21 + index * 13, props.config.device.timetableColors.data, 122);
-        });
+        drawIdleLayoutExact(renderCtx, props.preview.idleScreens[0], props.config);
       } else {
         drawLedText(renderCtx, "NO DISPLAY DATA", 20, 27, "#f6b800", 88);
       }
@@ -758,12 +863,36 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
   }, [activeFlight, props.config, props.preview.idleScreens, props.screenState.active, timeNow]);
 
   return (
-    <div style={{ flexShrink: 0 }}>
-      <div style={{ position: "relative", aspectRatio: "393 / 167", width: "100%", overflow: "hidden" }}>
-        <div style={{ position: "absolute", inset: 0, zIndex: 0, padding: "31px 38px 33px" }}>
-          <canvas ref={canvasRef} width={1280} height={640} style={{ display: "block", width: "100%", height: "100%", background: "#000" }} />
+    <div style={{ flexShrink: 0, marginBottom: "20px" }}>
+      <div style={{ position: "relative", aspectRatio: "1536 / 1024", width: "100%", overflow: "hidden" }}>
+        <div
+          style={{
+            position: "absolute",
+            left: "22.92%",
+            top: "27.83%",
+            width: "55.79%",
+            height: "43.85%",
+            zIndex: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            overflow: "hidden"
+          }}
+        >
+          <canvas
+            ref={canvasRef}
+            width={1280}
+            height={640}
+            style={{
+              display: "block",
+              width: "100%",
+              height: "auto",
+              aspectRatio: "2 / 1",
+              background: "#000000"
+            }}
+          />
         </div>
-        <img src={frameImage} alt="SKYFRAME LED frame" style={{ position: "absolute", inset: 0, zIndex: 1, width: "100%", height: "100%", objectFit: "cover" }} />
+        <img src={frameImage} alt="SKYFRAME LED frame" style={{ position: "absolute", inset: 0, zIndex: 1, width: "100%", height: "100%", objectFit: "contain" }} />
       </div>
     </div>
   );
@@ -1244,7 +1373,7 @@ export default function App() {
                   <article key={`${screen.title ?? "idle"}-${index}`} style={cardStyle()}>
                     <div style={{ fontSize: "15px", fontWeight: 600 }}>{screen.title || "Idle board"}</div>
                     <div style={{ marginTop: "8px", fontSize: "13px", color: "var(--muted-foreground)", lineHeight: 1.5 }}>
-                      {(screen.rows ?? []).slice(0, 4).map(formatIdleRow).join("\n")}
+                      {(screen.rows ?? []).slice(0, 4).map(formatIdleRowForPreview).join("\n")}
                     </div>
                   </article>
                 ))
