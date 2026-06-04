@@ -89,15 +89,50 @@ type DisplayFlight = {
   airline?: string;
   airlineCode?: string;
   aircraft?: string;
+  air?: string;
+  airCode?: string;
+  ac?: string;
+  arrTime?: string;
+  cs?: string;
+  ctxLabel?: string;
+  ctxValue?: string;
+  flt?: string;
+  from?: string;
+  layout?: "follow_cycle" | "follow_status" | string;
+  lines?: {
+    airline?: string;
+    aircraft?: string;
+    context?: string;
+    route?: string;
+  };
+  locationLabel?: string;
+  locationValue?: string;
+  logoUrl?: string;
+  metrics?: {
+    altitude?: string;
+    speed?: string;
+    track?: string;
+    verticalRate?: string;
+  };
   origin?: string;
+  reg?: string;
+  routeProgress?: number;
+  to?: string;
   destination?: string;
   displayTime?: string;
   contextLabel?: string;
   contextValue?: string;
-  locationLabel?: string;
-  locationValue?: string;
+  followStatus?: {
+    color?: "landed" | string;
+    detail?: string;
+    text?: string;
+  };
   gateMessage?: string;
   status?: string;
+  alt?: number;
+  spd?: number;
+  trk?: number;
+  vr?: number;
 };
 
 type IdleRow = {
@@ -609,6 +644,111 @@ function drawIdleLayoutExact(ctx: CanvasRenderingContext2D, screen: IdleScreen |
   ctx.restore();
 }
 
+function drawPlaceholderLogo(ctx: CanvasRenderingContext2D, x: number, y: number, size: number) {
+  const cx = x + Math.floor(size / 2);
+  const cy = y + Math.floor(size / 2);
+  const radius = Math.floor(size / 2);
+  ctx.fillStyle = "#105ab7";
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#0d4a96";
+  ctx.beginPath();
+  ctx.arc(cx + 4, cy + 2, radius - 7, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#f4f7ff";
+  ctx.fillRect(x + 15, y + 13, 13, 2);
+  ctx.fillRect(x + 12, y + 16, 18, 2);
+  ctx.fillRect(x + 10, y + 19, 22, 2);
+  ctx.fillRect(x + 13, y + 22, 16, 2);
+  ctx.fillRect(x + 16, y + 25, 10, 2);
+  ctx.fillStyle = "#8fc2ff";
+  ctx.fillRect(x + 8, y + 31, 26, 2);
+}
+
+function getFlightLineColors(config: Config) {
+  return config.device.lineColors;
+}
+
+function drawFlightTextColumn(ctx: CanvasRenderingContext2D, lines: { airline?: string; aircraft?: string; context?: string; route?: string }, config: Config) {
+  const colors = getFlightLineColors(config);
+  drawLedText(ctx, lines.airline || "", 50, 5, colors.airline, 75);
+  drawLedText(ctx, lines.route || "", 50, 19, colors.route, 75);
+  drawLedText(ctx, lines.aircraft || "", 50, 33, colors.aircraft, 75);
+  drawLedText(ctx, lines.context || "", 3, 52, colors.context, 122);
+}
+
+function formatCompactMetrics(flight: DisplayFlight) {
+  const metrics = flight.metrics || {};
+  return {
+    altitude: metrics.altitude || (Number.isFinite(flight.alt) ? `${Math.round(Number(flight.alt))}ft` : ""),
+    speed: metrics.speed || (Number.isFinite(flight.spd) ? `${Math.round(Number(flight.spd))}kn` : ""),
+    track: metrics.track || (Number.isFinite(flight.trk) ? `${Math.round(Number(flight.trk))}deg` : ""),
+    verticalRate: metrics.verticalRate || (Number.isFinite(flight.vr) ? `${Math.round(Number(flight.vr))}fpm` : "")
+  };
+}
+
+function drawFollowFlightTextExact(ctx: CanvasRenderingContext2D, flight: DisplayFlight, config: Config) {
+  const colors = getFlightLineColors(config);
+  const route = flight.lines?.route || [flight.from || flight.origin, flight.to || flight.destination].filter(Boolean).join("-");
+  const etaLine = flight.arrTime ? `ETA:${flight.arrTime}` : "";
+  const airlineLine = flight.lines?.airline || flight.air || flight.airCode || flight.airline || "";
+  const topLine = flight.flt || flight.flight || flight.cs || flight.callsign || "";
+  const secondLine = route || airlineLine || etaLine;
+  const thirdLine = flight.ac || flight.aircraft || flight.reg || "";
+
+  drawLedText(ctx, topLine, 50, 5, colors.airline, 75);
+  drawLedText(ctx, secondLine, 50, 19, colors.route, 75);
+  drawLedText(ctx, thirdLine, 50, 33, colors.aircraft, 75);
+
+  if (flight.followStatus) {
+    const statusColor = flight.followStatus.color === "landed" ? "#00d46a" : config.device.timetableColors.header;
+    drawLedText(ctx, flight.followStatus.text || "", 3, 47, statusColor, 122);
+    drawLedText(ctx, flight.followStatus.detail || "", 3, 56, statusColor, 122);
+    return;
+  }
+
+  const metrics = formatCompactMetrics(flight);
+  const firstMetricLine = [
+    metrics.altitude ? `ALT:${metrics.altitude}` : "",
+    metrics.speed ? `SPD:${metrics.speed}` : ""
+  ].filter(Boolean).join(" ");
+  const secondMetricLine = [
+    metrics.track ? `TRK:${metrics.track}` : "",
+    metrics.verticalRate ? `VR:${metrics.verticalRate}` : ""
+  ].filter(Boolean).join(" ");
+
+  drawLedText(ctx, firstMetricLine || flight.locationLabel || "FLYING OVER", 3, 47, colors.context, 122);
+  drawLedText(ctx, secondMetricLine || flight.locationValue || "UNKNOWN AREA", 3, 56, colors.context, 122);
+}
+
+function drawLiveFlightLayoutExact(ctx: CanvasRenderingContext2D, flight: DisplayFlight, config: Config, logo: HTMLImageElement | null | undefined) {
+  ctx.fillStyle = "#000000";
+  ctx.fillRect(0, 0, 128, 64);
+
+  if (logo) {
+    ctx.drawImage(logo, 3, 3, 42, 42);
+  } else {
+    drawPlaceholderLogo(ctx, 3, 3, 42);
+  }
+
+  if (flight.layout === "follow_cycle" || flight.layout === "follow_status") {
+    drawFollowFlightTextExact(ctx, flight, config);
+    return;
+  }
+
+  const airline = flight.lines?.airline || flight.air || flight.airCode || flight.airline || "";
+  const route = flight.lines?.route || [flight.from || flight.origin, flight.to || flight.destination].filter(Boolean).join("-");
+  const aircraft = flight.lines?.aircraft || flight.ac || flight.aircraft || flight.reg || "";
+  const context = flight.lines?.context || [flight.ctxLabel || flight.contextLabel, flight.ctxValue || flight.contextValue].filter(Boolean).join(" ");
+  drawFlightTextColumn(ctx, {
+    airline,
+    route: route || flight.flt || flight.flight || flight.cs || flight.callsign || "",
+    aircraft,
+    context
+  }, config);
+}
+
 function slideButton(active: boolean) {
   return {
     display: "flex",
@@ -783,6 +923,8 @@ function MapPicker(props: { lat: number; lon: number; radiusKm: number; onChange
 
 function EmulatorPreview(props: { config: Config; preview: PreviewState; screenState: ScreenState }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const logoCacheRef = useRef<Map<string, HTMLImageElement | null>>(new Map());
+  const [logoVersion, setLogoVersion] = useState(0);
   const activeFlight = props.preview.flights[0];
   const timeNow = new Intl.DateTimeFormat("nb-NO", {
     hour: "2-digit",
@@ -809,15 +951,29 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
     renderCtx.fillRect(0, 0, panelWidth, panelHeight);
 
     if (props.screenState.active) {
+      const logoUrl = activeFlight?.logoUrl;
+      const cachedLogo = logoUrl ? logoCacheRef.current.get(logoUrl) : undefined;
+      if (logoUrl && cachedLogo === undefined) {
+        const image = new Image();
+        image.onload = () => {
+          logoCacheRef.current.set(logoUrl, image);
+          setLogoVersion((value) => value + 1);
+        };
+        image.onerror = () => {
+          logoCacheRef.current.set(logoUrl, null);
+          setLogoVersion((value) => value + 1);
+        };
+        image.src = logoUrl;
+        logoCacheRef.current.set(logoUrl, null);
+      }
+
       if (props.config.device.displayMode === "clock") {
         const top = props.config.device.clockTopColor;
         const bottom = props.config.device.clockColor;
         drawLedText(renderCtx, "CLOCK MODE", 23, 10, top, 82);
         drawLedText(renderCtx, timeNow, 34, 30, bottom, 60);
       } else if (activeFlight) {
-        drawLedText(renderCtx, `${activeFlight.flight || activeFlight.callsign || "FLIGHT"} ${activeFlight.destination || ""} ${activeFlight.displayTime || ""}`, 3, 6, props.config.device.lineColors.route, 122);
-        drawLedText(renderCtx, `${activeFlight.airline || "LIVE"} ${activeFlight.aircraft || ""}`, 3, 21, props.config.device.lineColors.aircraft, 122);
-        drawLedText(renderCtx, `${activeFlight.contextLabel ? `${activeFlight.contextLabel} ` : ""}${activeFlight.contextValue || activeFlight.locationValue || activeFlight.status || "MONITORING ACTIVE"}`, 3, 36, props.config.device.lineColors.context, 122);
+        drawLiveFlightLayoutExact(renderCtx, activeFlight, props.config, logoUrl ? logoCacheRef.current.get(logoUrl) : undefined);
       } else if (props.preview.idleScreens[0]?.rows?.length) {
         drawIdleLayoutExact(renderCtx, props.preview.idleScreens[0], props.config);
       } else {
@@ -860,7 +1016,7 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
 
     ctx.fillStyle = "rgba(255,255,255,0.03)";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-  }, [activeFlight, props.config, props.preview.idleScreens, props.screenState.active, timeNow]);
+  }, [activeFlight, logoVersion, props.config, props.preview.idleScreens, props.screenState.active, timeNow]);
 
   return (
     <div style={{ flexShrink: 0, marginBottom: "20px" }}>
@@ -875,6 +1031,7 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
             zIndex: 0,
             display: "flex",
             alignItems: "center",
+            background: "#000000",
             justifyContent: "center",
             overflow: "hidden"
           }}
