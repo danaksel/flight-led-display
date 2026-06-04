@@ -1007,8 +1007,6 @@ function makeFlightSignature(flight: DisplayFlight | undefined) {
     flight.lines?.airline,
     flight.lines?.route,
     flight.lines?.aircraft,
-    flight.lines?.context,
-    flight.locationValue,
     flight.followStatus?.text,
     flight.followStatus?.detail
   ].filter(Boolean).join("|");
@@ -1192,6 +1190,7 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
   const [logoVersion, setLogoVersion] = useState(0);
   const [animationFrame, setAnimationFrame] = useState(0);
   const cycleStartedAtRef = useRef(0);
+  const followPhaseStartedAtRef = useRef(0);
   const tickerStartedAtRef = useRef(0);
   const clockLastMinuteRef = useRef<number | null>(null);
   const clockFallingMinuteIndexRef = useRef<number | null>(null);
@@ -1206,6 +1205,7 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
   useEffect(() => {
     const now = performance.now();
     cycleStartedAtRef.current = now;
+    followPhaseStartedAtRef.current = now;
     tickerStartedAtRef.current = now;
     clockLastMinuteRef.current = null;
     clockFallingMinuteIndexRef.current = null;
@@ -1245,6 +1245,7 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
     if (props.screenState.active) {
       const now = performance.now();
       if (!cycleStartedAtRef.current) cycleStartedAtRef.current = now;
+      if (!followPhaseStartedAtRef.current) followPhaseStartedAtRef.current = now;
       if (!tickerStartedAtRef.current) tickerStartedAtRef.current = now;
 
       const flights = props.preview.flights;
@@ -1256,6 +1257,7 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
       const flightSignature = makeFlightSignature(activeFlight);
       if (flightSignature !== lastFlightSignatureRef.current) {
         lastFlightSignatureRef.current = flightSignature;
+        followPhaseStartedAtRef.current = now;
         tickerStartedAtRef.current = now;
       }
 
@@ -1292,7 +1294,9 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
         }
         drawClockLayoutExact(renderCtx, props.config, clockFallingMinuteIndexRef.current, clockFallingStartedAtRef.current, now);
       } else if (activeFlight) {
-        drawLiveFlightLayoutExact(renderCtx, activeFlight, props.config, logoUrl ? logoCacheRef.current.get(logoUrl) : undefined, currentFlightCycleStartedAt, tickerStartedAtRef.current, now, flights.length);
+        const isFollowLayout = activeFlight.layout === "follow_cycle" || activeFlight.layout === "follow_status";
+        const detailCycleStartedAt = isFollowLayout ? followPhaseStartedAtRef.current : currentFlightCycleStartedAt;
+        drawLiveFlightLayoutExact(renderCtx, activeFlight, props.config, logoUrl ? logoCacheRef.current.get(logoUrl) : undefined, detailCycleStartedAt, tickerStartedAtRef.current, now, flights.length);
       } else if (props.preview.idleScreens[0]?.rows?.length) {
         const idleScreens = props.preview.idleScreens;
         const idleCycleMs = Math.max(2000, props.config.device.timetableCycleSeconds * 1000);
