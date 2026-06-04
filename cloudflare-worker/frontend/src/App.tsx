@@ -1673,7 +1673,6 @@ export default function App() {
                   Sist byttet lysmodus: {formatTimestamp(screenState.lastBrightnessModeChangedAt)}
                 </div>
               </div>
-              <ToggleRow label="Display enabled" checked={config.device.enabled} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, enabled: value } }))} />
               <Field label="Display mode">
                 <SelectInput value={config.device.displayMode} onChange={(event) => updateConfig((current) => ({ ...current, device: { ...current.device, displayMode: event.target.value as "flight" | "clock" } }))}>
                   <option value="flight">Flight display</option>
@@ -1698,15 +1697,6 @@ export default function App() {
                 </div>
                 <ToggleRow label="Clock tick enabled" checked={config.device.clockTickEnabled} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, clockTickEnabled: value } }))} />
                 <SliderField label="Clock tick volume" value={config.device.clockTickVolumePercent} min={0} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, clockTickVolumePercent: value } }))} />
-                <ToggleRow label="Night mode enabled" checked={config.device.nightMode.enabled} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, nightMode: { ...current.device.nightMode, enabled: value } } }))} />
-                <div style={{ display: "grid", gap: "12px", gridTemplateColumns: "1fr 1fr" }}>
-                  <Field label="Night start">
-                    <TextInput type="time" value={config.device.nightMode.start} onChange={(event) => updateConfig((current) => ({ ...current, device: { ...current.device, nightMode: { ...current.device.nightMode, start: event.target.value } } }))} />
-                  </Field>
-                  <Field label="Night end">
-                    <TextInput type="time" value={config.device.nightMode.end} onChange={(event) => updateConfig((current) => ({ ...current, device: { ...current.device, nightMode: { ...current.device.nightMode, end: event.target.value } } }))} />
-                  </Field>
-                </div>
                 <SliderField label="Night brightness" value={config.device.nightMode.brightness} min={0} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, nightMode: { ...current.device.nightMode, brightness: value } } }))} />
                 <SliderField label="Config refresh" value={config.device.configRefreshSeconds} min={60} max={3600} step={30} suffix=" s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, configRefreshSeconds: value } }))} />
               </Advanced>
