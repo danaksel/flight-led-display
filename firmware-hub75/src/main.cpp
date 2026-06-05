@@ -75,6 +75,8 @@ constexpr uint8_t ClockRenderIntervalMs = 15;
 constexpr uint8_t RealtimeStatePollSeconds = 5;
 constexpr uint32_t DeviceStatusIntervalMs = 120000;
 constexpr uint16_t TimetableKindTransitionDefaultMs = 400;
+constexpr int16_t TimetableRowsTopY = 15;
+constexpr int16_t TimetableRowsBottomY = 64;
 constexpr uint8_t MainLoopDelayMs = 20;
 constexpr uint8_t WifiReconnectSeconds = 30;
 constexpr uint16_t ConfigFallbackPollSeconds = 300;
@@ -117,6 +119,7 @@ uint32_t nextWifiReconnectAt = 0;
 uint32_t nextIdleCycleAt = 0;
 uint32_t nextLiveCycleAt = 0;
 uint32_t idleCycleStartedAt = 0;
+uint32_t idleOutroStartedAt = 0;
 uint32_t liveCycleStartedAt = 0;
 uint32_t lastHeartbeatAt = 0;
 uint32_t lastIdleRenderAt = 0;
@@ -133,6 +136,7 @@ uint8_t idleScreenCount = 0;
 uint8_t currentIdleScreen = 0;
 uint8_t currentLiveFlight = 0;
 bool idleKindIntroActive = false;
+bool idleOutroActive = false;
 bool lastConfigOk = false;
 bool lastDisplayOk = false;
 String lastDisplayMode;
@@ -837,6 +841,62 @@ void drawTextFit(const String &text, int16_t x, int16_t y, uint16_t color, uint8
     }
 }
 
+void drawCharClipped(char c, int16_t x, int16_t y, uint16_t color, int16_t clipTop, int16_t clipBottom, uint8_t maxWidth)
+{
+    if (c == ' ') return;
+    GFXcanvas1 canvas(6, 8);
+    canvas.fillScreen(0);
+    canvas.drawChar(0, 0, c, 1, 0, 1);
+    for (uint8_t sourceY = 0; sourceY < 8; ++sourceY)
+    {
+        const int16_t targetY = y + sourceY;
+        if (targetY < clipTop || targetY >= clipBottom) continue;
+        for (uint8_t sourceX = 0; sourceX < 6; ++sourceX)
+        {
+            if (sourceX >= maxWidth) break;
+            if (canvas.getPixel(sourceX, sourceY))
+            {
+                display->drawPixel(x + sourceX, targetY, color);
+            }
+        }
+    }
+}
+
+void drawTextFitClipped(const String &text, int16_t x, int16_t y, uint16_t color, uint8_t maxWidth,
+                        int16_t clipTop = TimetableRowsTopY, int16_t clipBottom = TimetableRowsBottomY)
+{
+    const String fitted = fitText(text, maxWidth);
+    int16_t cursorX = x;
+    uint8_t usedWidth = 0;
+    for (size_t i = 0; i < fitted.length(); ++i)
+    {
+        const char c = fitted[i];
+        const uint8_t advance = charAdvance(c);
+        if (usedWidth + advance > maxWidth) break;
+        drawCharClipped(c, cursorX, y, color, clipTop, clipBottom, maxWidth - usedWidth);
+        cursorX += advance;
+        usedWidth += advance;
+    }
+}
+
+void drawIdleColonClipped(int16_t x, int16_t y, uint16_t color,
+                          int16_t clipTop = TimetableRowsTopY, int16_t clipBottom = TimetableRowsBottomY)
+{
+    const int16_t firstY = y + 1;
+    const int16_t secondY = y + 4;
+    if (firstY >= clipTop && firstY < clipBottom) display->drawPixel(x, firstY, color);
+    if (secondY >= clipTop && secondY < clipBottom) display->drawPixel(x, secondY, color);
+}
+
+void drawIdleTimeClipped(const String &text, int16_t x, int16_t y, uint16_t color)
+{
+    String value = normalizeLedText(text);
+    while (value.length() < 5) value += " ";
+    drawTextFitClipped(value.substring(0, 2), x, y, color, 12);
+    if (value.substring(2, 3) == ":") drawIdleColonClipped(x + 12, y, color);
+    drawTextFitClipped(value.substring(3, 5), x + 14, y, color, 12);
+}
+
 void drawTextRight(const String &text, int16_t rightX, int16_t y, uint16_t color, uint8_t maxWidth)
 {
     const String fitted = fitText(text, maxWidth);
@@ -1147,6 +1207,50 @@ void drawTickerTextBoxed(const String &text, int16_t x, int16_t y, uint16_t colo
     }
 }
 
+void drawTickerTextBoxedClipped(const String &text, int16_t x, int16_t y, uint16_t color, uint8_t width,
+                                uint32_t startedAt, uint16_t speedOverride = 0)
+{
+    const String normalized = normalizeLedText(text);
+    if (!normalized.length()) return;
+
+    const uint16_t textWidth = textPixelWidth(normalized);
+    if (textWidth <= width)
+    {
+        drawTextFitClipped(normalized, x, y, color, width);
+        return;
+    }
+
+    const uint16_t overflow = max<uint16_t>(1, textWidth - width);
+    const uint16_t offset = tickerForwardOffset(overflow, startedAt, speedOverride);
+    GFXcanvas1 canvas(textWidth, 8);
+    canvas.fillScreen(0);
+    int16_t cursorX = 0;
+    for (size_t i = 0; i < normalized.length(); ++i)
+    {
+        const char c = normalized[i];
+        if (c != ' ')
+        {
+            canvas.drawChar(cursorX, 0, c, 1, 0, 1);
+        }
+        cursorX += charAdvance(c);
+    }
+
+    for (uint8_t targetX = 0; targetX < width; ++targetX)
+    {
+        const uint16_t sourceX = offset + targetX;
+        if (sourceX >= textWidth) break;
+        for (uint8_t targetY = 0; targetY < 8; ++targetY)
+        {
+            const int16_t clippedY = y + targetY;
+            if (clippedY < TimetableRowsTopY || clippedY >= TimetableRowsBottomY) continue;
+            if (canvas.getPixel(sourceX, targetY))
+            {
+                display->drawPixel(x + targetX, clippedY, color);
+            }
+        }
+    }
+}
+
 void drawProgressValue(float progress, int16_t y, uint16_t backgroundColor, uint16_t fillColor)
 {
     const float clamped = min(1.0f, max(0.0f, progress));
@@ -1245,6 +1349,23 @@ void drawBitmapSymbol(int16_t x, int16_t y, const char *bitmap[], uint8_t rows, 
     }
 }
 
+void drawBitmapSymbolClipped(int16_t x, int16_t y, const char *bitmap[], uint8_t rows, uint16_t color)
+{
+    for (uint8_t row = 0; row < rows; ++row)
+    {
+        const int16_t targetY = y + row;
+        if (targetY < TimetableRowsTopY || targetY >= TimetableRowsBottomY) continue;
+        const char *line = bitmap[row];
+        for (uint8_t col = 0; line[col] != '\0'; ++col)
+        {
+            if (line[col] == '#')
+            {
+                display->drawPixel(x + col, targetY, color);
+            }
+        }
+    }
+}
+
 String idleRowSymbolState(const String &kind, const IdleRow &row)
 {
     if (row.status == "canceled") return "";
@@ -1273,10 +1394,10 @@ void drawIdleDestinationTicker(const String &text, int16_t x, int16_t y, uint16_
     const String normalized = normalizeLedText(text);
     if (textPixelWidth(normalized) <= width)
     {
-        drawTextFit(normalized, x, y, color, width);
+        drawTextFitClipped(normalized, x, y, color, width);
         return;
     }
-    drawTickerTextBoxed(normalized, x, y, color, width, idleCycleStartedAt, timetableScrollPixelsPerSecond);
+    drawTickerTextBoxedClipped(normalized, x, y, color, width, idleCycleStartedAt, timetableScrollPixelsPerSecond);
 }
 
 void drawIdleRowSymbol(const String &kind, const IdleRow &row, int16_t x, int16_t y)
@@ -1290,12 +1411,12 @@ void drawIdleRowSymbol(const String &kind, const IdleRow &row, int16_t x, int16_
     if (state == "landed")
     {
         constexpr uint8_t symbolWidth = 5;
-        drawBitmapSymbol(x + max<int16_t>(0, 9 - symbolWidth), y + 2, LandedCheckSymbol, 4, idleRowSymbolColor(state));
+        drawBitmapSymbolClipped(x + max<int16_t>(0, 6 - symbolWidth), y + 2, LandedCheckSymbol, 4, idleRowSymbolColor(state));
         return;
     }
 
     constexpr uint8_t symbolWidth = 4;
-    drawBitmapSymbol(x + max<int16_t>(0, 9 - symbolWidth), y + 2, DepartureCircleSymbol, 4, idleRowSymbolColor(state));
+    drawBitmapSymbolClipped(x + max<int16_t>(0, 6 - symbolWidth), y + 2, DepartureCircleSymbol, 4, idleRowSymbolColor(state));
 }
 
 String localClockText()
@@ -1467,24 +1588,22 @@ uint8_t nextIdleScreenIndex()
 
 uint32_t idleTransitionMs(uint16_t rowTravel)
 {
-    const uint32_t cycleMs = max<uint32_t>(2000, static_cast<uint32_t>(timetableCycleSeconds) * 1000UL);
     const uint16_t speed = max<uint16_t>(4, timetableScrollPixelsPerSecond);
-    return min<uint32_t>(cycleMs * 3 / 4, max<uint32_t>(400, (static_cast<uint32_t>(rowTravel) * 1000UL) / speed));
+    return max<uint32_t>(400, (static_cast<uint32_t>(rowTravel) * 1000UL) / speed);
 }
 
 float idleTransitionProgress(uint32_t transitionMs, bool intro)
 {
-    const uint32_t elapsed = millis() - idleCycleStartedAt;
     if (intro)
     {
+        const uint32_t elapsed = millis() - idleCycleStartedAt;
         if (elapsed >= transitionMs) return 1.0f;
         return min(1.0f, static_cast<float>(elapsed) / static_cast<float>(transitionMs));
     }
 
-    const uint32_t cycleMs = max<uint32_t>(2000, static_cast<uint32_t>(timetableCycleSeconds) * 1000UL);
-    const uint32_t transitionStart = cycleMs > transitionMs ? cycleMs - transitionMs : 0;
-    if (elapsed < transitionStart) return 0;
-    return min(1.0f, static_cast<float>(elapsed - transitionStart) / static_cast<float>(transitionMs));
+    if (!idleOutroActive) return 0;
+    const uint32_t transitionElapsed = millis() - idleOutroStartedAt;
+    return min(1.0f, static_cast<float>(transitionElapsed) / static_cast<float>(transitionMs));
 }
 
 bool idleKindChangingToNext()
@@ -1500,7 +1619,7 @@ int16_t idleScrollOffset()
     const uint16_t rowTravel = idleKindChangingToNext() ? 64 : 44;
     const uint32_t transitionMs = idleKindChangingToNext() ? timetableTransitionMs : idleTransitionMs(rowTravel);
     const float progress = idleTransitionProgress(transitionMs, false);
-    return static_cast<int16_t>(roundf(static_cast<float>(rowTravel) * easeInOut(progress)));
+    return static_cast<int16_t>(floorf(static_cast<float>(rowTravel) * progress));
 }
 
 int16_t idleRowsBaseY()
@@ -2432,7 +2551,7 @@ bool applyDeviceConfigPayload(const String &body, int httpCode, bool httpOk)
 
 void drawIdleRow(const IdleScreen &screen, const IdleRow &row, int16_t y)
 {
-    if (y < 15 || y > 63) return;
+    if (y <= TimetableRowsTopY - 8 || y >= TimetableRowsBottomY) return;
 
     const uint16_t yellow = colorHeader();
     const uint16_t white = colorData();
@@ -2444,8 +2563,8 @@ void drawIdleRow(const IdleScreen &screen, const IdleRow &row, int16_t y)
         String line2 = separator >= 0 ? message.substring(separator + 1) : "";
         line1.toUpperCase();
         line2.toUpperCase();
-        drawTextFit(line1, 3, y, white, 122);
-        if (line2.length()) drawTextFit(line2, 3, y + 11, white, 122);
+        drawTextFitClipped(line1, 3, y, white, 122);
+        if (line2.length()) drawTextFitClipped(line2, 3, y + 11, white, 122);
         return;
     }
 
@@ -2457,11 +2576,11 @@ void drawIdleRow(const IdleScreen &screen, const IdleRow &row, int16_t y)
     const uint16_t rowColor = canceled ? red : white;
     const uint16_t timeColor = canceled ? red : (newTime ? newTimeColor : timeDefault);
 
-    drawTextFit(row.time, 3, y, timeColor, 29);
-    drawIdleDestinationTicker(row.airport, 36, y, rowColor, 54);
-    drawTextFit(idleFlightFieldText(screen.kind, row), 94, y, rowColor, 18);
-    drawIdleRowSymbol(screen.kind, row, 116, y);
-    if (canceled)
+    drawIdleTimeClipped(row.time, 3, y, timeColor);
+    drawIdleDestinationTicker(row.airport, 31, y, rowColor, 60);
+    drawTextFitClipped(idleFlightFieldText(screen.kind, row), 97, y, rowColor, 18);
+    drawIdleRowSymbol(screen.kind, row, 119, y);
+    if (canceled && y + 3 >= TimetableRowsTopY && y + 3 < TimetableRowsBottomY)
     {
         display->drawFastHLine(3, y + 3, 122, red);
     }
@@ -2501,7 +2620,6 @@ void drawIdleScreen(uint8_t index)
     display->setTextWrap(false);
     drawIdleRows(index, idleRowsBaseY());
     if (showNext) drawIdleRows(nextIndex, 64 - offset);
-    drawTimetableTopFadeMask();
     drawTextFit(idleAnimatedHeader(screen.title), 3, 3, yellow, 86);
     drawClockRight(125, 3, clockColor);
     display->drawFastHLine(3, 14, 122, yellow);
@@ -2511,11 +2629,51 @@ void drawIdleScreen(uint8_t index)
     presentFrame();
 }
 
+bool incomingIdleScreensMatch(JsonArray screens)
+{
+    const uint8_t incomingCount = min(static_cast<size_t>(MaxIdleScreens), screens.size());
+    if (incomingCount != idleScreenCount) return false;
+
+    for (uint8_t i = 0; i < incomingCount; ++i)
+    {
+        JsonObject source = screens[i];
+        const IdleScreen &current = idleScreens[i];
+        if (current.title != String(source["title"] | source["kind"] | "IDLE")) return false;
+        if (current.kind != String(source["kind"] | "")) return false;
+
+        JsonArray rows = source["rows"].as<JsonArray>();
+        const uint8_t incomingRows = min(static_cast<size_t>(MaxIdleRows), rows.size());
+        if (incomingRows != current.rowCount) return false;
+
+        for (uint8_t rowIndex = 0; rowIndex < incomingRows; ++rowIndex)
+        {
+            JsonObject row = rows[rowIndex];
+            const IdleRow &currentRow = current.rows[rowIndex];
+            if (currentRow.flightId != String(row["flightId"] | "")) return false;
+            if (currentRow.airport != String(row["airport"] | "")) return false;
+            if (currentRow.time != String(row["time"] | "")) return false;
+            if (currentRow.status != String(row["status"] | "")) return false;
+            if (currentRow.gate != String(row["gate"] | "")) return false;
+            if (currentRow.gateMessage != String(row["gateMessage"] | "")) return false;
+            if (currentRow.message != String(row["message"] | "")) return false;
+        }
+    }
+    return true;
+}
+
 void storeIdleScreens(JsonArray screens)
 {
+    const bool sameScreens = incomingIdleScreensMatch(screens);
+    if (sameScreens)
+    {
+        return;
+    }
+
     idleScreenCount = min(static_cast<size_t>(MaxIdleScreens), screens.size());
     currentIdleScreen = 0;
     idleKindIntroActive = false;
+    idleOutroActive = false;
+    idleOutroStartedAt = 0;
 
     for (uint8_t i = 0; i < idleScreenCount; ++i)
     {
@@ -3084,11 +3242,28 @@ void loop()
         }
     }
 
-    if (idleScreenCount > 1 && millis() >= nextIdleCycleAt)
+    if (idleScreenCount > 1 && !idleOutroActive && millis() >= nextIdleCycleAt)
+    {
+        idleOutroActive = true;
+        idleOutroStartedAt = millis();
+        lastIdleRenderAt = 0;
+    }
+
+    if (idleKindIntroActive && millis() - idleCycleStartedAt >= timetableTransitionMs)
+    {
+        idleKindIntroActive = false;
+        lastIdleRenderAt = 0;
+    }
+
+    const uint16_t rowTravel = idleKindChangingToNext() ? 64 : 44;
+    const uint32_t activeIdleTransitionMs = idleKindChangingToNext() ? timetableTransitionMs : idleTransitionMs(rowTravel);
+    if (idleScreenCount > 1 && idleOutroActive && millis() - idleOutroStartedAt >= activeIdleTransitionMs)
     {
         const String previousKind = idleScreens[currentIdleScreen].kind;
         currentIdleScreen = (currentIdleScreen + 1) % idleScreenCount;
         idleKindIntroActive = previousKind != idleScreens[currentIdleScreen].kind;
+        idleOutroActive = false;
+        idleOutroStartedAt = 0;
         idleCycleStartedAt = millis();
         nextIdleCycleAt = idleCycleStartedAt + static_cast<uint32_t>(timetableCycleSeconds) * 1000UL;
         lastIdleRenderAt = 0;
@@ -3097,9 +3272,10 @@ void loop()
     if (idleLayoutActive)
     {
         const bool introScrolling = idleKindIntroActive && millis() - idleCycleStartedAt < timetableTransitionMs;
-        const bool scrolling = idleScrollOffset() > 0 || introScrolling;
+        const bool outroScrolling = idleOutroActive;
+        const bool scrolling = idleScrollOffset() > 0 || introScrolling || outroScrolling;
         const uint16_t renderIntervalMs = scrolling
-            ? max<uint16_t>(20, min<uint16_t>(80, 1000 / max<uint16_t>(1, timetableScrollPixelsPerSecond)))
+            ? 20
             : 250;
         if (now - lastIdleRenderAt >= renderIntervalMs)
         {

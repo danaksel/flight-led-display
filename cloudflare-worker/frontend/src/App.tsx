@@ -641,7 +641,7 @@ const ledGlyphs: Record<string, string[]> = {
   " ": ["00000", "00000", "00000", "00000", "00000", "00000", "00000"],
   "-": ["00000", "00000", "00000", "11111", "00000", "00000", "00000"],
   ".": ["00000", "00000", "00000", "00000", "00000", "01100", "01100"],
-  ":": ["00000", "01100", "01100", "00000", "01100", "01100", "00000"],
+  ":": ["00000", "00100", "00000", "00000", "00100", "00000", "00000"],
   "/": ["00001", "00010", "00100", "01000", "10000", "00000", "00000"],
   "0": ["01110", "10001", "10011", "10101", "11001", "10001", "01110"],
   "1": ["00100", "01100", "00100", "00100", "00100", "00100", "01110"],
@@ -930,15 +930,28 @@ function drawIdleRowExact(
 
   const timeColor = status === "canceled" ? colors.canceled : status === "newTime" ? colors.newTime : colors.time;
   const rowColor = status === "canceled" ? colors.canceled : colors.data;
-  drawLedText(ctx, row.time || "", x, y, timeColor, 29);
-  drawIdleDestinationExact(ctx, row.airport || "", x + 33, y, rowColor, 54, config, startedAt, now);
-  drawLedText(ctx, idleFlightFieldTextExact(kind, row, now), x + 91, y, rowColor, 18);
-  drawIdleSymbolExact(ctx, kind, row, x + 113, y, status, colors);
+  drawIdleTimeExact(ctx, row.time || "", x, y, timeColor);
+  drawIdleDestinationExact(ctx, row.airport || "", x + 28, y, rowColor, 60, config, startedAt, now);
+  drawLedText(ctx, idleFlightFieldTextExact(kind, row, now), x + 94, y, rowColor, 18);
+  drawIdleSymbolExact(ctx, kind, row, x + 116, y, status, colors);
 
   if (status === "canceled") {
     ctx.fillStyle = colors.canceled;
     ctx.fillRect(x, y + 3, 122, 1);
   }
+}
+
+function drawIdleTimeExact(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, color: string) {
+  const value = normalizeLedText(text || "").padEnd(5, " ");
+  drawLedText(ctx, value.slice(0, 2), x, y, color, 12);
+  if (value.slice(2, 3) === ":") drawIdleColonExact(ctx, x + 12, y, color);
+  drawLedText(ctx, value.slice(3, 5), x + 14, y, color, 12);
+}
+
+function drawIdleColonExact(ctx: CanvasRenderingContext2D, x: number, y: number, color: string) {
+  ctx.fillStyle = color;
+  ctx.fillRect(x, y + 1, 1, 1);
+  ctx.fillRect(x, y + 4, 1, 1);
 }
 
 const departureCircleSymbolExact = [
@@ -1009,7 +1022,7 @@ function drawIdleSymbolExact(
   const blinkOn = Math.floor(performance.now() / 600) % 2 === 0;
   if ((state === "boarding" || state === "gateClosing") && !blinkOn) return;
   const bitmap = state === "landed" ? landedCheckSymbolExact : departureCircleSymbolExact;
-  const fieldWidth = 9;
+  const fieldWidth = 6;
   const drawX = x + Math.max(0, fieldWidth - bitmap[0].length);
   const drawY = state === "landed" ? y + 2 : y + 1;
   drawSymbolBitmapExact(ctx, bitmap, drawX, drawY, idleSymbolColorExact(state, colors));
@@ -1069,19 +1082,6 @@ type IdleTransition = {
   nextScreen: IdleScreen | null;
 };
 
-function drawTimetableTopFade(ctx: CanvasRenderingContext2D) {
-  ctx.save();
-  ctx.fillStyle = "#000000";
-  ctx.fillRect(0, 0, 128, 14);
-  const gradient = ctx.createLinearGradient(0, 14, 0, 23);
-  gradient.addColorStop(0, "rgba(0, 0, 0, 0.95)");
-  gradient.addColorStop(0.38, "rgba(0, 0, 0, 0.62)");
-  gradient.addColorStop(1, "rgba(0, 0, 0, 0)");
-  ctx.fillStyle = gradient;
-  ctx.fillRect(0, 14, 128, 10);
-  ctx.restore();
-}
-
 function drawIdleLayoutExact(
   ctx: CanvasRenderingContext2D,
   screen: IdleScreen | undefined,
@@ -1122,7 +1122,6 @@ function drawIdleLayoutExact(
   if (activeTransition.nextScreen && activeTransition.nextBaseY !== null) {
     drawIdleRowsClipped(ctx, activeTransition.nextScreen.kind, Array.isArray(activeTransition.nextScreen.rows) ? activeTransition.nextScreen.rows : [], activeTransition.nextBaseY, config, startedAt, now);
   }
-  drawTimetableTopFade(ctx);
   drawLedText(ctx, activeTransition.headerText, 3, 3, colors.header, 86);
   drawLocalClock(ctx, 125, 3, colors.time, config.device.timezone);
   ctx.fillStyle = colors.header;
@@ -1130,9 +1129,35 @@ function drawIdleLayoutExact(
 }
 
 function idleTransitionMs(config: Config, rowTravel: number) {
-  const cycleMs = Math.max(2000, config.device.timetableCycleSeconds * 1000);
   const speed = Math.max(4, config.device.timetableScrollPixelsPerSecond);
-  return Math.min(cycleMs * 0.75, Math.max(400, (rowTravel / speed) * 1000));
+  return Math.max(400, (rowTravel / speed) * 1000);
+}
+
+function idleKindTransitionMs(config: Config) {
+  return clamp(config.device.timetableTransitionMs || defaultConfig.device.timetableTransitionMs, 200, 1000);
+}
+
+function idleScreenTransitionMs(screens: IdleScreen[], index: number, config: Config) {
+  if (screens.length <= 1) return 0;
+  const screen = screens[index];
+  const nextScreen = screens[(index + 1) % screens.length];
+  if (!screen || !nextScreen) return 0;
+  return screen.kind !== nextScreen.kind ? idleKindTransitionMs(config) : idleTransitionMs(config, 44);
+}
+
+function getActiveIdleCycle(screens: IdleScreen[], config: Config, startedAt: number, now: number) {
+  const holdMs = Math.max(2000, config.device.timetableCycleSeconds * 1000);
+  if (!screens.length) return { index: 0, cycleStartedAt: startedAt };
+  const durations = screens.map((_, index) => holdMs + idleScreenTransitionMs(screens, index, config));
+  const totalMs = durations.reduce((sum, duration) => sum + duration, 0);
+  let elapsed = totalMs > 0 ? (Math.max(0, now - startedAt) % totalMs) : 0;
+  let cycleStartedAt = now - elapsed;
+  for (let index = 0; index < durations.length; index += 1) {
+    if (elapsed < durations[index]) return { index, cycleStartedAt };
+    elapsed -= durations[index];
+    cycleStartedAt += durations[index];
+  }
+  return { index: 0, cycleStartedAt: startedAt };
 }
 
 function animatedHeaderText(title: string, progress: number, intro: boolean) {
@@ -1152,7 +1177,7 @@ function getIdleTransition(screens: IdleScreen[], currentIndex: number, config: 
   const previousScreen = screens[(currentIndex - 1 + screens.length) % screens.length];
 
   if (previousScreen && previousScreen.kind !== screen.kind) {
-    const transitionMs = clamp(config.device.timetableTransitionMs || defaultConfig.device.timetableTransitionMs, 200, 1000);
+    const transitionMs = idleKindTransitionMs(config);
     if (elapsed < transitionMs) {
       const progress = easeInOut(Math.min(1, elapsed / transitionMs));
       return {
@@ -1168,12 +1193,12 @@ function getIdleTransition(screens: IdleScreen[], currentIndex: number, config: 
 
   const kindChanges = screen.kind !== nextScreen.kind;
   const rowTravel = kindChanges ? 64 : 44;
-  const transitionMs = kindChanges ? clamp(config.device.timetableTransitionMs || defaultConfig.device.timetableTransitionMs, 200, 1000) : idleTransitionMs(config, rowTravel);
-  const transitionStart = Math.max(0, cycleMs - transitionMs);
+  const transitionMs = kindChanges ? idleKindTransitionMs(config) : idleTransitionMs(config, rowTravel);
+  const transitionStart = cycleMs;
   if (elapsed < transitionStart) return { currentBaseY: 20, headerText: title, nextBaseY: null, nextScreen: null };
 
-  const progress = easeInOut(Math.min(1, (elapsed - transitionStart) / transitionMs));
-  const offset = Math.round(rowTravel * progress);
+  const progress = Math.min(1, (elapsed - transitionStart) / transitionMs);
+  const offset = Math.floor(rowTravel * progress);
   return {
     currentBaseY: 20 - offset,
     headerText: kindChanges ? animatedHeaderText(title, progress, false) : title,
@@ -1848,11 +1873,7 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
         drawLiveFlightLayoutExact(renderCtx, activeFlight, props.config, logoUrl ? logoCacheRef.current.get(logoUrl) : undefined, detailCycleStartedAt, tickerStartedAtRef.current, now, flights.length);
       } else if (props.preview.idleScreens[0]?.rows?.length) {
         const idleScreens = props.preview.idleScreens;
-        const idleCycleMs = Math.max(2000, props.config.device.timetableCycleSeconds * 1000);
-        const idleElapsed = Math.max(0, now - cycleStartedAtRef.current);
-        const idleCycleNumber = Math.floor(idleElapsed / idleCycleMs);
-        const idleIndex = idleScreens.length ? idleCycleNumber % idleScreens.length : 0;
-        const idleCycleStartedAt = cycleStartedAtRef.current + idleCycleNumber * idleCycleMs;
+        const { index: idleIndex, cycleStartedAt: idleCycleStartedAt } = getActiveIdleCycle(idleScreens, props.config, cycleStartedAtRef.current, now);
         const transition = getIdleTransition(idleScreens, idleIndex, props.config, idleCycleStartedAt, now);
         drawIdleLayoutExact(renderCtx, idleScreens[idleIndex], props.config, idleCycleStartedAt, now, 0, null, transition);
       } else {
