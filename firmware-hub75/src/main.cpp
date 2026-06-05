@@ -72,6 +72,7 @@ constexpr uint8_t AudioVolumePercentDefault = 5;
 constexpr uint8_t ClockTickVolumePercentDefault = 20;
 constexpr uint8_t ClockRenderIntervalMs = 15;
 constexpr uint8_t RealtimeStatePollSeconds = 5;
+constexpr uint32_t DeviceStatusIntervalMs = 120000;
 constexpr uint8_t MainLoopDelayMs = 20;
 constexpr uint8_t WifiReconnectSeconds = 30;
 constexpr uint16_t ConfigFallbackPollSeconds = 300;
@@ -157,6 +158,7 @@ uint8_t clockTickVolumePercent = ClockTickVolumePercentDefault;
 int8_t audioI2cSdaPin = -1;
 int8_t audioI2cSclPin = -1;
 uint32_t lastSoundTestNonce = 0;
+uint32_t lastDeviceStatusSentAt = 0;
 uint32_t lastClockRenderAt = 0;
 uint32_t clockFallingStartedAt = 0;
 int8_t lastClockMinute = -1;
@@ -194,6 +196,7 @@ void fetchSoundState();
 void soundPollTask(void *);
 void networkPollTask(void *);
 void realtimeTask(void *);
+void sendDeviceStatus();
 bool requestConfigFetch();
 bool requestDisplayFetch();
 void queuePaSound(const char *reason);
@@ -240,6 +243,11 @@ uint16_t timetableDataColor = 0;
 uint16_t timetableTimeColor = 0;
 uint16_t timetableNewTimeColor = 0;
 uint16_t timetableCanceledColor = 0;
+uint16_t timetableGateGoToGateColor = 0;
+uint16_t timetableGateBoardingColor = 0;
+uint16_t timetableGateClosingColor = 0;
+uint16_t timetableGateClosedColor = 0;
+uint16_t timetableLandedColor = 0;
 uint16_t lineAirlineColor = 0;
 uint16_t lineRouteColor = 0;
 uint16_t lineAircraftColor = 0;
@@ -278,6 +286,31 @@ uint16_t colorData()
 uint16_t colorCanceled()
 {
     return timetableCanceledColor ? timetableCanceledColor : panelColor(0xFF, 0x3B, 0x30);
+}
+
+uint16_t colorGateGoToGate()
+{
+    return timetableGateGoToGateColor ? timetableGateGoToGateColor : panelColor(0x00, 0xF9, 0x00);
+}
+
+uint16_t colorGateBoarding()
+{
+    return timetableGateBoardingColor ? timetableGateBoardingColor : panelColor(0x00, 0xF9, 0x00);
+}
+
+uint16_t colorGateClosing()
+{
+    return timetableGateClosingColor ? timetableGateClosingColor : panelColor(0xFF, 0x93, 0x00);
+}
+
+uint16_t colorGateClosed()
+{
+    return timetableGateClosedColor ? timetableGateClosedColor : panelColor(0xFF, 0x26, 0x00);
+}
+
+uint16_t colorLanded()
+{
+    return timetableLandedColor ? timetableLandedColor : panelColor(0x00, 0xF9, 0x00);
 }
 
 uint16_t colorSuccess()
@@ -1019,9 +1052,9 @@ uint16_t tickerOffset(uint16_t overflow)
     return static_cast<uint16_t>(((cycleMs - t) * overflow) / travelMs);
 }
 
-uint16_t tickerForwardOffset(uint16_t overflow, uint32_t startedAt)
+uint16_t tickerForwardOffset(uint16_t overflow, uint32_t startedAt, uint16_t speedOverride = 0)
 {
-    const uint16_t speed = max<uint16_t>(2, liveScrollPixelsPerSecond);
+    const uint16_t speed = max<uint16_t>(2, speedOverride ? speedOverride : liveScrollPixelsPerSecond);
     const uint32_t travelMs = max<uint32_t>(1200, (static_cast<uint32_t>(overflow) * 1000UL) / speed);
     const uint32_t cycleMs = TickerHoldMs + travelMs + TickerHoldMs;
     const uint32_t elapsed = millis() >= startedAt ? millis() - startedAt : 0;
@@ -1065,7 +1098,8 @@ void drawTickerText(const String &text, int16_t x, int16_t y, uint16_t color, ui
     }
 }
 
-void drawTickerTextBoxed(const String &text, int16_t x, int16_t y, uint16_t color, uint8_t width, uint32_t startedAt)
+void drawTickerTextBoxed(const String &text, int16_t x, int16_t y, uint16_t color, uint8_t width,
+                         uint32_t startedAt, uint16_t speedOverride = 0)
 {
     const String normalized = normalizeLedText(text);
     if (!normalized.length()) return;
@@ -1078,7 +1112,7 @@ void drawTickerTextBoxed(const String &text, int16_t x, int16_t y, uint16_t colo
     }
 
     const uint16_t overflow = max<uint16_t>(1, textWidth - width);
-    const uint16_t offset = tickerForwardOffset(overflow, startedAt);
+    const uint16_t offset = tickerForwardOffset(overflow, startedAt, speedOverride);
     GFXcanvas1 canvas(textWidth, 8);
     canvas.fillScreen(0);
     int16_t cursorX = 0;
@@ -1151,6 +1185,110 @@ String normalizeGateStatusForDisplay(const String &value)
     if (raw.indexOf("closing") >= 0) return "Closing";
     if (raw.indexOf("closed") >= 0) return "Closed";
     return "";
+}
+
+const char *DepartureCircleSymbol[] = {
+    ".##.",
+    "####",
+    "####",
+    ".##."
+};
+
+const char *LandedCheckSymbol[] = {
+    "....#",
+    "...#.",
+    "#.#..",
+    ".#..."
+};
+
+String airlinePrefix(const String &flightId)
+{
+    String value = flightId;
+    value.trim();
+    value.toUpperCase();
+    return value.substring(0, min<size_t>(2, value.length()));
+}
+
+String idleFlightFieldText(const String &kind, const IdleRow &row)
+{
+    const String airline = airlinePrefix(row.flightId);
+    String gate = row.gate;
+    gate.trim();
+    gate.toUpperCase();
+    gate = gate.substring(0, min<size_t>(3, gate.length()));
+    if (kind == "departures" && gate.length() && ((millis() / 1200UL) % 2 == 1))
+    {
+        return gate;
+    }
+    return airline;
+}
+
+void drawBitmapSymbol(int16_t x, int16_t y, const char *bitmap[], uint8_t rows, uint16_t color)
+{
+    for (uint8_t row = 0; row < rows; ++row)
+    {
+        const char *line = bitmap[row];
+        for (uint8_t col = 0; line[col] != '\0'; ++col)
+        {
+            if (line[col] == '#')
+            {
+                display->drawPixel(x + col, y + row, color);
+            }
+        }
+    }
+}
+
+String idleRowSymbolState(const String &kind, const IdleRow &row)
+{
+    if (row.status == "canceled") return "";
+    if (kind == "arrivals") return row.status == "done" ? "landed" : "";
+
+    const String gateStatus = normalizeGateStatusForDisplay(row.gateMessage);
+    if (gateStatus == "Go to gate") return "goToGate";
+    if (gateStatus == "Boarding") return "boarding";
+    if (gateStatus == "Closing") return "gateClosing";
+    if (gateStatus == "Closed") return "gateClosed";
+    return "";
+}
+
+uint16_t idleRowSymbolColor(const String &state)
+{
+    if (state == "goToGate") return colorGateGoToGate();
+    if (state == "boarding") return colorGateBoarding();
+    if (state == "gateClosing") return colorGateClosing();
+    if (state == "gateClosed") return colorGateClosed();
+    if (state == "landed") return colorLanded();
+    return colorData();
+}
+
+void drawIdleDestinationTicker(const String &text, int16_t x, int16_t y, uint16_t color, uint8_t width)
+{
+    const String normalized = normalizeLedText(text);
+    if (textPixelWidth(normalized) <= width)
+    {
+        drawTextFit(normalized, x, y, color, width);
+        return;
+    }
+    drawTickerTextBoxed(normalized, x, y, color, width, idleCycleStartedAt, timetableScrollPixelsPerSecond);
+}
+
+void drawIdleRowSymbol(const String &kind, const IdleRow &row, int16_t x, int16_t y)
+{
+    const String state = idleRowSymbolState(kind, row);
+    if (!state.length()) return;
+
+    const bool blinkOn = (millis() / 600UL) % 2 == 0;
+    if ((state == "boarding" || state == "gateClosing") && !blinkOn) return;
+
+    if (state == "landed")
+    {
+        constexpr uint8_t symbolWidth = 5;
+        drawBitmapSymbol(x + max<int16_t>(0, 9 - symbolWidth), y + 4, LandedCheckSymbol, 4, idleRowSymbolColor(state));
+        return;
+    }
+
+    constexpr uint8_t symbolWidth = 4;
+    drawBitmapSymbol(x + max<int16_t>(0, 9 - symbolWidth), y + 2, DepartureCircleSymbol, 4, idleRowSymbolColor(state));
 }
 
 String localClockText()
@@ -1637,12 +1775,40 @@ void handleRealtimeText(const uint8_t *payload, size_t length)
     }
 }
 
+void sendDeviceStatus()
+{
+    if (!realtimeSocket.isConnected() || WiFi.status() != WL_CONNECTED) return;
+
+    JsonDocument doc;
+    doc["type"] = "device_status";
+    doc["source"] = "firmware-hub75";
+    doc["connected"] = true;
+    doc["deviceId"] = WiFi.macAddress();
+    doc["uptimeMs"] = millis();
+    doc["screenActive"] = screenActive;
+    doc["configOk"] = lastConfigOk;
+    doc["displayOk"] = lastDisplayOk;
+    doc["displayMode"] = lastDisplayMode;
+
+    JsonObject wifi = doc["wifi"].to<JsonObject>();
+    wifi["connected"] = true;
+    wifi["ssid"] = WiFi.SSID();
+    wifi["rssi"] = WiFi.RSSI();
+    wifi["ip"] = WiFi.localIP().toString();
+
+    String payload;
+    serializeJson(doc, payload);
+    realtimeSocket.sendTXT(payload);
+    lastDeviceStatusSentAt = millis();
+}
+
 void realtimeSocketEvent(WStype_t type, uint8_t *payload, size_t length)
 {
     switch (type)
     {
         case WStype_CONNECTED:
             Serial.println("Realtime connected");
+            sendDeviceStatus();
             break;
         case WStype_DISCONNECTED:
             Serial.println("Realtime disconnected");
@@ -1692,6 +1858,12 @@ void realtimeTask(void *)
         if (WiFi.status() == WL_CONNECTED)
         {
             realtimeSocket.loop();
+            const uint32_t now = millis();
+            if (realtimeSocket.isConnected()
+                && (lastDeviceStatusSentAt == 0 || now - lastDeviceStatusSentAt >= DeviceStatusIntervalMs))
+            {
+                sendDeviceStatus();
+            }
         }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
@@ -2016,6 +2188,11 @@ bool applyDeviceConfigPayload(const String &body, int httpCode, bool httpOk)
     timetableTimeColor = parseHexColorOr(valueOr(timetableColors["time"]), defaultDataColor);
     timetableNewTimeColor = parseHexColorOr(valueOr(timetableColors["newTime"]), defaultHeaderColor);
     timetableCanceledColor = parseHexColorOr(valueOr(timetableColors["canceled"]), defaultCanceledColor);
+    timetableGateGoToGateColor = parseHexColorOr(valueOr(timetableColors["gateGoToGate"]), panelColor(0x00, 0xF9, 0x00));
+    timetableGateBoardingColor = parseHexColorOr(valueOr(timetableColors["gateBoarding"]), panelColor(0x00, 0xF9, 0x00));
+    timetableGateClosingColor = parseHexColorOr(valueOr(timetableColors["gateClosing"]), panelColor(0xFF, 0x93, 0x00));
+    timetableGateClosedColor = parseHexColorOr(valueOr(timetableColors["gateClosed"]), panelColor(0xFF, 0x26, 0x00));
+    timetableLandedColor = parseHexColorOr(valueOr(timetableColors["landed"]), panelColor(0x00, 0xF9, 0x00));
 
     JsonObject lineColors = device["lineColors"];
     lineAirlineColor = parseHexColorOr(valueOr(lineColors["airline"]), defaultDataColor);
@@ -2129,22 +2306,15 @@ void drawIdleRow(const IdleScreen &screen, const IdleRow &row, int16_t y)
     const uint16_t timeDefault = timetableTimeColor ? timetableTimeColor : white;
     const uint16_t newTimeColor = timetableNewTimeColor ? timetableNewTimeColor : yellow;
     const uint16_t red = colorCanceled();
-    const bool blinkOn = (millis() / 1200) % 2 == 0;
     const bool canceled = row.status == "canceled";
     const bool newTime = row.status == "newTime";
-    const bool departures = screen.kind == "departures";
-    const bool arrivals = screen.kind == "arrivals";
-    const String gateStatus = departures ? normalizeGateStatusForDisplay(row.gateMessage) : "";
-    const String arrivalStatus = arrivals && row.status == "done" ? "Landed" : "";
-    const String alternateTime = gateStatus.length() ? gateStatus : arrivalStatus;
-    const String airportText = departures && row.gate.length() && !blinkOn ? row.gate : row.airport;
-    const String timeText = alternateTime.length() && !blinkOn ? alternateTime : row.time;
     const uint16_t rowColor = canceled ? red : white;
-    const uint16_t timeColor = canceled ? red : (alternateTime.length() && !blinkOn ? white : (newTime ? newTimeColor : timeDefault));
+    const uint16_t timeColor = canceled ? red : (newTime ? newTimeColor : timeDefault);
 
-    drawTextFit(row.flightId, 3, y, rowColor, 43);
-    drawTextFit(airportText, 51, y, rowColor, 24);
-    drawTextRight(timeText, 125, y, timeColor, 60);
+    drawTextFit(row.time, 3, y, timeColor, 29);
+    drawIdleDestinationTicker(row.airport, 36, y, rowColor, 54);
+    drawTextFit(idleFlightFieldText(screen.kind, row), 94, y, rowColor, 18);
+    drawIdleRowSymbol(screen.kind, row, 116, y);
     if (canceled)
     {
         display->drawFastHLine(3, y + 3, 122, red);

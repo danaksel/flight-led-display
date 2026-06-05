@@ -29,7 +29,11 @@ type Config = {
     displayCycleSeconds: number;
     timetableCycleSeconds: number;
     timetableItemCount: number;
+    departureTimetableItemCount: number;
+    arrivalTimetableItemCount: number;
     avinorWindowHours: number;
+    departureAvinorWindowHours: number;
+    arrivalAvinorWindowHours: number;
     timetableScrollPixelsPerSecond: number;
     scrollPixelsPerSecond: number;
     configRefreshSeconds: number;
@@ -56,6 +60,11 @@ type Config = {
       time: string;
       newTime: string;
       canceled: string;
+      gateGoToGate: string;
+      gateBoarding: string;
+      gateClosing: string;
+      gateClosed: string;
+      landed: string;
     };
     nightMode: {
       enabled: boolean;
@@ -158,6 +167,8 @@ type DisplayPayload = {
   idleScreens?: IdleScreen[];
   screenState?: ScreenState;
   airspaceMonitoring?: boolean;
+  liveSourceStatus?: LiveSourceStatus;
+  deviceStatus?: DeviceStatus | null;
 };
 
 type AvinorRawFlight = {
@@ -170,12 +181,41 @@ type AvinorRawFlight = {
   };
 };
 
+type LiveSourceStatus = {
+  source?: string;
+  ok?: boolean;
+  error?: string;
+};
+
+type DeviceStatus = {
+  ok: boolean;
+  connected: boolean;
+  updatedAt: string;
+  deviceId?: string | null;
+  uptimeMs?: number | null;
+  wifi?: {
+    connected?: boolean;
+    ssid?: string | null;
+    rssi?: number | null;
+    ip?: string | null;
+  };
+  screenActive?: boolean | null;
+  configOk?: boolean | null;
+  displayOk?: boolean | null;
+  displayMode?: string | null;
+  source?: string | null;
+};
+
 type PreviewState = {
   meta: string;
   flights: DisplayFlight[];
   idleScreens: IdleScreen[];
   avinorRows: AvinorRawFlight[];
   mode: string;
+  updatedAt: string | null;
+  error: string | null;
+  liveSourceStatus: LiveSourceStatus | null;
+  deviceStatus: DeviceStatus | null;
 };
 
 type SectionId = "location" | "display" | "clock" | "aircraft" | "timetable" | "api";
@@ -224,6 +264,28 @@ const categoryLabels: Record<AircraftCategoryCode, { title: string; description:
   N: { title: "Non categorized", description: "Ikke kategorisert i FR24" }
 };
 
+const lineColorLabels: Record<keyof Config["device"]["lineColors"], string> = {
+  airline: "Flyselskap",
+  route: "Rute",
+  aircraft: "Flytype",
+  context: "Kontekst",
+  progress: "Sideindikator",
+  routeProgress: "Ruteprogresjon"
+};
+
+const timetableColorLabels: Record<keyof Config["device"]["timetableColors"], string> = {
+  header: "Overskrift",
+  data: "Tekst",
+  time: "Tid",
+  newTime: "Ny tid",
+  canceled: "Kansellert",
+  gateGoToGate: "Go to gate",
+  gateBoarding: "Boarding",
+  gateClosing: "Gate closing",
+  gateClosed: "Gate closed",
+  landed: "Landet"
+};
+
 const defaultConfig: Config = {
   lat: 59.9139,
   lon: 10.7522,
@@ -244,7 +306,11 @@ const defaultConfig: Config = {
     displayCycleSeconds: 5,
     timetableCycleSeconds: 7,
     timetableItemCount: 8,
+    departureTimetableItemCount: 8,
+    arrivalTimetableItemCount: 8,
     avinorWindowHours: 4,
+    departureAvinorWindowHours: 4,
+    arrivalAvinorWindowHours: 4,
     timetableScrollPixelsPerSecond: 18,
     scrollPixelsPerSecond: 9,
     configRefreshSeconds: 300,
@@ -270,7 +336,12 @@ const defaultConfig: Config = {
       data: "#f4f7ff",
       time: "#f4f7ff",
       newTime: "#f7b500",
-      canceled: "#ff3b30"
+      canceled: "#ff3b30",
+      gateGoToGate: "#00f900",
+      gateBoarding: "#00f900",
+      gateClosing: "#ff9300",
+      gateClosed: "#ff2600",
+      landed: "#00f900"
     },
     nightMode: {
       enabled: true,
@@ -415,7 +486,11 @@ function normalizeConfig(input: Partial<Config> & Record<string, unknown>): Conf
       displayCycleSeconds: Number(device.displayCycleSeconds ?? defaultConfig.device.displayCycleSeconds),
       timetableCycleSeconds: Number(device.timetableCycleSeconds ?? defaultConfig.device.timetableCycleSeconds),
       timetableItemCount: Number(device.timetableItemCount ?? defaultConfig.device.timetableItemCount),
+      departureTimetableItemCount: Number(device.departureTimetableItemCount ?? device.timetableItemCount ?? defaultConfig.device.departureTimetableItemCount),
+      arrivalTimetableItemCount: Number(device.arrivalTimetableItemCount ?? device.timetableItemCount ?? defaultConfig.device.arrivalTimetableItemCount),
       avinorWindowHours: Number(device.avinorWindowHours ?? defaultConfig.device.avinorWindowHours),
+      departureAvinorWindowHours: Number(device.departureAvinorWindowHours ?? device.avinorWindowHours ?? defaultConfig.device.departureAvinorWindowHours),
+      arrivalAvinorWindowHours: Number(device.arrivalAvinorWindowHours ?? device.avinorWindowHours ?? defaultConfig.device.arrivalAvinorWindowHours),
       timetableScrollPixelsPerSecond: Number(device.timetableScrollPixelsPerSecond ?? defaultConfig.device.timetableScrollPixelsPerSecond),
       scrollPixelsPerSecond: Number(device.scrollPixelsPerSecond ?? defaultConfig.device.scrollPixelsPerSecond),
       configRefreshSeconds: Number(device.configRefreshSeconds ?? defaultConfig.device.configRefreshSeconds),
@@ -441,7 +516,12 @@ function normalizeConfig(input: Partial<Config> & Record<string, unknown>): Conf
         data: timetableColors.data ?? defaultConfig.device.timetableColors.data,
         time: timetableColors.time ?? defaultConfig.device.timetableColors.time,
         newTime: timetableColors.newTime ?? defaultConfig.device.timetableColors.newTime,
-        canceled: timetableColors.canceled ?? defaultConfig.device.timetableColors.canceled
+        canceled: timetableColors.canceled ?? defaultConfig.device.timetableColors.canceled,
+        gateGoToGate: timetableColors.gateGoToGate ?? defaultConfig.device.timetableColors.gateGoToGate,
+        gateBoarding: timetableColors.gateBoarding ?? defaultConfig.device.timetableColors.gateBoarding,
+        gateClosing: timetableColors.gateClosing ?? defaultConfig.device.timetableColors.gateClosing,
+        gateClosed: timetableColors.gateClosed ?? defaultConfig.device.timetableColors.gateClosed,
+        landed: timetableColors.landed ?? defaultConfig.device.timetableColors.landed
       },
       nightMode: {
         enabled: nightMode.enabled !== false,
@@ -493,6 +573,31 @@ function formatTimestamp(value: string | null | undefined): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "aldri";
   return new Intl.DateTimeFormat("nb-NO", { dateStyle: "short", timeStyle: "medium" }).format(date);
+}
+
+function configSignature(config: Config): string {
+  return JSON.stringify(normalizeConfig(config));
+}
+
+function shortTime(value: string | null | undefined): string {
+  if (!value) return "aldri";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "aldri";
+  return new Intl.DateTimeFormat("nb-NO", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(date);
+}
+
+function isRecentTimestamp(value: string | null | undefined, maxAgeMs: number): boolean {
+  if (!value) return false;
+  const time = Date.parse(value);
+  return Number.isFinite(time) && Date.now() - time <= maxAgeMs;
+}
+
+function wifiSignalLabel(rssi: number | null | undefined): string {
+  if (typeof rssi !== "number" || !Number.isFinite(rssi)) return "ukjent";
+  if (rssi >= -55) return `${rssi} dBm · sterkt`;
+  if (rssi >= -67) return `${rssi} dBm · bra`;
+  if (rssi >= -75) return `${rssi} dBm · svakt`;
+  return `${rssi} dBm · kritisk`;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -801,7 +906,17 @@ function drawClockLayoutExact(ctx: CanvasRenderingContext2D, config: Config, fal
   drawClockTimeStack(ctx, 70, time, topColor, bottomColor);
 }
 
-function drawIdleRowExact(ctx: CanvasRenderingContext2D, kind: string | undefined, row: IdleRow, x: number, y: number, colors: Config["device"]["timetableColors"]) {
+function drawIdleRowExact(
+  ctx: CanvasRenderingContext2D,
+  kind: string | undefined,
+  row: IdleRow,
+  x: number,
+  y: number,
+  config: Config,
+  startedAt: number,
+  now: number
+) {
+  const colors = config.device.timetableColors;
   const status = row.status || "scheduled";
   if (status === "empty" || row.message) {
     const parts = String(row.message || row.flightId || "").split("|");
@@ -810,20 +925,12 @@ function drawIdleRowExact(ctx: CanvasRenderingContext2D, kind: string | undefine
     return;
   }
 
-  const gateBlinkOn = Math.floor(performance.now() / 1200) % 2 === 0;
-  const gateStatusText = kind === "departures" ? normalizeGateStatusForDisplay(row.gateMessage) : "";
-  const arrivalStatusText = kind === "arrivals" && status === "done" ? "Landed" : "";
-  const gateText = kind === "departures" && row.gate ? row.gate : "";
-  const airportText = kind === "departures" && gateText && !gateBlinkOn ? gateText : row.airport || "";
   const timeColor = status === "canceled" ? colors.canceled : status === "newTime" ? colors.newTime : colors.time;
   const rowColor = status === "canceled" ? colors.canceled : colors.data;
-  const alternateTimeText = gateStatusText || arrivalStatusText;
-  const timeText = alternateTimeText && !gateBlinkOn ? alternateTimeText : row.time || "";
-  const activeTimeColor = alternateTimeText && !gateBlinkOn ? colors.data : timeColor;
-
-  drawLedText(ctx, row.flightId || "", x, y, rowColor, 43);
-  drawLedText(ctx, airportText, x + 48, y, rowColor, 24);
-  drawLedTextRight(ctx, timeText, 125, y, activeTimeColor, 60);
+  drawLedText(ctx, row.time || "", x, y, timeColor, 29);
+  drawIdleDestinationExact(ctx, row.airport || "", x + 33, y, rowColor, 54, config, startedAt, now);
+  drawLedText(ctx, idleFlightFieldTextExact(kind, row, now), x + 91, y, rowColor, 18);
+  drawIdleSymbolExact(ctx, kind, row, x + 113, y, status, colors);
 
   if (status === "canceled") {
     ctx.fillStyle = colors.canceled;
@@ -831,16 +938,136 @@ function drawIdleRowExact(ctx: CanvasRenderingContext2D, kind: string | undefine
   }
 }
 
-function drawIdleRowsClipped(ctx: CanvasRenderingContext2D, kind: string | undefined, rows: IdleRow[], y: number, colors: Config["device"]["timetableColors"]) {
+const departureCircleSymbolExact = [
+  ".##.",
+  "####",
+  "####",
+  ".##."
+];
+
+const landedCheckSymbolExact = [
+  "....#",
+  "...#.",
+  "#.#..",
+  ".#..."
+];
+
+function airlinePrefixExact(flightId?: string) {
+  return String(flightId || "").trim().toUpperCase().slice(0, 2);
+}
+
+function idleFlightFieldTextExact(kind: string | undefined, row: IdleRow, now: number) {
+  const airline = airlinePrefixExact(row.flightId);
+  const gate = String(row.gate || "").trim().toUpperCase().slice(0, 3);
+  if (kind === "departures" && gate && Math.floor(now / 1200) % 2 === 1) return gate;
+  return airline;
+}
+
+function idleSymbolStateExact(kind: string | undefined, row: IdleRow, status: string) {
+  if (status === "canceled") return null;
+  if (kind === "arrivals") return status === "done" ? "landed" : null;
+  const gateStatus = normalizeGateStatusForDisplay(row.gateMessage);
+  if (gateStatus === "Go to gate") return "goToGate";
+  if (gateStatus === "Boarding") return "boarding";
+  if (gateStatus === "Closing") return "gateClosing";
+  if (gateStatus === "Closed") return "gateClosed";
+  return null;
+}
+
+function idleSymbolColorExact(state: string | null, colors: Config["device"]["timetableColors"]) {
+  if (state === "goToGate") return colors.gateGoToGate;
+  if (state === "boarding") return colors.gateBoarding;
+  if (state === "gateClosing") return colors.gateClosing;
+  if (state === "gateClosed") return colors.gateClosed;
+  if (state === "landed") return colors.landed;
+  return colors.data;
+}
+
+function drawSymbolBitmapExact(ctx: CanvasRenderingContext2D, bitmap: string[], x: number, y: number, color: string) {
+  ctx.fillStyle = color;
+  bitmap.forEach((line, rowIndex) => {
+    Array.from(line).forEach((pixel, columnIndex) => {
+      if (pixel === "#") ctx.fillRect(x + columnIndex, y + rowIndex, 1, 1);
+    });
+  });
+}
+
+function drawIdleSymbolExact(
+  ctx: CanvasRenderingContext2D,
+  kind: string | undefined,
+  row: IdleRow,
+  x: number,
+  y: number,
+  status: string,
+  colors: Config["device"]["timetableColors"]
+) {
+  const state = idleSymbolStateExact(kind, row, status);
+  if (!state) return;
+  const blinkOn = Math.floor(performance.now() / 600) % 2 === 0;
+  if ((state === "boarding" || state === "gateClosing") && !blinkOn) return;
+  const bitmap = state === "landed" ? landedCheckSymbolExact : departureCircleSymbolExact;
+  const fieldWidth = 9;
+  const drawX = x + Math.max(0, fieldWidth - bitmap[0].length);
+  const drawY = state === "landed" ? y + 4 : y + 1;
+  drawSymbolBitmapExact(ctx, bitmap, drawX, drawY, idleSymbolColorExact(state, colors));
+}
+
+function drawIdleDestinationExact(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  color: string,
+  width: number,
+  config: Config,
+  startedAt: number,
+  now: number
+) {
+  const normalized = normalizeLedText(text);
+  const textWidth = measureLedText(normalized);
+  if (textWidth <= width) {
+    drawLedText(ctx, normalized, x, y, color, width);
+    return;
+  }
+  drawTickerLineBoxed(
+    ctx,
+    normalized,
+    x,
+    y,
+    color,
+    width,
+    { ...config, device: { ...config.device, scrollPixelsPerSecond: config.device.timetableScrollPixelsPerSecond } },
+    startedAt,
+    now
+  );
+}
+
+function drawIdleRowsClipped(
+  ctx: CanvasRenderingContext2D,
+  kind: string | undefined,
+  rows: IdleRow[],
+  y: number,
+  config: Config,
+  startedAt: number,
+  now: number
+) {
   ctx.save();
   ctx.beginPath();
   ctx.rect(0, 15, 128, 49);
   ctx.clip();
-  rows.slice(0, 4).forEach((row, index) => drawIdleRowExact(ctx, kind, row, 3, y + index * 11, colors));
+  rows.slice(0, 4).forEach((row, index) => drawIdleRowExact(ctx, kind, row, 3, y + index * 11, config, startedAt, now));
   ctx.restore();
 }
 
-function drawIdleLayoutExact(ctx: CanvasRenderingContext2D, screen: IdleScreen | undefined, config: Config, transitionOffset = 0, nextScreen?: IdleScreen | null) {
+function drawIdleLayoutExact(
+  ctx: CanvasRenderingContext2D,
+  screen: IdleScreen | undefined,
+  config: Config,
+  startedAt: number,
+  now: number,
+  transitionOffset = 0,
+  nextScreen?: IdleScreen | null
+) {
   const colors = config.device.timetableColors;
   ctx.fillStyle = "#000000";
   ctx.fillRect(0, 0, 128, 64);
@@ -862,9 +1089,9 @@ function drawIdleLayoutExact(ctx: CanvasRenderingContext2D, screen: IdleScreen |
     return;
   }
 
-  drawIdleRowsClipped(ctx, screen.kind, rows, 20 - transitionOffset, colors);
+  drawIdleRowsClipped(ctx, screen.kind, rows, 20 - transitionOffset, config, startedAt, now);
   if (nextScreen) {
-    drawIdleRowsClipped(ctx, nextScreen.kind, Array.isArray(nextScreen.rows) ? nextScreen.rows : [], 64 - transitionOffset, colors);
+    drawIdleRowsClipped(ctx, nextScreen.kind, Array.isArray(nextScreen.rows) ? nextScreen.rows : [], 64 - transitionOffset, config, startedAt, now);
   }
 }
 
@@ -1180,8 +1407,141 @@ function Advanced(props: { title: string; children: React.ReactNode; defaultOpen
   );
 }
 
-function ColorInput(props: React.InputHTMLAttributes<HTMLInputElement>) {
-  return <input {...props} type="color" style={{ width: "100%", height: "42px", borderRadius: "8px", border: "1px solid var(--border-mid)", background: "var(--card)", padding: "4px" }} />;
+function ColorPicker(props: { label: string; value: string; onChange: (value: string) => void }) {
+  const value = props.value || "#ffffff";
+  return (
+    <label
+      style={{
+        ...cardStyle("10px 12px"),
+        minHeight: "54px",
+        display: "grid",
+        gridTemplateColumns: "1fr auto",
+        gap: "10px",
+        alignItems: "center",
+        cursor: "pointer"
+      }}
+    >
+      <span style={{ minWidth: 0 }}>
+        <span style={{ display: "block", fontSize: "13px", fontWeight: 650, letterSpacing: "-0.01em" }}>{props.label}</span>
+        <span style={{ display: "block", marginTop: "4px", fontFamily: '"JetBrains Mono", monospace', fontSize: "11px", color: "var(--muted-foreground)" }}>
+          {value.toUpperCase()}
+        </span>
+      </span>
+      <span
+        style={{
+          position: "relative",
+          width: "32px",
+          height: "32px",
+          borderRadius: "999px",
+          background: value,
+          border: "1px solid rgba(60, 36, 21, 0.2)",
+          overflow: "hidden"
+        }}
+      >
+        <input
+          type="color"
+          value={value}
+          onChange={(event) => props.onChange(event.target.value)}
+          aria-label={props.label}
+          style={{ position: "absolute", inset: "-8px", width: "48px", height: "48px", opacity: 0, cursor: "pointer" }}
+        />
+      </span>
+    </label>
+  );
+}
+
+function StatusPill(props: { label: string; tone: "good" | "idle" | "warn" | "error" }) {
+  const palette = {
+    good: { background: "rgba(0, 249, 0, 0.13)", color: "#145f1b", dot: "#00c92e" },
+    idle: { background: "rgba(60, 36, 21, 0.08)", color: "var(--muted-foreground)", dot: "rgba(60, 36, 21, 0.34)" },
+    warn: { background: "rgba(255, 147, 0, 0.14)", color: "#7a3f00", dot: "#ff9300" },
+    error: { background: "rgba(255, 38, 0, 0.12)", color: "#8b1f12", dot: "#ff2600" }
+  }[props.tone];
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: "7px",
+        minWidth: 0,
+        borderRadius: "999px",
+        background: palette.background,
+        color: palette.color,
+        padding: "7px 10px",
+        fontSize: "12px",
+        fontWeight: 650,
+        whiteSpace: "nowrap"
+      }}
+    >
+      <span style={{ width: "7px", height: "7px", borderRadius: "999px", background: palette.dot, boxShadow: `0 0 0 3px ${palette.background}` }} />
+      {props.label}
+    </span>
+  );
+}
+
+function DisplayStatusCard(props: { config: Config; screenState: ScreenState; preview: PreviewState; statusTone: "idle" | "dirty" | "error" | "success" }) {
+  const signalTone = props.statusTone === "error" || props.preview.error ? "error" : props.preview.updatedAt ? "good" : "warn";
+  const signalLabel = props.preview.error ? "Feil i displaydata" : props.preview.updatedAt ? "Displaydata OK" : "Venter på data";
+  const powerTone = props.screenState.active ? "good" : "idle";
+  const liveSource = props.preview.liveSourceStatus;
+  const liveSourceName = String(liveSource?.source || "live").toUpperCase();
+  const liveSourceTone = liveSource?.ok === false ? "error" : liveSource ? "good" : "idle";
+  const liveSourceLabel = liveSource?.ok === false ? `${liveSourceName} feil` : liveSource ? `${liveSourceName} OK` : "Livekilde ukjent";
+  const deviceStatus = props.preview.deviceStatus;
+  const deviceFresh = isRecentTimestamp(deviceStatus?.updatedAt, 4 * 60 * 1000);
+  const deviceTone = deviceStatus && deviceFresh ? deviceStatus.ok ? "good" : "error" : deviceStatus ? "warn" : "idle";
+  const deviceLabel = deviceStatus && deviceFresh ? deviceStatus.ok ? "Firmware OK" : "Firmware feil" : deviceStatus ? "Firmware stille" : "Venter på firmware";
+  return (
+    <div style={{ ...cardStyle("16px"), display: "grid", gap: "14px" }}>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "12px" }}>
+        <div>
+          <div style={{ fontSize: "14px", fontWeight: 750, letterSpacing: "-0.01em" }}>Skjermstatus</div>
+          <div style={{ marginTop: "4px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>
+            {props.screenState.active ? "Panelet er satt til å vise innhold." : "Panelet er satt i av-modus."}
+          </div>
+        </div>
+        <StatusPill label={props.screenState.active ? "På" : "Av"} tone={powerTone} />
+      </div>
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+        <StatusPill label={deviceLabel} tone={deviceTone} />
+        <StatusPill label={signalLabel} tone={signalTone} />
+        <StatusPill label={liveSourceLabel} tone={liveSourceTone} />
+        <StatusPill label={props.config.device.displayMode === "clock" ? "Klokke" : "Flyvisning"} tone="idle" />
+        <StatusPill label={props.screenState.brightnessMode === "night" ? "Nattlys" : "Daglys"} tone="idle" />
+      </div>
+
+      {props.preview.error ? <div style={{ borderRadius: "12px", background: "rgba(255, 38, 0, 0.08)", color: "#8b1f12", padding: "10px 12px", fontSize: "12px", lineHeight: 1.45 }}>{props.preview.error}</div> : null}
+      {liveSource?.ok === false && liveSource.error ? <div style={{ borderRadius: "12px", background: "rgba(255, 38, 0, 0.08)", color: "#8b1f12", padding: "10px 12px", fontSize: "12px", lineHeight: 1.45 }}>{liveSource.error}</div> : null}
+
+      <div style={{ display: "grid", gap: "8px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}>
+          <span>Siste displaydata</span>
+          <span style={{ color: "var(--foreground)", fontFamily: '"JetBrains Mono", monospace' }}>{shortTime(props.preview.updatedAt)}</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}>
+          <span>Sist sett skjerm</span>
+          <span style={{ color: "var(--foreground)", fontFamily: '"JetBrains Mono", monospace' }}>{shortTime(deviceStatus?.updatedAt)}</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}>
+          <span>Wi-Fi</span>
+          <span style={{ color: "var(--foreground)", textAlign: "right" }}>{deviceStatus?.wifi?.ssid || "ukjent"}</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}>
+          <span>Signal</span>
+          <span style={{ color: "var(--foreground)", textAlign: "right" }}>{wifiSignalLabel(deviceStatus?.wifi?.rssi)}</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}>
+          <span>Sist aktivert</span>
+          <span style={{ color: "var(--foreground)", fontFamily: '"JetBrains Mono", monospace' }}>{shortTime(props.screenState.lastActivatedAt)}</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}>
+          <span>Sist deaktivert</span>
+          <span style={{ color: "var(--foreground)", fontFamily: '"JetBrains Mono", monospace' }}>{shortTime(props.screenState.lastDeactivatedAt)}</span>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function MapPicker(props: { lat: number; lon: number; radiusKm: number; onChange: (lat: number, lon: number) => void }) {
@@ -1423,7 +1783,7 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
         const idleIndex = idleScreens.length ? idleCycleNumber % idleScreens.length : 0;
         const idleCycleStartedAt = cycleStartedAtRef.current + idleCycleNumber * idleCycleMs;
         const transition = getIdleTransition(idleScreens, idleIndex, props.config, idleCycleStartedAt, now);
-        drawIdleLayoutExact(renderCtx, idleScreens[idleIndex], props.config, transition.offset, transition.nextScreen);
+        drawIdleLayoutExact(renderCtx, idleScreens[idleIndex], props.config, idleCycleStartedAt, now, transition.offset, transition.nextScreen);
       } else {
         drawLedText(renderCtx, "NO DISPLAY DATA", 20, 27, "#f6b800", 88);
       }
@@ -1523,9 +1883,10 @@ function LoadingSkeleton() {
 
 export default function App() {
   const [config, setConfig] = useState<Config>(defaultConfig);
+  const [savedConfigSignature, setSavedConfigSignature] = useState(() => configSignature(defaultConfig));
   const [screenState, setScreenState] = useState<ScreenState>(defaultScreenState);
   const [soundState, setSoundState] = useState<SoundState>(defaultSoundState);
-  const [preview, setPreview] = useState<PreviewState>({ meta: "", flights: [], idleScreens: [], avinorRows: [], mode: "idle" });
+  const [preview, setPreview] = useState<PreviewState>({ meta: "", flights: [], idleScreens: [], avinorRows: [], mode: "idle", updatedAt: null, error: null, liveSourceStatus: null, deviceStatus: null });
   const [status, setStatus] = useState("Laster innstillinger...");
   const [statusTone, setStatusTone] = useState<"idle" | "dirty" | "error" | "success">("idle");
   const [activeSection, setActiveSection] = useState(0);
@@ -1535,6 +1896,7 @@ export default function App() {
   const slidesRef = useRef<HTMLDivElement | null>(null);
   const navRef = useRef<HTMLDivElement | null>(null);
   const navDragRef = useRef({ active: false, pointerId: -1, x: 0, left: 0, moved: false, pressedIndex: -1 });
+  const isDirty = configSignature(config) !== savedConfigSignature;
 
   useEffect(() => {
     let mounted = true;
@@ -1570,11 +1932,13 @@ export default function App() {
 
   async function loadConfig() {
     try {
-      const response = await apiFetch<(Partial<Config> & { screenState?: ScreenState; soundState?: SoundState })>("/api/config");
+      const response = await apiFetch<(Partial<Config> & { screenState?: ScreenState; soundState?: SoundState; deviceStatus?: DeviceStatus | null })>("/api/config");
       const nextConfig = normalizeConfig(response);
       setConfig(nextConfig);
+      setSavedConfigSignature(configSignature(nextConfig));
       if (response.screenState) setScreenState(response.screenState);
       if (response.soundState) setSoundState(response.soundState);
+      setPreview((current) => ({ ...current, deviceStatus: response.deviceStatus ?? current.deviceStatus }));
       setStatus("Innstillinger lastet");
       setStatusTone("idle");
     } catch (error) {
@@ -1591,11 +1955,16 @@ export default function App() {
         flights: Array.isArray(data.flights) ? data.flights : [],
         idleScreens: Array.isArray(data.idleScreens) ? data.idleScreens : [],
         avinorRows: preview.avinorRows,
-        mode: data.mode || "idle"
+        mode: data.mode || "idle",
+        updatedAt: data.updatedAt ?? new Date().toISOString(),
+        error: null,
+        liveSourceStatus: data.liveSourceStatus ?? null,
+        deviceStatus: data.deviceStatus ?? null
       });
       if (data.screenState) setScreenState(data.screenState);
     } catch (error) {
-      setPreview((current) => ({ ...current, meta: error instanceof Error ? error.message : "Kunne ikke hente display-data" }));
+      const message = error instanceof Error ? error.message : "Kunne ikke hente display-data";
+      setPreview((current) => ({ ...current, meta: message, error: message }));
     }
   }
 
@@ -1616,7 +1985,9 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(config)
       });
-      setConfig(normalizeConfig(saved));
+      const nextConfig = normalizeConfig(saved);
+      setConfig(nextConfig);
+      setSavedConfigSignature(configSignature(nextConfig));
       if (saved.screenState) setScreenState(saved.screenState);
       if (saved.soundState) setSoundState(saved.soundState);
       setStatus(`Lagret ${new Date().toLocaleTimeString("nb-NO")}`);
@@ -1681,32 +2052,53 @@ export default function App() {
     setActiveSection(index);
   }
 
-  const screenSummary = useMemo(() => {
-    const brightnessMode = screenState.brightnessMode === "night" ? "natt" : "dag";
-    const active = screenState.active ? "på" : "av";
-    return `Skjermstatus: ${active} · modus: ${config.device.displayMode} · lysmodus: ${brightnessMode}`;
-  }, [config.device.displayMode, screenState]);
+  const firmwareFresh = isRecentTimestamp(preview.deviceStatus?.updatedAt, 4 * 60 * 1000);
+  const firmwareDotColor = preview.deviceStatus && firmwareFresh
+    ? preview.deviceStatus.ok ? "#00f900" : "#ff2600"
+    : preview.deviceStatus ? "#ff9300" : "rgba(60, 36, 21, 0.34)";
 
   return (
     <div style={appStyles.shell}>
       <header style={appStyles.header}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
           <SkyframeLogo className="skyframe-logo" />
+          <div style={{ position: "relative", paddingLeft: "13px" }}>
+            <span
+              title={preview.deviceStatus && firmwareFresh ? (preview.deviceStatus.ok ? "Firmware OK" : "Firmware feil") : "Venter på firmware"}
+              style={{
+                position: "absolute",
+                left: 0,
+                top: "50%",
+                width: "8px",
+                height: "8px",
+                borderRadius: "999px",
+                background: firmwareDotColor,
+                boxShadow: firmwareDotColor === "#00f900" ? "0 0 0 4px rgba(0, 249, 0, 0.14)" : "0 0 0 4px rgba(60, 36, 21, 0.08)",
+                transform: "translateY(-50%)"
+              }}
+            />
           <button
             type="button"
             onClick={() => void toggleScreen()}
             disabled={busy}
+            aria-label={screenState.active ? "Slå av skjerm" : "Slå på skjerm"}
+            title={screenState.active ? "Skjermen er på" : "Skjermen er av"}
             style={{
-              width: "40px",
-              height: "40px",
-              borderRadius: "8px",
-              border: "0",
-              background: screenState.active ? "var(--primary)" : "var(--muted)",
-              color: screenState.active ? "#fff" : "var(--muted-foreground)"
+              position: "relative",
+              width: "42px",
+              height: "42px",
+              borderRadius: "14px",
+              border: "1px solid var(--primary)",
+              background: screenState.active ? "var(--primary)" : "transparent",
+              color: screenState.active ? "#fff" : "var(--primary)",
+              boxShadow: screenState.active ? "0 10px 22px rgba(60, 36, 21, 0.18)" : "none",
+              opacity: busy ? 0.64 : 1,
+              transition: "background 160ms ease, box-shadow 160ms ease, opacity 160ms ease"
             }}
           >
-            ⏻
+            <span style={{ fontSize: "18px", fontWeight: 800, lineHeight: 1 }}>⏻</span>
           </button>
+          </div>
         </div>
       </header>
 
@@ -1816,28 +2208,15 @@ export default function App() {
               <SliderField label="Brightness day" value={config.device.brightness} min={1} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, brightness: value } }))} />
               <SliderField label="Night brightness" value={config.device.nightMode.brightness} min={0} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, nightMode: { ...current.device.nightMode, brightness: value } } }))} />
               <SliderField label="Config refresh" value={config.device.configRefreshSeconds} min={60} max={3600} step={30} suffix=" s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, configRefreshSeconds: value } }))} />
-              <div style={cardStyle()}>
-                <div style={{ fontSize: "14px", lineHeight: 1.45 }}>{screenSummary}</div>
-                <div style={{ marginTop: "8px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>
-                  Sist aktivert: {formatTimestamp(screenState.lastActivatedAt)}
-                  <br />
-                  Sist deaktivert: {formatTimestamp(screenState.lastDeactivatedAt)}
-                  <br />
-                  Sist byttet lysmodus: {formatTimestamp(screenState.lastBrightnessModeChangedAt)}
-                </div>
-              </div>
+              <DisplayStatusCard config={config} screenState={screenState} preview={preview} statusTone={statusTone} />
             </div>
           </section>
 
           <section style={appStyles.slide}>
             <div style={{ display: "grid", gap: "14px" }}>
               <div style={{ display: "grid", gap: "12px", gridTemplateColumns: "1fr 1fr" }}>
-                <Field label="Clock top">
-                  <ColorInput value={config.device.clockTopColor} onChange={(event) => updateConfig((current) => ({ ...current, device: { ...current.device, clockTopColor: event.target.value } }))} />
-                </Field>
-                <Field label="Clock bottom">
-                  <ColorInput value={config.device.clockColor} onChange={(event) => updateConfig((current) => ({ ...current, device: { ...current.device, clockColor: event.target.value } }))} />
-                </Field>
+                <ColorPicker label="Klokke topp" value={config.device.clockTopColor} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, clockTopColor: value } }))} />
+                <ColorPicker label="Klokke bunn" value={config.device.clockColor} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, clockColor: value } }))} />
               </div>
               <ToggleRow label="Clock tick enabled" checked={config.device.clockTickEnabled} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, clockTickEnabled: value } }))} />
               <SliderField label="Clock tick volume" value={config.device.clockTickVolumePercent} min={0} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, clockTickVolumePercent: value } }))} />
@@ -1963,9 +2342,12 @@ export default function App() {
                 <SliderField label="Scroll speed" value={config.device.scrollPixelsPerSecond} min={2} max={30} suffix=" px/s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, scrollPixelsPerSecond: value } }))} />
                 <div style={{ display: "grid", gap: "12px", gridTemplateColumns: "1fr 1fr" }}>
                   {Object.entries(config.device.lineColors).map(([key, value]) => (
-                    <Field key={key} label={key}>
-                      <ColorInput value={value} onChange={(event) => updateConfig((current) => ({ ...current, device: { ...current.device, lineColors: { ...current.device.lineColors, [key]: event.target.value } } }))} />
-                    </Field>
+                    <ColorPicker
+                      key={key}
+                      label={lineColorLabels[key as keyof Config["device"]["lineColors"]] ?? key}
+                      value={value}
+                      onChange={(nextValue) => updateConfig((current) => ({ ...current, device: { ...current.device, lineColors: { ...current.device.lineColors, [key]: nextValue } } }))}
+                    />
                   ))}
                 </div>
               </Advanced>
@@ -1976,14 +2358,19 @@ export default function App() {
             <div style={{ display: "grid", gap: "14px" }}>
               <SliderField label="Hold each timetable page" value={config.device.timetableCycleSeconds} min={2} max={60} suffix=" s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, timetableCycleSeconds: value } }))} />
               <SliderField label="Rullehastighet" value={config.device.timetableScrollPixelsPerSecond} min={4} max={40} suffix=" px/s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, timetableScrollPixelsPerSecond: value } }))} />
-              <SliderField label="Antall fly" value={config.device.timetableItemCount} min={4} max={40} step={4} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, timetableItemCount: value } }))} />
-              <SliderField label="Se fremover" value={config.device.avinorWindowHours} min={1} max={24} suffix=" t" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, avinorWindowHours: value } }))} />
+              <SliderField label="Avganger antall" value={config.device.departureTimetableItemCount} min={4} max={40} step={4} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, departureTimetableItemCount: value, timetableItemCount: value } }))} />
+              <SliderField label="Ankomster antall" value={config.device.arrivalTimetableItemCount} min={4} max={40} step={4} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, arrivalTimetableItemCount: value } }))} />
+              <SliderField label="Avganger fremover" value={config.device.departureAvinorWindowHours} min={1} max={24} suffix=" t" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, departureAvinorWindowHours: value, avinorWindowHours: value } }))} />
+              <SliderField label="Ankomster fremover" value={config.device.arrivalAvinorWindowHours} min={1} max={24} suffix=" t" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, arrivalAvinorWindowHours: value } }))} />
               <Advanced title="Timetable colors">
                 <div style={{ display: "grid", gap: "12px", gridTemplateColumns: "1fr 1fr" }}>
                   {Object.entries(config.device.timetableColors).map(([key, value]) => (
-                    <Field key={key} label={key}>
-                      <ColorInput value={value} onChange={(event) => updateConfig((current) => ({ ...current, device: { ...current.device, timetableColors: { ...current.device.timetableColors, [key]: event.target.value } } }))} />
-                    </Field>
+                    <ColorPicker
+                      key={key}
+                      label={timetableColorLabels[key as keyof Config["device"]["timetableColors"]] ?? key}
+                      value={value}
+                      onChange={(nextValue) => updateConfig((current) => ({ ...current, device: { ...current.device, timetableColors: { ...current.device.timetableColors, [key]: nextValue } } }))}
+                    />
                   ))}
                 </div>
               </Advanced>
@@ -2081,20 +2468,22 @@ export default function App() {
         <button
           type="button"
           onClick={() => void saveConfig()}
-          disabled={busy}
+          disabled={busy || !isDirty}
           style={{
             width: "100%",
             height: "52px",
             borderRadius: "16px",
             border: 0,
-            background: "var(--primary)",
-            color: "#fff",
+            background: isDirty ? "var(--primary)" : "rgba(60, 36, 21, 0.12)",
+            color: isDirty ? "#fff" : "rgba(60, 36, 21, 0.44)",
             fontSize: "16px",
             fontWeight: 600,
-            boxShadow: "0 18px 30px rgba(60, 36, 21, 0.22)",
+            boxShadow: isDirty ? "0 18px 30px rgba(60, 36, 21, 0.22)" : "none",
             pointerEvents: "auto",
             position: "relative" as const,
-            zIndex: 1
+            zIndex: 1,
+            cursor: busy || !isDirty ? "not-allowed" : "pointer",
+            transition: "background 160ms ease, color 160ms ease, box-shadow 160ms ease"
           }}
         >
           {busy ? "Lagrer..." : "Save settings"}
