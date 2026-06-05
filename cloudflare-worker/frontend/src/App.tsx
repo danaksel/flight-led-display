@@ -959,7 +959,7 @@ function drawIdleRowExact(
   drawIdleTimeExact(ctx, row.time || "", x, y, timeColor);
   drawIdleDestinationExact(ctx, row.airport || "", x + 28, y, rowColor, 60, config, startedAt, now);
   drawLedText(ctx, idleFlightFieldTextExact(kind, row, now), x + 94, y, rowColor, 18);
-  drawIdleSymbolExact(ctx, kind, row, x + 116, y, status, colors);
+  drawIdleSymbolExact(ctx, kind, row, x + 113, y, status, colors);
 
   if (status === "canceled") {
     ctx.fillStyle = colors.canceled;
@@ -992,6 +992,20 @@ const landedCheckSymbolExact = [
   "...#.",
   "#.#..",
   ".#..."
+];
+
+const gateArrowSymbolExact = [
+  "#.",
+  "##",
+  "##",
+  "#."
+];
+
+const gateDoorSymbolExact = [
+  "###",
+  "#.#",
+  "#.#",
+  "#.#"
 ];
 
 function airlinePrefixExact(flightId?: string) {
@@ -1034,6 +1048,47 @@ function drawSymbolBitmapExact(ctx: CanvasRenderingContext2D, bitmap: string[], 
   });
 }
 
+function drawSymbolBitmapBoxedExact(ctx: CanvasRenderingContext2D, bitmap: string[], x: number, y: number, color: string, clipX: number, clipY: number, clipWidth: number, clipHeight: number) {
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(clipX, clipY, clipWidth, clipHeight);
+  ctx.clip();
+  drawSymbolBitmapExact(ctx, bitmap, x, y, color);
+  ctx.restore();
+}
+
+function animatedGateArrowX(startX: number, stopX: number, now: number) {
+  const speed = 6;
+  const distance = Math.abs(stopX - startX);
+  const travelMs = Math.max(1, (distance / speed) * 1000);
+  const holdMs = 180;
+  const phase = now % (travelMs + holdMs);
+  if (phase >= travelMs) return stopX;
+  const progress = phase / travelMs;
+  return Math.round(startX + (stopX - startX) * progress);
+}
+
+function drawGateMotionSymbolExact(ctx: CanvasRenderingContext2D, state: string, x: number, y: number, color: string, now: number) {
+  const fieldWidth = 9;
+  const fieldHeight = 8;
+  const arrowWidth = gateArrowSymbolExact[0].length;
+  const doorWidth = gateDoorSymbolExact[0].length;
+  const drawY = y + 1;
+
+  if (state === "goToGate") {
+    const doorX = x + fieldWidth - doorWidth;
+    const arrowX = animatedGateArrowX(x, doorX - arrowWidth - 1, now);
+    drawSymbolBitmapExact(ctx, gateDoorSymbolExact, doorX, drawY, color);
+    drawSymbolBitmapBoxedExact(ctx, gateArrowSymbolExact, arrowX, drawY, color, x, y, fieldWidth, fieldHeight);
+    return;
+  }
+
+  const doorX = x;
+  const arrowX = animatedGateArrowX(doorX + doorWidth + 1, x + fieldWidth - arrowWidth, now);
+  drawSymbolBitmapExact(ctx, gateDoorSymbolExact, doorX, drawY, color);
+  drawSymbolBitmapBoxedExact(ctx, gateArrowSymbolExact, arrowX, drawY, color, x, y, fieldWidth, fieldHeight);
+}
+
 function drawIdleSymbolExact(
   ctx: CanvasRenderingContext2D,
   kind: string | undefined,
@@ -1045,10 +1100,15 @@ function drawIdleSymbolExact(
 ) {
   const state = idleSymbolStateExact(kind, row, status);
   if (!state) return;
-  const blinkOn = Math.floor(performance.now() / 600) % 2 === 0;
-  if ((state === "boarding" || state === "gateClosing") && !blinkOn) return;
+  const fieldWidth = 9;
+
+  if (state === "goToGate" || state === "boarding" || state === "gateClosing") {
+    drawGateMotionSymbolExact(ctx, state, x, y, idleSymbolColorExact(state, colors), performance.now());
+    return;
+  }
+
+  if (state === "gateClosed" && Math.floor(performance.now() / 600) % 2 !== 0) return;
   const bitmap = state === "landed" ? landedCheckSymbolExact : departureCircleSymbolExact;
-  const fieldWidth = 6;
   const drawX = x + Math.max(0, fieldWidth - bitmap[0].length);
   const drawY = state === "landed" ? y + 2 : y + 1;
   drawSymbolBitmapExact(ctx, bitmap, drawX, drawY, idleSymbolColorExact(state, colors));

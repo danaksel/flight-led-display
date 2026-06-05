@@ -1312,6 +1312,20 @@ const char *LandedCheckSymbol[] = {
     ".#..."
 };
 
+const char *GateArrowSymbol[] = {
+    "#.",
+    "##",
+    "##",
+    "#."
+};
+
+const char *GateDoorSymbol[] = {
+    "###",
+    "#.#",
+    "#.#",
+    "#.#"
+};
+
 String airlinePrefix(const String &flightId)
 {
     String value = flightId;
@@ -1366,6 +1380,62 @@ void drawBitmapSymbolClipped(int16_t x, int16_t y, const char *bitmap[], uint8_t
     }
 }
 
+void drawBitmapSymbolBoxClipped(int16_t x, int16_t y, const char *bitmap[], uint8_t rows, uint16_t color, int16_t clipX, int16_t clipY, uint8_t clipWidth, uint8_t clipHeight)
+{
+    const int16_t clipRight = clipX + clipWidth;
+    const int16_t clipBottom = clipY + clipHeight;
+    for (uint8_t row = 0; row < rows; ++row)
+    {
+        const int16_t targetY = y + row;
+        if (targetY < TimetableRowsTopY || targetY >= TimetableRowsBottomY) continue;
+        if (targetY < clipY || targetY >= clipBottom) continue;
+        const char *line = bitmap[row];
+        for (uint8_t col = 0; line[col] != '\0'; ++col)
+        {
+            const int16_t targetX = x + col;
+            if (targetX < clipX || targetX >= clipRight) continue;
+            if (line[col] == '#')
+            {
+                display->drawPixel(targetX, targetY, color);
+            }
+        }
+    }
+}
+
+int16_t animatedGateArrowX(int16_t startX, int16_t stopX)
+{
+    constexpr uint16_t speed = 6;
+    constexpr uint16_t holdMs = 180;
+    const uint16_t distance = abs(stopX - startX);
+    const uint16_t travelMs = max<uint16_t>(1, (distance * 1000UL) / speed);
+    const uint16_t phase = millis() % (travelMs + holdMs);
+    if (phase >= travelMs) return stopX;
+    return startX + ((stopX - startX) * static_cast<int32_t>(phase)) / travelMs;
+}
+
+void drawGateMotionSymbol(const String &state, int16_t x, int16_t y, uint16_t color)
+{
+    constexpr uint8_t fieldWidth = 9;
+    constexpr uint8_t fieldHeight = 8;
+    constexpr uint8_t arrowWidth = 2;
+    constexpr uint8_t doorWidth = 3;
+    const int16_t drawY = y + 1;
+
+    if (state == "goToGate")
+    {
+        const int16_t doorX = x + fieldWidth - doorWidth;
+        const int16_t arrowX = animatedGateArrowX(x, doorX - arrowWidth - 1);
+        drawBitmapSymbolClipped(doorX, drawY, GateDoorSymbol, 4, color);
+        drawBitmapSymbolBoxClipped(arrowX, drawY, GateArrowSymbol, 4, color, x, y, fieldWidth, fieldHeight);
+        return;
+    }
+
+    const int16_t doorX = x;
+    const int16_t arrowX = animatedGateArrowX(doorX + doorWidth + 1, x + fieldWidth - arrowWidth);
+    drawBitmapSymbolClipped(doorX, drawY, GateDoorSymbol, 4, color);
+    drawBitmapSymbolBoxClipped(arrowX, drawY, GateArrowSymbol, 4, color, x, y, fieldWidth, fieldHeight);
+}
+
 String idleRowSymbolState(const String &kind, const IdleRow &row)
 {
     if (row.status == "canceled") return "";
@@ -1405,18 +1475,25 @@ void drawIdleRowSymbol(const String &kind, const IdleRow &row, int16_t x, int16_
     const String state = idleRowSymbolState(kind, row);
     if (!state.length()) return;
 
-    const bool blinkOn = (millis() / 600UL) % 2 == 0;
-    if ((state == "boarding" || state == "gateClosing") && !blinkOn) return;
+    constexpr uint8_t symbolFieldWidth = 9;
+
+    if (state == "goToGate" || state == "boarding" || state == "gateClosing")
+    {
+        drawGateMotionSymbol(state, x, y, idleRowSymbolColor(state));
+        return;
+    }
+
+    if (state == "gateClosed" && (millis() / 600UL) % 2 != 0) return;
 
     if (state == "landed")
     {
         constexpr uint8_t symbolWidth = 5;
-        drawBitmapSymbolClipped(x + max<int16_t>(0, 6 - symbolWidth), y + 2, LandedCheckSymbol, 4, idleRowSymbolColor(state));
+        drawBitmapSymbolClipped(x + max<int16_t>(0, symbolFieldWidth - symbolWidth), y + 2, LandedCheckSymbol, 4, idleRowSymbolColor(state));
         return;
     }
 
     constexpr uint8_t symbolWidth = 4;
-    drawBitmapSymbolClipped(x + max<int16_t>(0, 6 - symbolWidth), y + 2, DepartureCircleSymbol, 4, idleRowSymbolColor(state));
+    drawBitmapSymbolClipped(x + max<int16_t>(0, symbolFieldWidth - symbolWidth), y + 2, DepartureCircleSymbol, 4, idleRowSymbolColor(state));
 }
 
 String localClockText()
@@ -2579,7 +2656,7 @@ void drawIdleRow(const IdleScreen &screen, const IdleRow &row, int16_t y)
     drawIdleTimeClipped(row.time, 3, y, timeColor);
     drawIdleDestinationTicker(row.airport, 31, y, rowColor, 60);
     drawTextFitClipped(idleFlightFieldText(screen.kind, row), 97, y, rowColor, 18);
-    drawIdleRowSymbol(screen.kind, row, 119, y);
+    drawIdleRowSymbol(screen.kind, row, 116, y);
     if (canceled && y + 3 >= TimetableRowsTopY && y + 3 < TimetableRowsBottomY)
     {
         display->drawFastHLine(3, y + 3, 122, red);
