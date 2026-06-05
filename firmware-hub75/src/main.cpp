@@ -1320,10 +1320,10 @@ const char *GateArrowSymbol[] = {
 };
 
 const char *GateDoorSymbol[] = {
-    "###",
+    ".##",
+    "#..",
     "#.#",
-    "#.#",
-    "#.#"
+    ".##"
 };
 
 String airlinePrefix(const String &flightId)
@@ -1430,11 +1430,14 @@ void drawGateMotionSymbol(const String &state, int16_t x, int16_t y, uint16_t co
     {
         const int16_t arrowX = doorX - arrowWidth - 1;
         drawBitmapSymbolClipped(doorX, drawY, GateDoorSymbol, 4, color);
-        drawBitmapSymbolBoxClipped(arrowX, drawY, GateArrowSymbol, 4, color, x, y, fieldWidth, fieldHeight);
+        if ((millis() / 850UL) % 2 == 0)
+        {
+            drawBitmapSymbolBoxClipped(arrowX, drawY, GateArrowSymbol, 4, color, x, y, fieldWidth, fieldHeight);
+        }
         return;
     }
 
-    const int16_t arrowX = animatedGateArrowX(doorX + doorWidth + 1, 128);
+    const int16_t arrowX = animatedGateArrowX(doorX + doorWidth + 1, 130);
     drawBitmapSymbolClipped(doorX, drawY, GateDoorSymbol, 4, color);
     drawBitmapSymbolBoxClipped(arrowX, drawY, GateArrowSymbol, 4, color, x, y, 128 - x, fieldHeight);
 }

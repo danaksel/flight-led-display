@@ -1002,10 +1002,10 @@ const gateArrowSymbolExact = [
 ];
 
 const gateDoorSymbolExact = [
-  "###",
+  ".##",
+  "#..",
   "#.#",
-  "#.#",
-  "#.#"
+  ".##"
 ];
 
 function airlinePrefixExact(flightId?: string) {
@@ -1082,11 +1082,13 @@ function drawGateMotionSymbolExact(ctx: CanvasRenderingContext2D, state: string,
   if (state === "goToGate") {
     const arrowX = doorX - arrowWidth - 1;
     drawSymbolBitmapExact(ctx, gateDoorSymbolExact, doorX, drawY, color);
-    drawSymbolBitmapBoxedExact(ctx, gateArrowSymbolExact, arrowX, drawY, color, x, y, fieldWidth, fieldHeight);
+    if (Math.floor(now / 850) % 2 === 0) {
+      drawSymbolBitmapBoxedExact(ctx, gateArrowSymbolExact, arrowX, drawY, color, x, y, fieldWidth, fieldHeight);
+    }
     return;
   }
 
-  const arrowX = animatedGateArrowX(doorX + doorWidth + 1, 128, now);
+  const arrowX = animatedGateArrowX(doorX + doorWidth + 1, 130, now);
   drawSymbolBitmapExact(ctx, gateDoorSymbolExact, doorX, drawY, color);
   drawSymbolBitmapBoxedExact(ctx, gateArrowSymbolExact, arrowX, drawY, color, x, y, 128 - x, fieldHeight);
 }
