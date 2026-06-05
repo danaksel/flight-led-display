@@ -1061,9 +1061,7 @@ function animatedGateArrowX(startX: number, stopX: number, now: number) {
   const speed = 6;
   const distance = Math.abs(stopX - startX);
   const travelMs = Math.max(1, (distance / speed) * 1000);
-  const holdMs = 180;
-  const phase = now % (travelMs + holdMs);
-  if (phase >= travelMs) return stopX;
+  const phase = now % travelMs;
   const progress = phase / travelMs;
   return Math.round(startX + (stopX - startX) * progress);
 }
@@ -1074,19 +1072,23 @@ function drawGateMotionSymbolExact(ctx: CanvasRenderingContext2D, state: string,
   const arrowWidth = gateArrowSymbolExact[0].length;
   const doorWidth = gateDoorSymbolExact[0].length;
   const drawY = y + 1;
+  const doorX = x + Math.floor((fieldWidth - doorWidth) / 2);
+
+  if (state === "gateClosed") {
+    drawSymbolBitmapExact(ctx, gateDoorSymbolExact, doorX, drawY, color);
+    return;
+  }
 
   if (state === "goToGate") {
-    const doorX = x + fieldWidth - doorWidth;
-    const arrowX = animatedGateArrowX(x, doorX - arrowWidth - 1, now);
+    const arrowX = doorX - arrowWidth - 1;
     drawSymbolBitmapExact(ctx, gateDoorSymbolExact, doorX, drawY, color);
     drawSymbolBitmapBoxedExact(ctx, gateArrowSymbolExact, arrowX, drawY, color, x, y, fieldWidth, fieldHeight);
     return;
   }
 
-  const doorX = x;
-  const arrowX = animatedGateArrowX(doorX + doorWidth + 1, x + fieldWidth - arrowWidth, now);
+  const arrowX = animatedGateArrowX(doorX + doorWidth + 1, 128, now);
   drawSymbolBitmapExact(ctx, gateDoorSymbolExact, doorX, drawY, color);
-  drawSymbolBitmapBoxedExact(ctx, gateArrowSymbolExact, arrowX, drawY, color, x, y, fieldWidth, fieldHeight);
+  drawSymbolBitmapBoxedExact(ctx, gateArrowSymbolExact, arrowX, drawY, color, x, y, 128 - x, fieldHeight);
 }
 
 function drawIdleSymbolExact(
@@ -1102,12 +1104,11 @@ function drawIdleSymbolExact(
   if (!state) return;
   const fieldWidth = 9;
 
-  if (state === "goToGate" || state === "boarding" || state === "gateClosing") {
+  if (state === "goToGate" || state === "boarding" || state === "gateClosing" || state === "gateClosed") {
     drawGateMotionSymbolExact(ctx, state, x, y, idleSymbolColorExact(state, colors), performance.now());
     return;
   }
 
-  if (state === "gateClosed" && Math.floor(performance.now() / 600) % 2 !== 0) return;
   const bitmap = state === "landed" ? landedCheckSymbolExact : departureCircleSymbolExact;
   const drawX = x + Math.max(0, fieldWidth - bitmap[0].length);
   const drawY = state === "landed" ? y + 2 : y + 1;

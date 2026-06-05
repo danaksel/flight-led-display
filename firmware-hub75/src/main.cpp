@@ -1405,11 +1405,9 @@ void drawBitmapSymbolBoxClipped(int16_t x, int16_t y, const char *bitmap[], uint
 int16_t animatedGateArrowX(int16_t startX, int16_t stopX)
 {
     constexpr uint16_t speed = 6;
-    constexpr uint16_t holdMs = 180;
     const uint16_t distance = abs(stopX - startX);
     const uint16_t travelMs = max<uint16_t>(1, (distance * 1000UL) / speed);
-    const uint16_t phase = millis() % (travelMs + holdMs);
-    if (phase >= travelMs) return stopX;
+    const uint16_t phase = millis() % travelMs;
     return startX + ((stopX - startX) * static_cast<int32_t>(phase)) / travelMs;
 }
 
@@ -1420,20 +1418,25 @@ void drawGateMotionSymbol(const String &state, int16_t x, int16_t y, uint16_t co
     constexpr uint8_t arrowWidth = 2;
     constexpr uint8_t doorWidth = 3;
     const int16_t drawY = y + 1;
+    const int16_t doorX = x + ((fieldWidth - doorWidth) / 2);
+
+    if (state == "gateClosed")
+    {
+        drawBitmapSymbolClipped(doorX, drawY, GateDoorSymbol, 4, color);
+        return;
+    }
 
     if (state == "goToGate")
     {
-        const int16_t doorX = x + fieldWidth - doorWidth;
-        const int16_t arrowX = animatedGateArrowX(x, doorX - arrowWidth - 1);
+        const int16_t arrowX = doorX - arrowWidth - 1;
         drawBitmapSymbolClipped(doorX, drawY, GateDoorSymbol, 4, color);
         drawBitmapSymbolBoxClipped(arrowX, drawY, GateArrowSymbol, 4, color, x, y, fieldWidth, fieldHeight);
         return;
     }
 
-    const int16_t doorX = x;
-    const int16_t arrowX = animatedGateArrowX(doorX + doorWidth + 1, x + fieldWidth - arrowWidth);
+    const int16_t arrowX = animatedGateArrowX(doorX + doorWidth + 1, 128);
     drawBitmapSymbolClipped(doorX, drawY, GateDoorSymbol, 4, color);
-    drawBitmapSymbolBoxClipped(arrowX, drawY, GateArrowSymbol, 4, color, x, y, fieldWidth, fieldHeight);
+    drawBitmapSymbolBoxClipped(arrowX, drawY, GateArrowSymbol, 4, color, x, y, 128 - x, fieldHeight);
 }
 
 String idleRowSymbolState(const String &kind, const IdleRow &row)
@@ -1477,13 +1480,11 @@ void drawIdleRowSymbol(const String &kind, const IdleRow &row, int16_t x, int16_
 
     constexpr uint8_t symbolFieldWidth = 9;
 
-    if (state == "goToGate" || state == "boarding" || state == "gateClosing")
+    if (state == "goToGate" || state == "boarding" || state == "gateClosing" || state == "gateClosed")
     {
         drawGateMotionSymbol(state, x, y, idleRowSymbolColor(state));
         return;
     }
-
-    if (state == "gateClosed" && (millis() / 600UL) % 2 != 0) return;
 
     if (state == "landed")
     {
