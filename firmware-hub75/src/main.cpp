@@ -25,6 +25,7 @@ constexpr uint8_t Brightness = 8;
 constexpr const char *DeviceConfigUrl = "https://flight-display-server.dan-aksel.workers.dev/public/device-config";
 constexpr const char *SoundStateUrl = "https://flight-display-server.dan-aksel.workers.dev/public/sound-state";
 constexpr const char *RealtimeStateUrl = "https://flight-display-server.dan-aksel.workers.dev/public/realtime-state";
+constexpr const char *DeviceStatusUrl = "https://flight-display-server.dan-aksel.workers.dev/public/device-status";
 constexpr const char *DisplayUrl = "https://flight-display-server.dan-aksel.workers.dev/public/display";
 constexpr const char *ServerBaseUrl = "https://flight-display-server.dan-aksel.workers.dev";
 constexpr const char *RealtimeHost = "flight-display-server.dan-aksel.workers.dev";
@@ -46,7 +47,7 @@ p/SgguMh1YQdc4acLa/KNJvxn7kjNuK8YAOdgLOaVsjh4rsUecrNIdSUtUlD
 -----END CERTIFICATE-----
 )EOF";
 constexpr const char *OsloTimeZone = "CET-1CEST,M3.5.0/2,M10.5.0/3";
-constexpr uint8_t MaxIdleScreens = 6;
+constexpr uint8_t MaxIdleScreens = 20;
 constexpr uint8_t MaxIdleRows = 4;
 constexpr uint8_t LogoWidth = 42;
 constexpr uint8_t LogoHeight = 42;
@@ -73,6 +74,7 @@ constexpr uint8_t ClockTickVolumePercentDefault = 20;
 constexpr uint8_t ClockRenderIntervalMs = 15;
 constexpr uint8_t RealtimeStatePollSeconds = 5;
 constexpr uint32_t DeviceStatusIntervalMs = 120000;
+constexpr uint16_t TimetableKindTransitionMs = 200;
 constexpr uint8_t MainLoopDelayMs = 20;
 constexpr uint8_t WifiReconnectSeconds = 30;
 constexpr uint16_t ConfigFallbackPollSeconds = 300;
@@ -129,6 +131,7 @@ IdleScreen idleScreens[MaxIdleScreens];
 uint8_t idleScreenCount = 0;
 uint8_t currentIdleScreen = 0;
 uint8_t currentLiveFlight = 0;
+bool idleKindIntroActive = false;
 bool lastConfigOk = false;
 bool lastDisplayOk = false;
 String lastDisplayMode;
@@ -159,6 +162,7 @@ int8_t audioI2cSdaPin = -1;
 int8_t audioI2cSclPin = -1;
 uint32_t lastSoundTestNonce = 0;
 uint32_t lastDeviceStatusSentAt = 0;
+uint32_t lastDeviceStatusPostedAt = 0;
 uint32_t lastClockRenderAt = 0;
 uint32_t clockFallingStartedAt = 0;
 int8_t lastClockMinute = -1;
@@ -196,6 +200,8 @@ void fetchSoundState();
 void soundPollTask(void *);
 void networkPollTask(void *);
 void realtimeTask(void *);
+String buildDeviceStatusPayload();
+void postDeviceStatusIfDue();
 void sendDeviceStatus();
 bool requestConfigFetch();
 bool requestDisplayFetch();
@@ -1283,7 +1289,7 @@ void drawIdleRowSymbol(const String &kind, const IdleRow &row, int16_t x, int16_
     if (state == "landed")
     {
         constexpr uint8_t symbolWidth = 5;
-        drawBitmapSymbol(x + max<int16_t>(0, 9 - symbolWidth), y + 4, LandedCheckSymbol, 4, idleRowSymbolColor(state));
+        drawBitmapSymbol(x + max<int16_t>(0, 9 - symbolWidth), y + 2, LandedCheckSymbol, 4, idleRowSymbolColor(state));
         return;
     }
 
@@ -1458,24 +1464,87 @@ uint8_t nextIdleScreenIndex()
     return idleScreenCount ? (currentIdleScreen + 1) % idleScreenCount : 0;
 }
 
+uint32_t idleTransitionMs(uint16_t rowTravel)
+{
+    const uint32_t cycleMs = max<uint32_t>(2000, static_cast<uint32_t>(timetableCycleSeconds) * 1000UL);
+    const uint16_t speed = max<uint16_t>(4, timetableScrollPixelsPerSecond);
+    return min<uint32_t>(cycleMs * 3 / 4, max<uint32_t>(400, (static_cast<uint32_t>(rowTravel) * 1000UL) / speed));
+}
+
+float idleTransitionProgress(uint32_t transitionMs, bool intro)
+{
+    const uint32_t elapsed = millis() - idleCycleStartedAt;
+    if (intro)
+    {
+        if (elapsed >= transitionMs) return 1.0f;
+        return min(1.0f, static_cast<float>(elapsed) / static_cast<float>(transitionMs));
+    }
+
+    const uint32_t cycleMs = max<uint32_t>(2000, static_cast<uint32_t>(timetableCycleSeconds) * 1000UL);
+    const uint32_t transitionStart = cycleMs > transitionMs ? cycleMs - transitionMs : 0;
+    if (elapsed < transitionStart) return 0;
+    return min(1.0f, static_cast<float>(elapsed - transitionStart) / static_cast<float>(transitionMs));
+}
+
+bool idleKindChangingToNext()
+{
+    if (idleScreenCount <= 1) return false;
+    return idleScreens[currentIdleScreen].kind != idleScreens[nextIdleScreenIndex()].kind;
+}
+
 int16_t idleScrollOffset()
 {
     if (idleScreenCount <= 1) return 0;
 
-    const IdleScreen &current = idleScreens[currentIdleScreen];
-    const IdleScreen &next = idleScreens[nextIdleScreenIndex()];
-    if (current.kind != next.kind) return 0;
+    const uint16_t rowTravel = idleKindChangingToNext() ? 64 : 44;
+    const uint32_t transitionMs = idleKindChangingToNext() ? TimetableKindTransitionMs : idleTransitionMs(rowTravel);
+    const float progress = idleTransitionProgress(transitionMs, false);
+    return static_cast<int16_t>(roundf(static_cast<float>(rowTravel) * easeInOut(progress)));
+}
 
-    constexpr uint16_t RowTravel = 44;
-    const uint32_t cycleMs = max<uint32_t>(2000, static_cast<uint32_t>(timetableCycleSeconds) * 1000UL);
-    const uint16_t speed = max<uint16_t>(4, timetableScrollPixelsPerSecond);
-    const uint32_t transitionMs = min<uint32_t>(cycleMs * 3 / 4, max<uint32_t>(400, (RowTravel * 1000UL) / speed));
-    const uint32_t elapsed = millis() - idleCycleStartedAt;
-    const uint32_t transitionStart = cycleMs > transitionMs ? cycleMs - transitionMs : 0;
-    if (elapsed < transitionStart) return 0;
+int16_t idleRowsBaseY()
+{
+    if (!idleKindIntroActive) return 20 - idleScrollOffset();
+    const float progress = easeInOut(idleTransitionProgress(TimetableKindTransitionMs, true));
+    if (progress >= 1.0f) return 20;
+    return static_cast<int16_t>(roundf(64.0f - 44.0f * progress));
+}
 
-    const float progress = min(1.0f, static_cast<float>(elapsed - transitionStart) / static_cast<float>(transitionMs));
-    return static_cast<int16_t>(roundf(RowTravel * easeInOut(progress)));
+String idleAnimatedHeader(const String &title)
+{
+    const size_t length = title.length();
+    if (length == 0) return title;
+
+    if (idleKindIntroActive)
+    {
+        const float progress = idleTransitionProgress(TimetableKindTransitionMs, true);
+        const size_t visible = min(length, static_cast<size_t>(ceilf(static_cast<float>(length) * progress)));
+        return title.substring(0, visible);
+    }
+
+    if (!idleKindChangingToNext()) return title;
+
+    const float progress = idleTransitionProgress(TimetableKindTransitionMs, false);
+    if (progress <= 0.0f) return title;
+    const size_t visible = min(length, static_cast<size_t>(floorf(static_cast<float>(length) * (1.0f - progress))));
+    return title.substring(0, visible);
+}
+
+void drawTimetableTopFadeMask()
+{
+    const uint16_t black = panelColor(0, 0, 0);
+    display->fillRect(0, 0, PanelWidth, 14, black);
+    for (uint8_t y = 15; y <= 18; ++y)
+    {
+        const uint8_t stride = y == 15 ? 1 : y == 16 ? 2 : y == 17 ? 3 : 4;
+        for (uint8_t x = 0; x < PanelWidth; ++x)
+        {
+            if (stride == 1 || ((x + y) % stride == 0))
+            {
+                display->drawPixel(x, y, black);
+            }
+        }
+    }
 }
 
 void drawWifiStatus(const char *title, const char *line1, const char *line2, uint16_t color)
@@ -1577,6 +1646,54 @@ bool fetchText(const char *url, String &body, int &httpCode, TickType_t lockWait
     }
 
     httpCode = http.GET();
+    if (httpCode > 0)
+    {
+        body = http.getString();
+    }
+    http.end();
+    resumeRealtimeAfterHttp();
+    if (locked) xSemaphoreGive(networkMutex);
+
+    return httpCode >= 200 && httpCode < 300;
+}
+
+bool postJson(const char *url, const String &payload, String &body, int &httpCode, TickType_t lockWait = portMAX_DELAY)
+{
+    bool locked = false;
+    if (networkMutex)
+    {
+        if (xSemaphoreTake(networkMutex, lockWait) != pdTRUE)
+        {
+            httpCode = -2;
+            return false;
+        }
+        locked = true;
+    }
+
+    pauseRealtimeForHttp();
+
+    WiFiClientSecure client;
+    client.setCACert(WorkerTlsRootCa);
+
+    HTTPClient http;
+    http.setTimeout(12000);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+
+    if (!http.begin(client, url))
+    {
+        httpCode = -1;
+        resumeRealtimeAfterHttp();
+        if (locked) xSemaphoreGive(networkMutex);
+        return false;
+    }
+
+    http.addHeader("Content-Type", "application/json");
+    if (strlen(DeviceToken) > 0)
+    {
+        http.addHeader("X-Flight-Device-Token", DeviceToken);
+    }
+
+    httpCode = http.POST(payload);
     if (httpCode > 0)
     {
         body = http.getString();
@@ -1706,6 +1823,7 @@ void soundPollTask(void *)
         if (WiFi.status() == WL_CONNECTED)
         {
             fetchRealtimeState();
+            postDeviceStatusIfDue();
         }
         vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>(RealtimeStatePollSeconds) * 1000UL));
     }
@@ -1775,10 +1893,8 @@ void handleRealtimeText(const uint8_t *payload, size_t length)
     }
 }
 
-void sendDeviceStatus()
+String buildDeviceStatusPayload()
 {
-    if (!realtimeSocket.isConnected() || WiFi.status() != WL_CONNECTED) return;
-
     JsonDocument doc;
     doc["type"] = "device_status";
     doc["source"] = "firmware-hub75";
@@ -1798,6 +1914,34 @@ void sendDeviceStatus()
 
     String payload;
     serializeJson(doc, payload);
+    return payload;
+}
+
+void postDeviceStatusIfDue()
+{
+    const uint32_t now = millis();
+    if (lastDeviceStatusPostedAt != 0 && now - lastDeviceStatusPostedAt < DeviceStatusIntervalMs) return;
+
+    String body;
+    int httpCode = 0;
+    String payload = buildDeviceStatusPayload();
+    if (!postJson(DeviceStatusUrl, payload, body, httpCode, pdMS_TO_TICKS(100)))
+    {
+        if (httpCode != -2)
+        {
+            Serial.print("Device status POST failed, HTTP ");
+            Serial.println(httpCode);
+        }
+        return;
+    }
+    lastDeviceStatusPostedAt = now;
+}
+
+void sendDeviceStatus()
+{
+    if (!realtimeSocket.isConnected() || WiFi.status() != WL_CONNECTED) return;
+
+    String payload = buildDeviceStatusPayload();
     realtimeSocket.sendTXT(payload);
     lastDeviceStatusSentAt = millis();
 }
@@ -2348,16 +2492,17 @@ void drawIdleScreen(uint8_t index)
     const uint16_t clockColor = timetableTimeColor ? timetableTimeColor : white;
     const int16_t offset = idleScrollOffset();
     const uint8_t nextIndex = nextIdleScreenIndex();
-    const bool showNext = idleScreenCount > 1 && screen.kind == idleScreens[nextIndex].kind && offset > 0;
+    const bool showNext = idleScreenCount > 1 && screen.kind == idleScreens[nextIndex].kind && offset > 0 && !idleKindIntroActive;
 
     display->fillScreen(panelColor(0, 0, 0));
     display->setTextSize(1);
     display->setTextWrap(false);
-    drawTextFit(screen.title, 3, 3, yellow, 86);
+    drawIdleRows(index, idleRowsBaseY());
+    if (showNext) drawIdleRows(nextIndex, 64 - offset);
+    drawTimetableTopFadeMask();
+    drawTextFit(idleAnimatedHeader(screen.title), 3, 3, yellow, 86);
     drawClockRight(125, 3, clockColor);
     display->drawFastHLine(3, 14, 122, yellow);
-    drawIdleRows(index, 20 - offset);
-    if (showNext) drawIdleRows(nextIndex, 64 - offset);
     drawFetchIndicator();
 
     idleLayoutActive = true;
@@ -2368,6 +2513,7 @@ void storeIdleScreens(JsonArray screens)
 {
     idleScreenCount = min(static_cast<size_t>(MaxIdleScreens), screens.size());
     currentIdleScreen = 0;
+    idleKindIntroActive = false;
 
     for (uint8_t i = 0; i < idleScreenCount; ++i)
     {
@@ -2938,7 +3084,9 @@ void loop()
 
     if (idleScreenCount > 1 && millis() >= nextIdleCycleAt)
     {
+        const String previousKind = idleScreens[currentIdleScreen].kind;
         currentIdleScreen = (currentIdleScreen + 1) % idleScreenCount;
+        idleKindIntroActive = previousKind != idleScreens[currentIdleScreen].kind;
         idleCycleStartedAt = millis();
         nextIdleCycleAt = idleCycleStartedAt + static_cast<uint32_t>(timetableCycleSeconds) * 1000UL;
         lastIdleRenderAt = 0;
@@ -2946,7 +3094,8 @@ void loop()
 
     if (idleLayoutActive)
     {
-        const bool scrolling = idleScrollOffset() > 0;
+        const bool introScrolling = idleKindIntroActive && millis() - idleCycleStartedAt < TimetableKindTransitionMs;
+        const bool scrolling = idleScrollOffset() > 0 || introScrolling;
         const uint16_t renderIntervalMs = scrolling
             ? max<uint16_t>(20, min<uint16_t>(80, 1000 / max<uint16_t>(1, timetableScrollPixelsPerSecond)))
             : 250;

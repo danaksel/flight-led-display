@@ -248,6 +248,7 @@ function sectionIndexForSlide(slideIndex: number): number {
 }
 
 const defaultAircraftCategories: AircraftCategoryCode[] = ["P", "C", "M", "J", "H", "B", "G", "D", "V", "O", "N"];
+const timetableKindTransitionMs = 200;
 
 const categoryLabels: Record<AircraftCategoryCode, { title: string; description: string }> = {
   P: { title: "Passenger", description: "Kommersielle passasjerfly" },
@@ -1008,7 +1009,7 @@ function drawIdleSymbolExact(
   const bitmap = state === "landed" ? landedCheckSymbolExact : departureCircleSymbolExact;
   const fieldWidth = 9;
   const drawX = x + Math.max(0, fieldWidth - bitmap[0].length);
-  const drawY = state === "landed" ? y + 4 : y + 1;
+  const drawY = state === "landed" ? y + 2 : y + 1;
   drawSymbolBitmapExact(ctx, bitmap, drawX, drawY, idleSymbolColorExact(state, colors));
 }
 
@@ -1059,6 +1060,26 @@ function drawIdleRowsClipped(
   ctx.restore();
 }
 
+type IdleTransition = {
+  currentBaseY: number;
+  headerText: string;
+  nextBaseY: number | null;
+  nextScreen: IdleScreen | null;
+};
+
+function drawTimetableTopFade(ctx: CanvasRenderingContext2D) {
+  ctx.save();
+  ctx.fillStyle = "#000000";
+  ctx.fillRect(0, 0, 128, 14);
+  const gradient = ctx.createLinearGradient(0, 14, 0, 21);
+  gradient.addColorStop(0, "rgba(0, 0, 0, 1)");
+  gradient.addColorStop(0.45, "rgba(0, 0, 0, 0.72)");
+  gradient.addColorStop(1, "rgba(0, 0, 0, 0)");
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 14, 128, 8);
+  ctx.restore();
+}
+
 function drawIdleLayoutExact(
   ctx: CanvasRenderingContext2D,
   screen: IdleScreen | undefined,
@@ -1066,7 +1087,8 @@ function drawIdleLayoutExact(
   startedAt: number,
   now: number,
   transitionOffset = 0,
-  nextScreen?: IdleScreen | null
+  nextScreen?: IdleScreen | null,
+  transition?: IdleTransition
 ) {
   const colors = config.device.timetableColors;
   ctx.fillStyle = "#000000";
@@ -1078,37 +1100,84 @@ function drawIdleLayoutExact(
     return;
   }
 
-  drawLedText(ctx, screen.title || "AIRPORT", 3, 3, colors.header, 86);
-  drawLocalClock(ctx, 125, 3, colors.time, config.device.timezone);
-  ctx.fillStyle = colors.header;
-  ctx.fillRect(3, 14, 122, 1);
-
   const rows = Array.isArray(screen.rows) ? screen.rows.slice(0, 4) : [];
   if (!rows.length) {
+    drawLedText(ctx, screen.title || "AIRPORT", 3, 3, colors.header, 86);
+    drawLocalClock(ctx, 125, 3, colors.time, config.device.timezone);
+    ctx.fillStyle = colors.header;
+    ctx.fillRect(3, 14, 122, 1);
     drawLedText(ctx, "No airport data", 3, 28, colors.data, 122);
     return;
   }
 
-  drawIdleRowsClipped(ctx, screen.kind, rows, 20 - transitionOffset, config, startedAt, now);
-  if (nextScreen) {
-    drawIdleRowsClipped(ctx, nextScreen.kind, Array.isArray(nextScreen.rows) ? nextScreen.rows : [], 64 - transitionOffset, config, startedAt, now);
+  const activeTransition = transition ?? {
+    currentBaseY: 20 - transitionOffset,
+    headerText: screen.title || "AIRPORT",
+    nextBaseY: nextScreen ? 64 - transitionOffset : null,
+    nextScreen: nextScreen ?? null
+  };
+  drawIdleRowsClipped(ctx, screen.kind, rows, activeTransition.currentBaseY, config, startedAt, now);
+  if (activeTransition.nextScreen && activeTransition.nextBaseY !== null) {
+    drawIdleRowsClipped(ctx, activeTransition.nextScreen.kind, Array.isArray(activeTransition.nextScreen.rows) ? activeTransition.nextScreen.rows : [], activeTransition.nextBaseY, config, startedAt, now);
   }
+  drawTimetableTopFade(ctx);
+  drawLedText(ctx, activeTransition.headerText, 3, 3, colors.header, 86);
+  drawLocalClock(ctx, 125, 3, colors.time, config.device.timezone);
+  ctx.fillStyle = colors.header;
+  ctx.fillRect(3, 14, 122, 1);
 }
 
-function getIdleTransition(screens: IdleScreen[], currentIndex: number, config: Config, cycleStartedAt: number, now: number) {
-  if (screens.length <= 1) return { offset: 0, nextScreen: null as IdleScreen | null };
-  const screen = screens[currentIndex];
-  const nextScreen = screens[(currentIndex + 1) % screens.length];
-  if (!screen || !nextScreen || screen.kind !== nextScreen.kind) return { offset: 0, nextScreen: null as IdleScreen | null };
-  const rowTravel = 44;
+function idleTransitionMs(config: Config, rowTravel: number) {
   const cycleMs = Math.max(2000, config.device.timetableCycleSeconds * 1000);
   const speed = Math.max(4, config.device.timetableScrollPixelsPerSecond);
-  const transitionMs = Math.min(cycleMs * 0.75, Math.max(400, (rowTravel / speed) * 1000));
+  return Math.min(cycleMs * 0.75, Math.max(400, (rowTravel / speed) * 1000));
+}
+
+function animatedHeaderText(title: string, progress: number, intro: boolean) {
+  const length = title.length;
+  if (!length) return title;
+  const visible = intro ? Math.ceil(length * progress) : Math.floor(length * (1 - progress));
+  return title.slice(0, Math.max(0, Math.min(length, visible)));
+}
+
+function getIdleTransition(screens: IdleScreen[], currentIndex: number, config: Config, cycleStartedAt: number, now: number): IdleTransition {
+  const screen = screens[currentIndex];
+  const title = screen?.title || "AIRPORT";
+  if (screens.length <= 1 || !screen) return { currentBaseY: 20, headerText: title, nextBaseY: null, nextScreen: null };
+  const nextScreen = screens[(currentIndex + 1) % screens.length];
+  const cycleMs = Math.max(2000, config.device.timetableCycleSeconds * 1000);
   const elapsed = Math.max(0, now - cycleStartedAt);
+  const previousScreen = screens[(currentIndex - 1 + screens.length) % screens.length];
+
+  if (previousScreen && previousScreen.kind !== screen.kind) {
+    const transitionMs = timetableKindTransitionMs;
+    if (elapsed < transitionMs) {
+      const progress = easeInOut(Math.min(1, elapsed / transitionMs));
+      return {
+        currentBaseY: Math.round(64 - 44 * progress),
+        headerText: animatedHeaderText(title, progress, true),
+        nextBaseY: null,
+        nextScreen: null
+      };
+    }
+  }
+
+  if (!nextScreen) return { currentBaseY: 20, headerText: title, nextBaseY: null, nextScreen: null };
+
+  const kindChanges = screen.kind !== nextScreen.kind;
+  const rowTravel = kindChanges ? 64 : 44;
+  const transitionMs = kindChanges ? timetableKindTransitionMs : idleTransitionMs(config, rowTravel);
   const transitionStart = Math.max(0, cycleMs - transitionMs);
-  if (elapsed < transitionStart) return { offset: 0, nextScreen: null as IdleScreen | null };
-  const progress = Math.min(1, (elapsed - transitionStart) / transitionMs);
-  return { offset: Math.round(rowTravel * easeInOut(progress)), nextScreen };
+  if (elapsed < transitionStart) return { currentBaseY: 20, headerText: title, nextBaseY: null, nextScreen: null };
+
+  const progress = easeInOut(Math.min(1, (elapsed - transitionStart) / transitionMs));
+  const offset = Math.round(rowTravel * progress);
+  return {
+    currentBaseY: 20 - offset,
+    headerText: kindChanges ? animatedHeaderText(title, progress, false) : title,
+    nextBaseY: kindChanges ? null : 64 - offset,
+    nextScreen: kindChanges ? null : nextScreen
+  };
 }
 
 function drawPlaceholderLogo(ctx: CanvasRenderingContext2D, x: number, y: number, size: number) {
@@ -1783,7 +1852,7 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
         const idleIndex = idleScreens.length ? idleCycleNumber % idleScreens.length : 0;
         const idleCycleStartedAt = cycleStartedAtRef.current + idleCycleNumber * idleCycleMs;
         const transition = getIdleTransition(idleScreens, idleIndex, props.config, idleCycleStartedAt, now);
-        drawIdleLayoutExact(renderCtx, idleScreens[idleIndex], props.config, idleCycleStartedAt, now, transition.offset, transition.nextScreen);
+        drawIdleLayoutExact(renderCtx, idleScreens[idleIndex], props.config, idleCycleStartedAt, now, 0, null, transition);
       } else {
         drawLedText(renderCtx, "NO DISPLAY DATA", 20, 27, "#f6b800", 88);
       }
@@ -1900,11 +1969,15 @@ export default function App() {
 
   useEffect(() => {
     let mounted = true;
-    void Promise.allSettled([loadConfig(), loadPreview(), loadAvinor()]).finally(() => {
+    void Promise.allSettled([loadConfig(), loadPreview(), loadAvinor(), loadDeviceStatus()]).finally(() => {
       if (mounted) setInitialLoading(false);
     });
+    const deviceStatusTimer = window.setInterval(() => {
+      void loadDeviceStatus();
+    }, 15000);
     return () => {
       mounted = false;
+      window.clearInterval(deviceStatusTimer);
     };
   }, []);
 
@@ -1974,6 +2047,15 @@ export default function App() {
       setPreview((current) => ({ ...current, avinorRows: Array.isArray(data.flights) ? data.flights : [] }));
     } catch {
       setPreview((current) => ({ ...current, avinorRows: [] }));
+    }
+  }
+
+  async function loadDeviceStatus() {
+    try {
+      const data = await apiFetch<DeviceStatus | null>(`/api/device-status?ts=${Date.now()}`);
+      setPreview((current) => ({ ...current, deviceStatus: data ?? null }));
+    } catch {
+      setPreview((current) => ({ ...current, deviceStatus: current.deviceStatus }));
     }
   }
 

@@ -23,6 +23,7 @@ ESP32-S3 + HUB75
   - Lytter på /public/realtime og poller /public/realtime-state som fallback
   - Henter /public/sound-state for lydstatus/test uten å hente flydata
   - Henter /public/display etter polling-intervall
+  - Sender device-status til /public/device-status og via realtime
   - Henter RGB565-logoer fra /public/logos-rgb565/{CODE}.rgb565
   - Tegner payloaden uten egen API-logikk mot FR24/Avinor
   - Spiller PA-lyd og klokketick via ES8311/NS4150
@@ -57,14 +58,22 @@ Fungerende ende-til-ende på Waveshare ESP32-S3-RGB-Matrix og 128 x 64 HUB75-pan
 - Topprad som progressbar ved follow-flight, med grønn fremdrift og grå rest
 - Idle-visning med Avinor departures/arrivals når live flydata er av eller ingen fly vises
 - Rullende tidstabell med lokal klokke i header
+- Tidstabellrader viser tid, bynavn, flyselskap/gate-felt og statusikon med 3 px ytter-margin
+- Bynavn scroller inni eget felt ved lange navn uten å lekke over i andre felt
+- Departures/arrivals kan ha separate antall og separate timer fremover
+- Bytte mellom departures og arrivals har 0,2 s outro/intro: header slettes/skrives bokstavvis, rutene ruller ut/inn, og klokken står hele tiden
+- Vanlig sidebytte innen samme type bruker normal rullehastighet
+- Timetabellscroll bruker maskering ved separatorlinjen slik at rader forsvinner gradvis under headeren
 - Tom tidstabell viser `No departures/arrivals the next X hours`, der X kommer fra Avinor-vinduet
-- Gate-status på departures: `To gate`, `Boarding`, `Closing`, `Closed`
-- Arrival-status kan vise `Landed`
+- Gate-status på departures vises som statusikon: go to gate, boarding, gate closing og gate closed
+- Arrival-status `Landed` vises som check-ikon
 - R2-basert logooppslag via `/logos/{CODE}.png` og ferdig RGB565-format til firmware
 - Fallback til `UNKNOWN.png` når logo mangler
 - Lokal oppstartsskjerm fra firmware med statusfelt over splash-bilde frem til første displaydata er hentet
 - Firmware matcher emulator-layouten for idle og live-visning
 - Firmware bruker config-styrt brightness, farger, polling, timezone og tidstabellinnstillinger
+- Firmware sender heartbeat/status ca. hvert 2. minutt med Wi-Fi SSID, RSSI, IP, uptime, skjermstatus, config OK og display OK
+- Webpanelet poller `/api/device-status` ca. hvert 15. sekund og viser firmware/Wi-Fi-status i display-seksjonen
 - Når skjermen er av, er panelet svart og firmware henter ikke flydata, bare config/status
 - Lydtest og PA-varsel styres fra webpanelets lydvolum
 - Klokketick har egen enable/volume og bruker separat tic-volum i firmware
@@ -99,6 +108,9 @@ Fungerende ende-til-ende på Waveshare ESP32-S3-RGB-Matrix og 128 x 64 HUB75-pan
 
 - `/api/screen-state`
   GET/POST for skjerm av/på fra eksterne systemer. Når skjermen er av, skal ESP32 holde panelet svart og ikke hente live flydata.
+
+- `/api/device-status`
+  Siste statusrapport fra ESP32. Brukes av webpanelet for å vise om firmware nylig har meldt seg, Wi-Fi-navn, signalstyrke, IP, uptime og om siste config/display-henting var OK.
 
 - `/api/screen-state/activate`
   POST-endepunkt for Homey: slå skjermen på.
@@ -141,6 +153,9 @@ Fungerende ende-til-ende på Waveshare ESP32-S3-RGB-Matrix og 128 x 64 HUB75-pan
 
 - `/public/sound-state`
   Public/device alias for `/api/sound-state`. ESP32 bruker denne for rask testlyd uten å hente flydata.
+
+- `/public/device-status`
+  POST-endepunkt for ESP32 heartbeat/status. Firmware sender samme status også over WebSocket, men HTTP POST brukes som robust fallback slik at webpanelets statusfelt ikke er avhengig av realtime-lagring alene.
 
 - `/public/display`
   Public/device alias for `/api/display`. Denne er ment for ESP32 og skal ligge under samme Cloudflare Access-regel som `/public/*`.
@@ -198,11 +213,12 @@ ESP32 skal ikke bruke admin-URL-ene direkte. Den skal bruke:
 /public/realtime-state
 /public/device-config
 /public/sound-state
+/public/device-status
 /public/display
 /public/logos-rgb565/{CODE}.rgb565
 ```
 
-Firmware bruker WebSocket på `/public/realtime` for raske endringer. Hvis realtime faller ut, poller den `/public/realtime-state` hvert 5. sekund og henter full config/display når versjoner endrer seg. `configRefreshSeconds` i webpanelet er derfor normal/fallback-refresh, ikke eneste mekanisme for å oppdage endringer. Når skjermen er av, poller firmware config/status hyppigere en periode for rask reaktivering, men henter ikke `/public/display`.
+Firmware bruker WebSocket på `/public/realtime` for raske endringer. Hvis realtime faller ut, poller den `/public/realtime-state` hvert 5. sekund og henter full config/display når versjoner endrer seg. `configRefreshSeconds` i webpanelet er derfor normal/fallback-refresh, ikke eneste mekanisme for å oppdage endringer. Firmware rapporterer device-status omtrent hvert 2. minutt til `/public/device-status`; webpanelet poller `/api/device-status` omtrent hvert 15. sekund. Når skjermen er av, poller firmware config/status hyppigere en periode for rask reaktivering, men henter ikke `/public/display`.
 
 ## Homey-styring
 

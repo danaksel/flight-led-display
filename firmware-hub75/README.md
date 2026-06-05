@@ -9,6 +9,7 @@ Target firmware for the Waveshare ESP32-S3-RGB-Matrix controller and a 128 x 64 
 - Fetch display data only when the screen is active.
 - Listen for realtime config/display/sound events over WebSocket.
 - Poll realtime/config endpoints as fallback.
+- Send device heartbeat/status with Wi-Fi SSID, RSSI, IP, uptime, screen state, config OK and display OK.
 - Download and cache missing logos from the Worker.
 - Rotate locally between fetched flights.
 - Render the 128 x 64 layout used by the web emulator.
@@ -24,6 +25,7 @@ Firmware uses the public/device surface on the Worker:
 /public/realtime-state
 /public/device-config
 /public/sound-state
+/public/device-status
 /public/display
 /public/logos-rgb565/{CODE}.rgb565
 ```

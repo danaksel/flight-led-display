@@ -534,6 +534,7 @@ export default {
       if (url.pathname === "/pixel-editor") return htmlResponse(renderPixelEditorHtml());
       if (url.pathname === "/public/realtime") return realtimeResponse(request, env);
       if (url.pathname === "/public/realtime-state" && request.method === "GET") return realtimeStateResponse(env);
+      if (url.pathname === "/public/device-status" && request.method === "POST") return saveDeviceStatus(request, env);
       if (url.pathname === "/public/device-config" && request.method === "GET") return deviceConfigResponse(env);
       if (url.pathname === "/public/sound-state" && request.method === "GET") return soundStateResponse(env);
       if (url.pathname === "/public/display" && request.method === "GET") return flightsResponse(env, true);
@@ -909,6 +910,15 @@ async function realtimeStateResponse(env: Env): Promise<Response> {
 
 async function deviceStatusResponse(env: Env): Promise<Response> {
   return jsonResponse(await getDeviceStatus(env), 200, {
+    "Cache-Control": "no-store"
+  });
+}
+
+async function saveDeviceStatus(request: Request, env: Env): Promise<Response> {
+  const body = await request.json();
+  const status = normalizeDeviceStatus(body, new Date().toISOString());
+  await env.FLIGHT_DISPLAY_KV.put(DEVICE_STATUS_KEY, JSON.stringify(status));
+  return jsonResponse(status, 200, {
     "Cache-Control": "no-store"
   });
 }
