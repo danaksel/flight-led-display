@@ -66,6 +66,7 @@ type Config = {
       gateClosed: string;
       landed: string;
     };
+    colorPresets: ColorCustomSets;
     nightMode: {
       enabled: boolean;
       start: string;
@@ -73,6 +74,19 @@ type Config = {
       brightness: number;
     };
   };
+};
+
+type AirspaceColors = Config["device"]["lineColors"];
+type AirportBoardColors = Config["device"]["timetableColors"];
+type ClockColors = {
+  clockTopColor: string;
+  clockColor: string;
+};
+
+type ColorCustomSets = {
+  airspace?: AirspaceColors;
+  airportBoard?: AirportBoardColors;
+  clock?: ClockColors;
 };
 
 type DisplayBehaviorMode = "airspace" | "hybrid" | "airport_board" | "clock";
@@ -302,6 +316,33 @@ const displayModeOptions: Array<{ value: DisplayBehaviorMode; title: string; des
   { value: "clock", title: "Clock", description: "Show a full-screen clock." }
 ];
 
+const defaultAirspaceColors: AirspaceColors = {
+  airline: "#ffc777",
+  route: "#ffc777",
+  aircraft: "#ffc777",
+  context: "#ffaa00",
+  progress: "#aaaaaa",
+  routeProgress: "#00f900"
+};
+
+const defaultClockColors: ClockColors = {
+  clockTopColor: "#ffc777",
+  clockColor: "#f8ff00"
+};
+
+const defaultAirportBoardColors: AirportBoardColors = {
+  header: "#ff8f00",
+  data: "#ffc777",
+  time: "#ff8f00",
+  newTime: "#ff8f00",
+  canceled: "#444444",
+  gateGoToGate: "#ffc777",
+  gateBoarding: "#dbf93a",
+  gateClosing: "#ff6a00",
+  gateClosed: "#ff2600",
+  landed: "#dbf93a"
+};
+
 const defaultConfig: Config = {
   lat: 59.9139,
   lon: 10.7522,
@@ -338,28 +379,11 @@ const defaultConfig: Config = {
       track: "deg",
       verticalRate: "fpm"
     },
-    lineColors: {
-      airline: "#f4f7ff",
-      route: "#f4f7ff",
-      aircraft: "#f4f7ff",
-      context: "#f4f7ff",
-      progress: "#f7b500",
-      routeProgress: "#00d46a"
-    },
-    clockColor: "#081b6b",
-    clockTopColor: "#ffffff",
-    timetableColors: {
-      header: "#f7b500",
-      data: "#f4f7ff",
-      time: "#f4f7ff",
-      newTime: "#f7b500",
-      canceled: "#ff3b30",
-      gateGoToGate: "#00f900",
-      gateBoarding: "#00f900",
-      gateClosing: "#ff9300",
-      gateClosed: "#ff2600",
-      landed: "#00f900"
-    },
+    lineColors: defaultAirspaceColors,
+    clockColor: defaultClockColors.clockColor,
+    clockTopColor: defaultClockColors.clockTopColor,
+    timetableColors: defaultAirportBoardColors,
+    colorPresets: {},
     nightMode: {
       enabled: true,
       start: "23:00",
@@ -469,12 +493,72 @@ function buildEmulatorTickBuffer(audioContext: AudioContext): AudioBuffer {
   return audioBuffer;
 }
 
+function normalizeHexColor(value: unknown, fallback: string): string {
+  const raw = typeof value === "string" ? value.trim() : "";
+  return /^#[0-9a-fA-F]{6}$/.test(raw) ? raw.toLowerCase() : fallback;
+}
+
+function normalizeAirspaceColors(value: unknown): AirspaceColors {
+  const v = value && typeof value === "object" ? value as Partial<AirspaceColors> : {};
+  return {
+    airline: normalizeHexColor(v.airline, defaultAirspaceColors.airline),
+    route: normalizeHexColor(v.route, defaultAirspaceColors.route),
+    aircraft: normalizeHexColor(v.aircraft, defaultAirspaceColors.aircraft),
+    context: normalizeHexColor(v.context, defaultAirspaceColors.context),
+    progress: normalizeHexColor(v.progress, defaultAirspaceColors.progress),
+    routeProgress: normalizeHexColor(v.routeProgress, defaultAirspaceColors.routeProgress)
+  };
+}
+
+function normalizeAirportBoardColors(value: unknown): AirportBoardColors {
+  const v = value && typeof value === "object" ? value as Partial<AirportBoardColors> : {};
+  return {
+    header: normalizeHexColor(v.header, defaultAirportBoardColors.header),
+    data: normalizeHexColor(v.data, defaultAirportBoardColors.data),
+    time: normalizeHexColor(v.time, defaultAirportBoardColors.time),
+    newTime: normalizeHexColor(v.newTime, defaultAirportBoardColors.newTime),
+    canceled: normalizeHexColor(v.canceled, defaultAirportBoardColors.canceled),
+    gateGoToGate: normalizeHexColor(v.gateGoToGate, defaultAirportBoardColors.gateGoToGate),
+    gateBoarding: normalizeHexColor(v.gateBoarding, defaultAirportBoardColors.gateBoarding),
+    gateClosing: normalizeHexColor(v.gateClosing, defaultAirportBoardColors.gateClosing),
+    gateClosed: normalizeHexColor(v.gateClosed, defaultAirportBoardColors.gateClosed),
+    landed: normalizeHexColor(v.landed, defaultAirportBoardColors.landed)
+  };
+}
+
+function normalizeClockColors(value: unknown): ClockColors {
+  const v = value && typeof value === "object" ? value as Partial<ClockColors> : {};
+  return {
+    clockTopColor: normalizeHexColor(v.clockTopColor, defaultClockColors.clockTopColor),
+    clockColor: normalizeHexColor(v.clockColor, defaultClockColors.clockColor)
+  };
+}
+
+function firstCustomPresetValue(value: unknown): unknown {
+  if (!Array.isArray(value)) return value;
+  const custom = value.find((item) => item && typeof item === "object" && (item as { id?: unknown }).id !== "default" && (item as { values?: unknown }).values);
+  return custom && typeof custom === "object" ? (custom as { values?: unknown }).values : undefined;
+}
+
+function normalizeColorCustomSets(value: unknown): ColorCustomSets {
+  const v = value && typeof value === "object" ? value as Partial<Record<keyof ColorCustomSets, unknown>> : {};
+  const airspace = firstCustomPresetValue(v.airspace);
+  const airportBoard = firstCustomPresetValue(v.airportBoard);
+  const clock = firstCustomPresetValue(v.clock);
+  return {
+    ...(airspace ? { airspace: normalizeAirspaceColors(airspace) } : {}),
+    ...(airportBoard ? { airportBoard: normalizeAirportBoardColors(airportBoard) } : {}),
+    ...(clock ? { clock: normalizeClockColors(clock) } : {})
+  };
+}
+
 function normalizeConfig(input: Partial<Config> & Record<string, unknown>): Config {
   const device = (input.device as Partial<Config["device"]>) ?? {};
   const follow = (input.follow as Partial<Config["follow"]>) ?? {};
   const nightMode = (device.nightMode as Partial<Config["device"]["nightMode"]>) ?? {};
   const lineColors = (device.lineColors as Partial<Config["device"]["lineColors"]>) ?? {};
   const timetableColors = (device.timetableColors as Partial<Config["device"]["timetableColors"]>) ?? {};
+  const colorPresets = (device.colorPresets as Partial<ColorCustomSets>) ?? {};
   const followUnits = (device.followUnits as Partial<Config["device"]["followUnits"]>) ?? {};
 
   return {
@@ -519,28 +603,11 @@ function normalizeConfig(input: Partial<Config> & Record<string, unknown>): Conf
         track: followUnits.track ?? defaultConfig.device.followUnits.track,
         verticalRate: followUnits.verticalRate ?? defaultConfig.device.followUnits.verticalRate
       },
-      lineColors: {
-        airline: lineColors.airline ?? defaultConfig.device.lineColors.airline,
-        route: lineColors.route ?? defaultConfig.device.lineColors.route,
-        aircraft: lineColors.aircraft ?? defaultConfig.device.lineColors.aircraft,
-        context: lineColors.context ?? defaultConfig.device.lineColors.context,
-        progress: lineColors.progress ?? defaultConfig.device.lineColors.progress,
-        routeProgress: lineColors.routeProgress ?? defaultConfig.device.lineColors.routeProgress
-      },
-      clockColor: String(device.clockColor ?? defaultConfig.device.clockColor),
-      clockTopColor: String(device.clockTopColor ?? defaultConfig.device.clockTopColor),
-      timetableColors: {
-        header: timetableColors.header ?? defaultConfig.device.timetableColors.header,
-        data: timetableColors.data ?? defaultConfig.device.timetableColors.data,
-        time: timetableColors.time ?? defaultConfig.device.timetableColors.time,
-        newTime: timetableColors.newTime ?? defaultConfig.device.timetableColors.newTime,
-        canceled: timetableColors.canceled ?? defaultConfig.device.timetableColors.canceled,
-        gateGoToGate: timetableColors.gateGoToGate ?? defaultConfig.device.timetableColors.gateGoToGate,
-        gateBoarding: timetableColors.gateBoarding ?? defaultConfig.device.timetableColors.gateBoarding,
-        gateClosing: timetableColors.gateClosing ?? defaultConfig.device.timetableColors.gateClosing,
-        gateClosed: timetableColors.gateClosed ?? defaultConfig.device.timetableColors.gateClosed,
-        landed: timetableColors.landed ?? defaultConfig.device.timetableColors.landed
-      },
+      lineColors: normalizeAirspaceColors(lineColors),
+      clockColor: normalizeClockColors(device).clockColor,
+      clockTopColor: normalizeClockColors(device).clockTopColor,
+      timetableColors: normalizeAirportBoardColors(timetableColors),
+      colorPresets: normalizeColorCustomSets(colorPresets),
       nightMode: {
         enabled: nightMode.enabled !== false,
         start: String(nightMode.start ?? defaultConfig.device.nightMode.start),
@@ -1634,6 +1701,66 @@ function ColorPicker(props: { label: string; value: string; onChange: (value: st
   );
 }
 
+function ColorPresetManager<T extends object>(props: {
+  defaultValues: T;
+  customValues?: T;
+  currentValues: T;
+  onApply: (values: T) => void;
+  onSaveCustom: (values: T) => void;
+  children: React.ReactNode;
+}) {
+  const hasCustom = Boolean(props.customValues);
+  return (
+    <div style={{ ...cardStyle("0"), overflow: "hidden" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px" }}>
+        <div style={{ padding: "14px 14px 10px" }}>
+          <div style={{ fontSize: "12px", fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase" }}>Color set</div>
+          <div style={{ marginTop: "3px", fontSize: "12px", color: "var(--muted-foreground)" }}>{hasCustom ? "Custom saved" : "Default active"}</div>
+        </div>
+        <span style={{ marginRight: "14px", borderRadius: "999px", background: hasCustom ? "rgba(60, 36, 21, 0.1)" : "rgba(0, 249, 0, 0.12)", padding: "7px 10px", fontSize: "12px", fontWeight: 700 }}>
+          {hasCustom ? "Custom" : "Default"}
+        </span>
+      </div>
+      <div style={{ display: "grid", gap: "12px", padding: "0 14px 14px" }}>
+        {props.children}
+      </div>
+      <div style={{ display: "grid", gap: "10px", borderTop: "1px solid rgba(60, 36, 21, 0.1)", padding: "14px" }}>
+      <div style={{ display: "grid", gridTemplateColumns: hasCustom ? "1fr 1fr" : "1fr", gap: "10px" }}>
+        <button type="button" onClick={() => props.onSaveCustom({ ...(props.currentValues as object) } as T)} style={smallButtonStyle("primary")}>
+          Save as Custom
+        </button>
+        {hasCustom ? (
+          <button type="button" onClick={() => props.onApply(props.customValues as T)} style={smallButtonStyle("secondary")}>
+            Apply Custom
+          </button>
+        ) : null}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: "10px" }}>
+        <button type="button" onClick={() => props.onApply(props.defaultValues)} style={smallButtonStyle("secondary")}>
+          Revert to Default
+        </button>
+      </div>
+      <div style={{ fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.4 }}>
+        Default is built in. Custom stores your latest saved color changes.
+      </div>
+      </div>
+    </div>
+  );
+}
+
+function smallButtonStyle(variant: "primary" | "secondary", disabled = false): React.CSSProperties {
+  return {
+    minHeight: "42px",
+    borderRadius: "8px",
+    border: variant === "primary" ? 0 : "1px solid var(--border-mid)",
+    background: variant === "primary" ? "var(--primary)" : "var(--card)",
+    color: variant === "primary" ? "#fff" : "var(--foreground)",
+    padding: "0 12px",
+    opacity: disabled ? 0.45 : 1,
+    cursor: disabled ? "not-allowed" : "pointer"
+  };
+}
+
 function StatusPill(props: { label: string; tone: "good" | "idle" | "warn" | "error" }) {
   const palette = {
     good: { background: "rgba(0, 249, 0, 0.13)", color: "#145f1b", dot: "#00c92e" },
@@ -2296,6 +2423,19 @@ export default function App() {
     markDirty();
   }
 
+  function saveCustomColorSet<T extends object>(group: keyof ColorCustomSets, values: T) {
+    updateConfig((current) => ({
+      ...current,
+      device: {
+        ...current.device,
+        colorPresets: normalizeColorCustomSets({
+          ...current.device.colorPresets,
+          [group]: values
+        })
+      }
+    }));
+  }
+
   function activateSection(index: number) {
     slidesRef.current?.scrollTo({ left: slideIndexForSection(index) * (slidesRef.current?.clientWidth ?? 0), behavior: "auto" });
     setActiveSection(index);
@@ -2461,10 +2601,18 @@ export default function App() {
 
           <section style={slideStyle("clock")}>
             <div style={{ display: "grid", gap: "14px" }}>
-              <div style={{ display: "grid", gap: "12px", gridTemplateColumns: "1fr 1fr" }}>
-                <ColorPicker label="Clock top" value={config.device.clockTopColor} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, clockTopColor: value } }))} />
-                <ColorPicker label="Clock bottom" value={config.device.clockColor} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, clockColor: value } }))} />
-              </div>
+              <ColorPresetManager<ClockColors>
+                defaultValues={defaultClockColors}
+                customValues={config.device.colorPresets.clock}
+                currentValues={{ clockTopColor: config.device.clockTopColor, clockColor: config.device.clockColor }}
+                onApply={(values) => updateConfig((current) => ({ ...current, device: { ...current.device, clockTopColor: values.clockTopColor, clockColor: values.clockColor } }))}
+                onSaveCustom={(values) => saveCustomColorSet("clock", values)}
+              >
+                <div style={{ display: "grid", gap: "12px", gridTemplateColumns: "1fr 1fr" }}>
+                  <ColorPicker label="Clock top" value={config.device.clockTopColor} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, clockTopColor: value } }))} />
+                  <ColorPicker label="Clock bottom" value={config.device.clockColor} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, clockColor: value } }))} />
+                </div>
+              </ColorPresetManager>
               <ToggleRow label="Clock tick enabled" checked={config.device.clockTickEnabled} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, clockTickEnabled: value } }))} />
               <SliderField label="Clock tick volume" value={config.device.clockTickVolumePercent} min={0} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, clockTickVolumePercent: value } }))} />
             </div>
@@ -2581,16 +2729,24 @@ export default function App() {
                 </div>
                 <SliderField label="Cycle seconds" value={config.device.displayCycleSeconds} min={2} max={30} suffix=" s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, displayCycleSeconds: value } }))} />
                 <SliderField label="Scroll speed" value={config.device.scrollPixelsPerSecond} min={2} max={30} suffix=" px/s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, scrollPixelsPerSecond: value } }))} />
-                <div style={{ display: "grid", gap: "12px", gridTemplateColumns: "1fr 1fr" }}>
-                  {Object.entries(config.device.lineColors).map(([key, value]) => (
-                    <ColorPicker
-                      key={key}
-                      label={lineColorLabels[key as keyof Config["device"]["lineColors"]] ?? key}
-                      value={value}
-                      onChange={(nextValue) => updateConfig((current) => ({ ...current, device: { ...current.device, lineColors: { ...current.device.lineColors, [key]: nextValue } } }))}
-                    />
-                  ))}
-                </div>
+                <ColorPresetManager<AirspaceColors>
+                  defaultValues={defaultAirspaceColors}
+                  customValues={config.device.colorPresets.airspace}
+                  currentValues={config.device.lineColors}
+                  onApply={(values) => updateConfig((current) => ({ ...current, device: { ...current.device, lineColors: values } }))}
+                  onSaveCustom={(values) => saveCustomColorSet("airspace", values)}
+                >
+                  <div style={{ display: "grid", gap: "12px", gridTemplateColumns: "1fr 1fr" }}>
+                    {Object.entries(config.device.lineColors).map(([key, value]) => (
+                      <ColorPicker
+                        key={key}
+                        label={lineColorLabels[key as keyof Config["device"]["lineColors"]] ?? key}
+                        value={value}
+                        onChange={(nextValue) => updateConfig((current) => ({ ...current, device: { ...current.device, lineColors: { ...current.device.lineColors, [key]: nextValue } } }))}
+                      />
+                    ))}
+                  </div>
+                </ColorPresetManager>
               </Advanced>
             </div>
           </section>
@@ -2605,16 +2761,24 @@ export default function App() {
               <SliderField label="Departures lookahead" value={config.device.departureAvinorWindowHours} min={1} max={24} suffix=" h" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, departureAvinorWindowHours: value, avinorWindowHours: value } }))} />
               <SliderField label="Arrivals lookahead" value={config.device.arrivalAvinorWindowHours} min={1} max={24} suffix=" h" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, arrivalAvinorWindowHours: value } }))} />
               <Advanced title="Airport Board colors">
-                <div style={{ display: "grid", gap: "12px", gridTemplateColumns: "1fr 1fr" }}>
-                  {Object.entries(config.device.timetableColors).map(([key, value]) => (
-                    <ColorPicker
-                      key={key}
-                      label={timetableColorLabels[key as keyof Config["device"]["timetableColors"]] ?? key}
-                      value={value}
-                      onChange={(nextValue) => updateConfig((current) => ({ ...current, device: { ...current.device, timetableColors: { ...current.device.timetableColors, [key]: nextValue } } }))}
-                    />
-                  ))}
-                </div>
+                <ColorPresetManager<AirportBoardColors>
+                  defaultValues={defaultAirportBoardColors}
+                  customValues={config.device.colorPresets.airportBoard}
+                  currentValues={config.device.timetableColors}
+                  onApply={(values) => updateConfig((current) => ({ ...current, device: { ...current.device, timetableColors: values } }))}
+                  onSaveCustom={(values) => saveCustomColorSet("airportBoard", values)}
+                >
+                  <div style={{ display: "grid", gap: "12px", gridTemplateColumns: "1fr 1fr" }}>
+                    {Object.entries(config.device.timetableColors).map(([key, value]) => (
+                      <ColorPicker
+                        key={key}
+                        label={timetableColorLabels[key as keyof Config["device"]["timetableColors"]] ?? key}
+                        value={value}
+                        onChange={(nextValue) => updateConfig((current) => ({ ...current, device: { ...current.device, timetableColors: { ...current.device.timetableColors, [key]: nextValue } } }))}
+                      />
+                    ))}
+                  </div>
+                </ColorPresetManager>
               </Advanced>
             </div>
           </section>

@@ -95,12 +95,26 @@ type DeviceSettings = {
     gateClosed: string;
     landed: string;
   };
+  colorPresets: ColorCustomSets;
   nightMode: {
     enabled: boolean;
     start: string;
     end: string;
     brightness: number;
   };
+};
+
+type AirspaceColors = DeviceSettings["lineColors"];
+type AirportBoardColors = DeviceSettings["timetableColors"];
+type ClockColors = {
+  clockTopColor: string;
+  clockColor: string;
+};
+
+type ColorCustomSets = {
+  airspace?: AirspaceColors;
+  airportBoard?: AirportBoardColors;
+  clock?: ClockColors;
 };
 
 type DisplayBehaviorMode = "airspace" | "hybrid" | "airport_board" | "clock";
@@ -455,6 +469,33 @@ const AIRCRAFT_CATEGORY_LABELS: Record<AircraftCategoryCode, string> = {
 };
 
 const DEFAULT_ALLOWED_AIRCRAFT_CATEGORIES: AircraftCategoryCode[] = ["P", "C", "M", "J", "H", "B", "G", "D", "V", "O", "N"];
+
+const DEFAULT_AIRSPACE_COLORS: AirspaceColors = {
+  airline: "#ffc777",
+  route: "#ffc777",
+  aircraft: "#ffc777",
+  context: "#ffaa00",
+  progress: "#aaaaaa",
+  routeProgress: "#00f900"
+};
+
+const DEFAULT_CLOCK_COLORS: ClockColors = {
+  clockTopColor: "#ffc777",
+  clockColor: "#f8ff00"
+};
+
+const DEFAULT_AIRPORT_BOARD_COLORS: AirportBoardColors = {
+  header: "#ff8f00",
+  data: "#ffc777",
+  time: "#ff8f00",
+  newTime: "#ff8f00",
+  canceled: "#444444",
+  gateGoToGate: "#ffc777",
+  gateBoarding: "#dbf93a",
+  gateClosing: "#ff6a00",
+  gateClosed: "#ff2600",
+  landed: "#dbf93a"
+};
 
 export class RealtimeHub implements DurableObject {
   constructor(private state: DurableObjectState, private env: Env) {
@@ -1445,9 +1486,10 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
     timezone: typeof v.timezone === "string" && v.timezone.trim() ? v.timezone.slice(0, 64) : "Europe/Oslo",
     followUnits: normalizeFollowUnits((v as { followUnits?: unknown }).followUnits),
     lineColors: normalizeLineColors((v as { lineColors?: unknown }).lineColors),
-    clockColor: normalizeHexColor((v as { clockColor?: unknown }).clockColor, "#081b6b"),
-    clockTopColor: normalizeHexColor((v as { clockTopColor?: unknown }).clockTopColor, "#ffffff"),
+    clockColor: normalizeHexColor((v as { clockColor?: unknown }).clockColor, DEFAULT_CLOCK_COLORS.clockColor),
+    clockTopColor: normalizeHexColor((v as { clockTopColor?: unknown }).clockTopColor, DEFAULT_CLOCK_COLORS.clockTopColor),
     timetableColors: normalizeTimetableColors((v as { timetableColors?: unknown }).timetableColors),
+    colorPresets: normalizeColorCustomSets((v as { colorPresets?: unknown }).colorPresets),
     nightMode: {
       enabled: typeof night.enabled === "boolean" ? night.enabled : true,
       start: normalizeTimeString(night.start, "23:00"),
@@ -1503,16 +1545,16 @@ function oneOf<T extends string>(value: unknown, allowed: readonly T[], fallback
 function normalizeTimetableColors(value: unknown): DeviceSettings["timetableColors"] {
   const v = value && typeof value === "object" ? value as Partial<DeviceSettings["timetableColors"]> : {};
   return {
-    header: normalizeHexColor(v.header, "#f7b500"),
-    data: normalizeHexColor(v.data, "#f4f7ff"),
-    time: normalizeHexColor(v.time, "#f4f7ff"),
-    newTime: normalizeHexColor(v.newTime, "#f7b500"),
-    canceled: normalizeHexColor(v.canceled, "#ff3b30"),
-    gateGoToGate: normalizeHexColor(v.gateGoToGate, "#00f900"),
-    gateBoarding: normalizeHexColor(v.gateBoarding, "#00f900"),
-    gateClosing: normalizeHexColor(v.gateClosing, "#ff9300"),
-    gateClosed: normalizeHexColor(v.gateClosed, "#ff2600"),
-    landed: normalizeHexColor(v.landed, "#00f900")
+    header: normalizeHexColor(v.header, DEFAULT_AIRPORT_BOARD_COLORS.header),
+    data: normalizeHexColor(v.data, DEFAULT_AIRPORT_BOARD_COLORS.data),
+    time: normalizeHexColor(v.time, DEFAULT_AIRPORT_BOARD_COLORS.time),
+    newTime: normalizeHexColor(v.newTime, DEFAULT_AIRPORT_BOARD_COLORS.newTime),
+    canceled: normalizeHexColor(v.canceled, DEFAULT_AIRPORT_BOARD_COLORS.canceled),
+    gateGoToGate: normalizeHexColor(v.gateGoToGate, DEFAULT_AIRPORT_BOARD_COLORS.gateGoToGate),
+    gateBoarding: normalizeHexColor(v.gateBoarding, DEFAULT_AIRPORT_BOARD_COLORS.gateBoarding),
+    gateClosing: normalizeHexColor(v.gateClosing, DEFAULT_AIRPORT_BOARD_COLORS.gateClosing),
+    gateClosed: normalizeHexColor(v.gateClosed, DEFAULT_AIRPORT_BOARD_COLORS.gateClosed),
+    landed: normalizeHexColor(v.landed, DEFAULT_AIRPORT_BOARD_COLORS.landed)
   };
 }
 
@@ -1543,12 +1585,38 @@ function timezonePosixForFirmware(timezone: string): string {
 function normalizeLineColors(value: unknown): DeviceSettings["lineColors"] {
   const v = value && typeof value === "object" ? value as Partial<DeviceSettings["lineColors"]> : {};
   return {
-    airline: normalizeHexColor(v.airline, "#f4f7ff"),
-    route: normalizeHexColor(v.route, "#f4f7ff"),
-    aircraft: normalizeHexColor(v.aircraft, "#f4f7ff"),
-    context: normalizeHexColor(v.context, "#f4f7ff"),
-    progress: normalizeHexColor(v.progress, "#f7b500"),
-    routeProgress: normalizeHexColor(v.routeProgress, "#00d46a")
+    airline: normalizeHexColor(v.airline, DEFAULT_AIRSPACE_COLORS.airline),
+    route: normalizeHexColor(v.route, DEFAULT_AIRSPACE_COLORS.route),
+    aircraft: normalizeHexColor(v.aircraft, DEFAULT_AIRSPACE_COLORS.aircraft),
+    context: normalizeHexColor(v.context, DEFAULT_AIRSPACE_COLORS.context),
+    progress: normalizeHexColor(v.progress, DEFAULT_AIRSPACE_COLORS.progress),
+    routeProgress: normalizeHexColor(v.routeProgress, DEFAULT_AIRSPACE_COLORS.routeProgress)
+  };
+}
+
+function normalizeClockColors(value: unknown): ClockColors {
+  const v = value && typeof value === "object" ? value as Partial<ClockColors> : {};
+  return {
+    clockTopColor: normalizeHexColor(v.clockTopColor, DEFAULT_CLOCK_COLORS.clockTopColor),
+    clockColor: normalizeHexColor(v.clockColor, DEFAULT_CLOCK_COLORS.clockColor)
+  };
+}
+
+function firstCustomPresetValue(value: unknown): unknown {
+  if (!Array.isArray(value)) return value;
+  const custom = value.find((item) => item && typeof item === "object" && (item as { id?: unknown }).id !== "default" && (item as { values?: unknown }).values);
+  return custom && typeof custom === "object" ? (custom as { values?: unknown }).values : undefined;
+}
+
+function normalizeColorCustomSets(value: unknown): ColorCustomSets {
+  const v = value && typeof value === "object" ? value as Partial<Record<keyof ColorCustomSets, unknown>> : {};
+  const airspace = firstCustomPresetValue(v.airspace);
+  const airportBoard = firstCustomPresetValue(v.airportBoard);
+  const clock = firstCustomPresetValue(v.clock);
+  return {
+    ...(airspace ? { airspace: normalizeLineColors(airspace) } : {}),
+    ...(airportBoard ? { airportBoard: normalizeTimetableColors(airportBoard) } : {}),
+    ...(clock ? { clock: normalizeClockColors(clock) } : {})
   };
 }
 
