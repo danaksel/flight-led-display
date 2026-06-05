@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import L from "leaflet";
-import frameImage from "./assets/led-frame.png";
 import { IconApi, IconClock, IconDisplay, IconMapPin, IconPlane, IconTimetable, SkyframeLogo } from "./components/Icons";
 
 type AircraftCategoryCode = "P" | "C" | "M" | "J" | "T" | "H" | "B" | "G" | "D" | "V" | "O" | "N";
@@ -2073,20 +2072,15 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
 
   return (
     <div style={{ flexShrink: 0, marginBottom: "20px" }}>
-      <div style={{ position: "relative", aspectRatio: "1209 / 686", width: "100%", overflow: "hidden" }}>
+      <div style={{ width: "100%", overflow: "hidden" }}>
         <div
           style={{
-            position: "absolute",
-            left: "14.31%",
-            top: "17.06%",
-            width: "70.89%",
-            height: "65.45%",
-            zIndex: 0,
             display: "flex",
             alignItems: "center",
             background: "#000000",
             justifyContent: "center",
-            overflow: "hidden"
+            overflow: "hidden",
+            width: "100%"
           }}
         >
           <canvas
@@ -2102,7 +2096,6 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
             }}
           />
         </div>
-        <img src={frameImage} alt="SKYFRAME LED frame" style={{ position: "absolute", inset: 0, zIndex: 1, width: "100%", height: "100%", objectFit: "contain" }} />
       </div>
     </div>
   );
