@@ -35,6 +35,7 @@ type Config = {
     departureAvinorWindowHours: number;
     arrivalAvinorWindowHours: number;
     timetableScrollPixelsPerSecond: number;
+    timetableTransitionMs: number;
     scrollPixelsPerSecond: number;
     configRefreshSeconds: number;
     timezone: string;
@@ -248,7 +249,6 @@ function sectionIndexForSlide(slideIndex: number): number {
 }
 
 const defaultAircraftCategories: AircraftCategoryCode[] = ["P", "C", "M", "J", "H", "B", "G", "D", "V", "O", "N"];
-const timetableKindTransitionMs = 200;
 
 const categoryLabels: Record<AircraftCategoryCode, { title: string; description: string }> = {
   P: { title: "Passenger", description: "Kommersielle passasjerfly" },
@@ -313,6 +313,7 @@ const defaultConfig: Config = {
     departureAvinorWindowHours: 4,
     arrivalAvinorWindowHours: 4,
     timetableScrollPixelsPerSecond: 18,
+    timetableTransitionMs: 400,
     scrollPixelsPerSecond: 9,
     configRefreshSeconds: 300,
     timezone: "Europe/Oslo",
@@ -493,6 +494,7 @@ function normalizeConfig(input: Partial<Config> & Record<string, unknown>): Conf
       departureAvinorWindowHours: Number(device.departureAvinorWindowHours ?? device.avinorWindowHours ?? defaultConfig.device.departureAvinorWindowHours),
       arrivalAvinorWindowHours: Number(device.arrivalAvinorWindowHours ?? device.avinorWindowHours ?? defaultConfig.device.arrivalAvinorWindowHours),
       timetableScrollPixelsPerSecond: Number(device.timetableScrollPixelsPerSecond ?? defaultConfig.device.timetableScrollPixelsPerSecond),
+      timetableTransitionMs: Number(device.timetableTransitionMs ?? defaultConfig.device.timetableTransitionMs),
       scrollPixelsPerSecond: Number(device.scrollPixelsPerSecond ?? defaultConfig.device.scrollPixelsPerSecond),
       configRefreshSeconds: Number(device.configRefreshSeconds ?? defaultConfig.device.configRefreshSeconds),
       timezone: String(device.timezone ?? defaultConfig.device.timezone),
@@ -1071,12 +1073,12 @@ function drawTimetableTopFade(ctx: CanvasRenderingContext2D) {
   ctx.save();
   ctx.fillStyle = "#000000";
   ctx.fillRect(0, 0, 128, 14);
-  const gradient = ctx.createLinearGradient(0, 14, 0, 21);
-  gradient.addColorStop(0, "rgba(0, 0, 0, 1)");
-  gradient.addColorStop(0.45, "rgba(0, 0, 0, 0.72)");
+  const gradient = ctx.createLinearGradient(0, 14, 0, 23);
+  gradient.addColorStop(0, "rgba(0, 0, 0, 0.95)");
+  gradient.addColorStop(0.38, "rgba(0, 0, 0, 0.62)");
   gradient.addColorStop(1, "rgba(0, 0, 0, 0)");
   ctx.fillStyle = gradient;
-  ctx.fillRect(0, 14, 128, 8);
+  ctx.fillRect(0, 14, 128, 10);
   ctx.restore();
 }
 
@@ -1150,7 +1152,7 @@ function getIdleTransition(screens: IdleScreen[], currentIndex: number, config: 
   const previousScreen = screens[(currentIndex - 1 + screens.length) % screens.length];
 
   if (previousScreen && previousScreen.kind !== screen.kind) {
-    const transitionMs = timetableKindTransitionMs;
+    const transitionMs = clamp(config.device.timetableTransitionMs || defaultConfig.device.timetableTransitionMs, 200, 1000);
     if (elapsed < transitionMs) {
       const progress = easeInOut(Math.min(1, elapsed / transitionMs));
       return {
@@ -1166,7 +1168,7 @@ function getIdleTransition(screens: IdleScreen[], currentIndex: number, config: 
 
   const kindChanges = screen.kind !== nextScreen.kind;
   const rowTravel = kindChanges ? 64 : 44;
-  const transitionMs = kindChanges ? timetableKindTransitionMs : idleTransitionMs(config, rowTravel);
+  const transitionMs = kindChanges ? clamp(config.device.timetableTransitionMs || defaultConfig.device.timetableTransitionMs, 200, 1000) : idleTransitionMs(config, rowTravel);
   const transitionStart = Math.max(0, cycleMs - transitionMs);
   if (elapsed < transitionStart) return { currentBaseY: 20, headerText: title, nextBaseY: null, nextScreen: null };
 
@@ -1441,7 +1443,7 @@ function ToggleRow(props: { label: string; hint?: string; checked: boolean; onCh
   );
 }
 
-function SliderField(props: { label: string; value: number; min: number; max: number; step?: number; suffix?: string; onChange: (value: number) => void }) {
+function SliderField(props: { label: string; value: number; min: number; max: number; step?: number; suffix?: string; formatValue?: (value: number) => string; onChange: (value: number) => void }) {
   const range = props.max - props.min;
   const progress = range > 0 ? clamp(((props.value - props.min) / range) * 100, 0, 100) : 0;
   return (
@@ -1449,7 +1451,7 @@ function SliderField(props: { label: string; value: number; min: number; max: nu
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
         <label style={panelLabelStyle()}>{props.label}</label>
         <span style={{ fontFamily: '"JetBrains Mono", monospace', fontSize: "13px" }}>
-          {Math.round(props.value)}
+          {props.formatValue ? props.formatValue(props.value) : Math.round(props.value)}
           {props.suffix ?? ""}
         </span>
       </div>
@@ -2440,6 +2442,7 @@ export default function App() {
             <div style={{ display: "grid", gap: "14px" }}>
               <SliderField label="Hold each timetable page" value={config.device.timetableCycleSeconds} min={2} max={60} suffix=" s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, timetableCycleSeconds: value } }))} />
               <SliderField label="Rullehastighet" value={config.device.timetableScrollPixelsPerSecond} min={4} max={40} suffix=" px/s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, timetableScrollPixelsPerSecond: value } }))} />
+              <SliderField label="Bytteanimasjon" value={config.device.timetableTransitionMs / 1000} min={0.2} max={1} step={0.1} suffix=" s" formatValue={(value) => value.toFixed(1)} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, timetableTransitionMs: Math.round(value * 1000) } }))} />
               <SliderField label="Avganger antall" value={config.device.departureTimetableItemCount} min={4} max={40} step={4} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, departureTimetableItemCount: value, timetableItemCount: value } }))} />
               <SliderField label="Ankomster antall" value={config.device.arrivalTimetableItemCount} min={4} max={40} step={4} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, arrivalTimetableItemCount: value } }))} />
               <SliderField label="Avganger fremover" value={config.device.departureAvinorWindowHours} min={1} max={24} suffix=" t" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, departureAvinorWindowHours: value, avinorWindowHours: value } }))} />

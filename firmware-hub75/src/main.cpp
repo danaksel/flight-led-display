@@ -74,7 +74,7 @@ constexpr uint8_t ClockTickVolumePercentDefault = 20;
 constexpr uint8_t ClockRenderIntervalMs = 15;
 constexpr uint8_t RealtimeStatePollSeconds = 5;
 constexpr uint32_t DeviceStatusIntervalMs = 120000;
-constexpr uint16_t TimetableKindTransitionMs = 200;
+constexpr uint16_t TimetableKindTransitionDefaultMs = 400;
 constexpr uint8_t MainLoopDelayMs = 20;
 constexpr uint8_t WifiReconnectSeconds = 30;
 constexpr uint16_t ConfigFallbackPollSeconds = 300;
@@ -127,6 +127,7 @@ uint16_t displayCycleSeconds = 5;
 uint16_t timetableCycleSeconds = 10;
 uint16_t liveScrollPixelsPerSecond = 9;
 uint16_t timetableScrollPixelsPerSecond = 18;
+uint16_t timetableTransitionMs = TimetableKindTransitionDefaultMs;
 IdleScreen idleScreens[MaxIdleScreens];
 uint8_t idleScreenCount = 0;
 uint8_t currentIdleScreen = 0;
@@ -1497,7 +1498,7 @@ int16_t idleScrollOffset()
     if (idleScreenCount <= 1) return 0;
 
     const uint16_t rowTravel = idleKindChangingToNext() ? 64 : 44;
-    const uint32_t transitionMs = idleKindChangingToNext() ? TimetableKindTransitionMs : idleTransitionMs(rowTravel);
+    const uint32_t transitionMs = idleKindChangingToNext() ? timetableTransitionMs : idleTransitionMs(rowTravel);
     const float progress = idleTransitionProgress(transitionMs, false);
     return static_cast<int16_t>(roundf(static_cast<float>(rowTravel) * easeInOut(progress)));
 }
@@ -1505,7 +1506,7 @@ int16_t idleScrollOffset()
 int16_t idleRowsBaseY()
 {
     if (!idleKindIntroActive) return 20 - idleScrollOffset();
-    const float progress = easeInOut(idleTransitionProgress(TimetableKindTransitionMs, true));
+    const float progress = easeInOut(idleTransitionProgress(timetableTransitionMs, true));
     if (progress >= 1.0f) return 20;
     return static_cast<int16_t>(roundf(64.0f - 44.0f * progress));
 }
@@ -1517,14 +1518,14 @@ String idleAnimatedHeader(const String &title)
 
     if (idleKindIntroActive)
     {
-        const float progress = idleTransitionProgress(TimetableKindTransitionMs, true);
+        const float progress = idleTransitionProgress(timetableTransitionMs, true);
         const size_t visible = min(length, static_cast<size_t>(ceilf(static_cast<float>(length) * progress)));
         return title.substring(0, visible);
     }
 
     if (!idleKindChangingToNext()) return title;
 
-    const float progress = idleTransitionProgress(TimetableKindTransitionMs, false);
+    const float progress = idleTransitionProgress(timetableTransitionMs, false);
     if (progress <= 0.0f) return title;
     const size_t visible = min(length, static_cast<size_t>(floorf(static_cast<float>(length) * (1.0f - progress))));
     return title.substring(0, visible);
@@ -1534,12 +1535,12 @@ void drawTimetableTopFadeMask()
 {
     const uint16_t black = panelColor(0, 0, 0);
     display->fillRect(0, 0, PanelWidth, 14, black);
-    for (uint8_t y = 15; y <= 18; ++y)
+    for (uint8_t y = 15; y <= 23; ++y)
     {
-        const uint8_t stride = y == 15 ? 1 : y == 16 ? 2 : y == 17 ? 3 : 4;
+        const uint8_t stride = y == 15 ? 2 : y <= 17 ? 3 : y <= 20 ? 4 : 6;
         for (uint8_t x = 0; x < PanelWidth; ++x)
         {
-            if (stride == 1 || ((x + y) % stride == 0))
+            if ((x + y) % stride == 0)
             {
                 display->drawPixel(x, y, black);
             }
@@ -2320,6 +2321,7 @@ bool applyDeviceConfigPayload(const String &body, int httpCode, bool httpOk)
     timetableCycleSeconds = constrain(device["timetableCycleSeconds"] | 10, 3, 120);
     liveScrollPixelsPerSecond = constrain(device["scrollPixelsPerSecond"] | 9, 2, 30);
     timetableScrollPixelsPerSecond = constrain(device["timetableScrollPixelsPerSecond"] | 18, 4, 40);
+    timetableTransitionMs = constrain(device["timetableTransitionMs"] | TimetableKindTransitionDefaultMs, 200, 1000);
     const String nextTimeZone = valueOr(device["timezone"], deviceTimeZone);
     const String nextTimeZonePosix = valueOr(device["timezonePosix"], String(OsloTimeZone));
 
@@ -3094,7 +3096,7 @@ void loop()
 
     if (idleLayoutActive)
     {
-        const bool introScrolling = idleKindIntroActive && millis() - idleCycleStartedAt < TimetableKindTransitionMs;
+        const bool introScrolling = idleKindIntroActive && millis() - idleCycleStartedAt < timetableTransitionMs;
         const bool scrolling = idleScrollOffset() > 0 || introScrolling;
         const uint16_t renderIntervalMs = scrolling
             ? max<uint16_t>(20, min<uint16_t>(80, 1000 / max<uint16_t>(1, timetableScrollPixelsPerSecond)))

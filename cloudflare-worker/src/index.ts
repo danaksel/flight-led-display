@@ -63,6 +63,7 @@ type DeviceSettings = {
   departureAvinorWindowHours: number;
   arrivalAvinorWindowHours: number;
   timetableScrollPixelsPerSecond: number;
+  timetableTransitionMs: number;
   scrollPixelsPerSecond: number;
   configRefreshSeconds: number;
   timezone: string;
@@ -1435,6 +1436,7 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
     departureAvinorWindowHours: clampNumber((v as { departureAvinorWindowHours?: unknown }).departureAvinorWindowHours, 1, 24, clampNumber((v as { avinorWindowHours?: unknown }).avinorWindowHours, 1, 24, 4)),
     arrivalAvinorWindowHours: clampNumber((v as { arrivalAvinorWindowHours?: unknown }).arrivalAvinorWindowHours, 1, 24, clampNumber((v as { avinorWindowHours?: unknown }).avinorWindowHours, 1, 24, 4)),
     timetableScrollPixelsPerSecond: clampNumber((v as { timetableScrollPixelsPerSecond?: unknown }).timetableScrollPixelsPerSecond, 4, 40, 18),
+    timetableTransitionMs: clampNumber((v as { timetableTransitionMs?: unknown }).timetableTransitionMs, 200, 1000, 400),
     scrollPixelsPerSecond: clampNumber(v.scrollPixelsPerSecond, 2, 30, 9),
     configRefreshSeconds: clampNumber(v.configRefreshSeconds, 60, 3600, 300),
     timezone: typeof v.timezone === "string" && v.timezone.trim() ? v.timezone.slice(0, 64) : "Europe/Oslo",

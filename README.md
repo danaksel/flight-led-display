@@ -61,7 +61,7 @@ Fungerende ende-til-ende på Waveshare ESP32-S3-RGB-Matrix og 128 x 64 HUB75-pan
 - Tidstabellrader viser tid, bynavn, flyselskap/gate-felt og statusikon med 3 px ytter-margin
 - Bynavn scroller inni eget felt ved lange navn uten å lekke over i andre felt
 - Departures/arrivals kan ha separate antall og separate timer fremover
-- Bytte mellom departures og arrivals har 0,2 s outro/intro: header slettes/skrives bokstavvis, rutene ruller ut/inn, og klokken står hele tiden
+- Bytte mellom departures og arrivals har justerbar outro/intro fra 0,2 til 1,0 s: header slettes/skrives bokstavvis, rutene ruller ut/inn, og klokken står hele tiden
 - Vanlig sidebytte innen samme type bruker normal rullehastighet
 - Timetabellscroll bruker maskering ved separatorlinjen slik at rader forsvinner gradvis under headeren
 - Tom tidstabell viser `No departures/arrivals the next X hours`, der X kommer fra Avinor-vinduet
