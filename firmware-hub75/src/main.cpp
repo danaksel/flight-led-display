@@ -2439,7 +2439,7 @@ bool applyDeviceConfigPayload(const String &body, int httpCode, bool httpOk)
     displayCycleSeconds = constrain(device["displayCycleSeconds"] | 5, 2, 30);
     timetableCycleSeconds = constrain(device["timetableCycleSeconds"] | 10, 3, 120);
     liveScrollPixelsPerSecond = constrain(device["scrollPixelsPerSecond"] | 9, 2, 30);
-    timetableScrollPixelsPerSecond = constrain(device["timetableScrollPixelsPerSecond"] | 18, 4, 40);
+    timetableScrollPixelsPerSecond = constrain(device["timetableScrollPixelsPerSecond"] | 40, 4, 100);
     timetableTransitionMs = constrain(device["timetableTransitionMs"] | TimetableKindTransitionDefaultMs, 200, 1000);
     const String nextTimeZone = valueOr(device["timezone"], deviceTimeZone);
     const String nextTimeZonePosix = valueOr(device["timezonePosix"], String(OsloTimeZone));

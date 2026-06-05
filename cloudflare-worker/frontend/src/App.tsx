@@ -18,7 +18,7 @@ type Config = {
   };
   device: {
     enabled: boolean;
-    displayMode: "flight" | "clock";
+    displayMode: DisplayBehaviorMode;
     airspaceMonitoringEnabled: boolean;
     allowedAircraftCategories: AircraftCategoryCode[];
     brightness: number;
@@ -75,6 +75,8 @@ type Config = {
     };
   };
 };
+
+type DisplayBehaviorMode = "airspace" | "hybrid" | "airport_board" | "clock";
 
 type ScreenState = {
   active: boolean;
@@ -228,15 +230,15 @@ type Section = {
 };
 
 const sections: Section[] = [
-  { id: "display", label: "DISPLAY", icon: IconDisplay },
-  { id: "aircraft", label: "AIRCRAFT", icon: IconPlane },
+  { id: "display", label: "GENERAL", icon: IconDisplay },
+  { id: "aircraft", label: "AIRSPACE", icon: IconPlane },
+  { id: "timetable", label: "AIRPORT BOARD", icon: IconTimetable },
   { id: "clock", label: "CLOCK", icon: IconClock },
-  { id: "timetable", label: "TIME TABLE", icon: IconTimetable },
   { id: "location", label: "LOCATION", icon: IconMapPin },
   { id: "api", label: "API DATA", icon: IconApi }
 ];
 
-const slideOrder: SectionId[] = ["location", "display", "clock", "aircraft", "timetable", "api"];
+const slideOrder: SectionId[] = ["display", "aircraft", "timetable", "clock", "location", "api"];
 
 function slideIndexForSection(sectionIndex: number): number {
   const section = sections[clamp(sectionIndex, 0, sections.length - 1)];
@@ -248,44 +250,58 @@ function sectionIndexForSlide(slideIndex: number): number {
   return Math.max(0, sections.findIndex((section) => section.id === sectionId));
 }
 
+function slideStyle(sectionId: SectionId) {
+  return {
+    ...appStyles.slide,
+    order: slideOrder.indexOf(sectionId)
+  };
+}
+
 const defaultAircraftCategories: AircraftCategoryCode[] = ["P", "C", "M", "J", "H", "B", "G", "D", "V", "O", "N"];
 
 const categoryLabels: Record<AircraftCategoryCode, { title: string; description: string }> = {
-  P: { title: "Passenger", description: "Kommersielle passasjerfly" },
-  C: { title: "Cargo", description: "Rene fraktfly" },
-  M: { title: "Military", description: "Militaer eller offentlig operator" },
-  J: { title: "Business jets", description: "Store private jetfly" },
-  T: { title: "General aviation", description: "Privat, ambulanse, skole og survey" },
-  H: { title: "Helicopters", description: "Helikoptre" },
-  B: { title: "Lighter than air", description: "Luftskip og lignende" },
-  G: { title: "Gliders", description: "Seilfly" },
-  D: { title: "Drones", description: "UAV og droner" },
-  V: { title: "Ground vehicles", description: "Kjoeretoey med transponder" },
-  O: { title: "Other", description: "Alt som ikke passer andre steder" },
-  N: { title: "Non categorized", description: "Ikke kategorisert i FR24" }
+  P: { title: "Passenger", description: "Commercial passenger aircraft" },
+  C: { title: "Cargo", description: "Cargo aircraft" },
+  M: { title: "Military", description: "Military or public service aircraft" },
+  J: { title: "Business jets", description: "Private and corporate jets" },
+  T: { title: "General aviation", description: "Private, training, ambulance, and survey aircraft" },
+  H: { title: "Helicopters", description: "Helicopters" },
+  B: { title: "Lighter than air", description: "Airships and similar aircraft" },
+  G: { title: "Gliders", description: "Gliders" },
+  D: { title: "Drones", description: "UAVs and drones" },
+  V: { title: "Ground vehicles", description: "Vehicles with transponders" },
+  O: { title: "Other", description: "Everything else" },
+  N: { title: "Uncategorized", description: "Aircraft without a category" }
 };
 
 const lineColorLabels: Record<keyof Config["device"]["lineColors"], string> = {
-  airline: "Flyselskap",
-  route: "Rute",
-  aircraft: "Flytype",
-  context: "Kontekst",
-  progress: "Sideindikator",
-  routeProgress: "Ruteprogresjon"
+  airline: "Airline",
+  route: "Route",
+  aircraft: "Aircraft",
+  context: "Details",
+  progress: "Page progress",
+  routeProgress: "Route progress"
 };
 
 const timetableColorLabels: Record<keyof Config["device"]["timetableColors"], string> = {
-  header: "Overskrift",
-  data: "Tekst",
-  time: "Tid",
-  newTime: "Ny tid",
-  canceled: "Kansellert",
+  header: "Header",
+  data: "Text",
+  time: "Time",
+  newTime: "New time",
+  canceled: "Canceled",
   gateGoToGate: "Go to gate",
   gateBoarding: "Boarding",
   gateClosing: "Gate closing",
   gateClosed: "Gate closed",
-  landed: "Landet"
+  landed: "Landed"
 };
+
+const displayModeOptions: Array<{ value: DisplayBehaviorMode; title: string; description: string }> = [
+  { value: "airspace", title: "Airspace", description: "Show nearby aircraft only." },
+  { value: "hybrid", title: "Airspace + Airport Board", description: "Show airport information until aircraft appear." },
+  { value: "airport_board", title: "Airport Board", description: "Show arrivals and departures only." },
+  { value: "clock", title: "Clock", description: "Show a full-screen clock." }
+];
 
 const defaultConfig: Config = {
   lat: 59.9139,
@@ -296,7 +312,7 @@ const defaultConfig: Config = {
   follow: { enabled: false, flights: [] },
   device: {
     enabled: true,
-    displayMode: "flight",
+    displayMode: "hybrid",
     airspaceMonitoringEnabled: true,
     allowedAircraftCategories: defaultAircraftCategories,
     brightness: 80,
@@ -312,7 +328,7 @@ const defaultConfig: Config = {
     avinorWindowHours: 4,
     departureAvinorWindowHours: 4,
     arrivalAvinorWindowHours: 4,
-    timetableScrollPixelsPerSecond: 18,
+    timetableScrollPixelsPerSecond: 40,
     timetableTransitionMs: 400,
     scrollPixelsPerSecond: 9,
     configRefreshSeconds: 300,
@@ -475,8 +491,8 @@ function normalizeConfig(input: Partial<Config> & Record<string, unknown>): Conf
     },
     device: {
       enabled: device.enabled !== false,
-      displayMode: device.displayMode === "clock" ? "clock" : "flight",
-      airspaceMonitoringEnabled: device.airspaceMonitoringEnabled !== false,
+      displayMode: normalizeDisplayBehaviorMode(device.displayMode),
+      airspaceMonitoringEnabled: airspaceMonitoringForMode(normalizeDisplayBehaviorMode(device.displayMode)),
       allowedAircraftCategories: Array.isArray(device.allowedAircraftCategories)
         ? (device.allowedAircraftCategories as AircraftCategoryCode[])
         : defaultAircraftCategories,
@@ -536,6 +552,16 @@ function normalizeConfig(input: Partial<Config> & Record<string, unknown>): Conf
   };
 }
 
+function normalizeDisplayBehaviorMode(value: unknown): DisplayBehaviorMode {
+  if (value === "airspace" || value === "hybrid" || value === "airport_board" || value === "clock") return value;
+  if (value === "flight") return "hybrid";
+  return defaultConfig.device.displayMode;
+}
+
+function airspaceMonitoringForMode(mode: DisplayBehaviorMode): boolean {
+  return mode === "airspace" || mode === "hybrid";
+}
+
 async function apiFetch<T>(url: string, options?: RequestInit): Promise<T> {
   const nextOptions = { ...(options ?? {}) };
   nextOptions.headers = adminHeaders(options?.headers);
@@ -555,7 +581,7 @@ async function apiFetch<T>(url: string, options?: RequestInit): Promise<T> {
 
   const json = (await response.json()) as T & { error?: string };
   if (!response.ok) {
-    throw new Error(typeof json === "object" && json && "error" in json ? String(json.error) : "API-feil");
+    throw new Error(typeof json === "object" && json && "error" in json ? String(json.error) : "API error");
   }
   return json;
 }
@@ -596,7 +622,7 @@ function isRecentTimestamp(value: string | null | undefined, maxAgeMs: number): 
 }
 
 function wifiSignalLabel(rssi: number | null | undefined): string {
-  if (typeof rssi !== "number" || !Number.isFinite(rssi)) return "ukjent";
+  if (typeof rssi !== "number" || !Number.isFinite(rssi)) return "Unknown";
   if (rssi >= -55) return `${rssi} dBm · sterkt`;
   if (rssi >= -67) return `${rssi} dBm · bra`;
   if (rssi >= -75) return `${rssi} dBm · svakt`;
@@ -1575,67 +1601,126 @@ function StatusPill(props: { label: string; tone: "good" | "idle" | "warn" | "er
   );
 }
 
+function DisplayModePicker(props: { value: DisplayBehaviorMode; onChange: (value: DisplayBehaviorMode) => void }) {
+  return (
+    <div style={{ display: "grid", gap: "10px" }}>
+      <div>
+        <div style={{ fontSize: "14px", fontWeight: 750 }}>Display Mode</div>
+        <div style={{ marginTop: "4px", fontSize: "12px", color: "var(--muted-foreground)" }}>Choose how the display behaves.</div>
+      </div>
+      <div style={{ display: "grid", gap: "10px" }}>
+        {displayModeOptions.map((option) => {
+          const selected = props.value === option.value;
+          return (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => props.onChange(option.value)}
+              style={{
+                ...cardStyle("13px 14px"),
+                display: "grid",
+                gridTemplateColumns: "auto 1fr",
+                gap: "12px",
+                alignItems: "start",
+                textAlign: "left",
+                border: selected ? "1px solid var(--primary)" : "1px solid var(--border-soft)",
+                background: selected ? "rgba(247, 181, 0, 0.12)" : "var(--card)",
+                color: "var(--foreground)",
+                cursor: "pointer"
+              }}
+            >
+              <span style={{ width: "18px", height: "18px", borderRadius: "999px", border: `2px solid ${selected ? "var(--primary)" : "rgba(60, 36, 21, 0.28)"}`, display: "grid", placeItems: "center", marginTop: "1px" }}>
+                {selected ? <span style={{ width: "8px", height: "8px", borderRadius: "999px", background: "var(--primary)" }} /> : null}
+              </span>
+              <span>
+                <span style={{ display: "block", fontSize: "14px", fontWeight: 750 }}>{option.title}</span>
+                <span style={{ display: "block", marginTop: "4px", fontSize: "12px", lineHeight: 1.4, color: "var(--muted-foreground)" }}>{option.description}</span>
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function DisplayStatusCard(props: { config: Config; screenState: ScreenState; preview: PreviewState; statusTone: "idle" | "dirty" | "error" | "success" }) {
+  const mode = props.config.device.displayMode;
+  const aircraftActive = props.preview.mode === "nearby" || props.preview.mode === "follow" || props.preview.flights.length > 0;
+  const boardActive = mode === "airport_board" || (mode === "hybrid" && !aircraftActive);
+  const statusTitle = !props.screenState.active
+    ? "Screen Off"
+    : mode === "clock"
+      ? "Clock Active"
+      : mode === "airspace"
+        ? aircraftActive ? "Aircraft Nearby" : "Waiting for Aircraft"
+        : mode === "hybrid"
+          ? aircraftActive ? "Airspace Temporarily Active" : "Airport Board Active"
+          : "Airport Board Active";
+  const statusSubtext = props.screenState.active ? "Ready to display content." : "The display is currently turned off.";
   const signalTone = props.statusTone === "error" || props.preview.error ? "error" : props.preview.updatedAt ? "good" : "warn";
-  const signalLabel = props.preview.error ? "Feil i displaydata" : props.preview.updatedAt ? "Displaydata OK" : "Venter på data";
   const powerTone = props.screenState.active ? "good" : "idle";
   const liveSource = props.preview.liveSourceStatus;
-  const liveSourceName = String(liveSource?.source || "live").toUpperCase();
   const liveSourceTone = liveSource?.ok === false ? "error" : liveSource ? "good" : "idle";
-  const liveSourceLabel = liveSource?.ok === false ? `${liveSourceName} feil` : liveSource ? `${liveSourceName} OK` : "Livekilde ukjent";
   const deviceStatus = props.preview.deviceStatus;
   const deviceFresh = isRecentTimestamp(deviceStatus?.updatedAt, 4 * 60 * 1000);
   const deviceTone = deviceStatus && deviceFresh ? deviceStatus.ok ? "good" : "error" : deviceStatus ? "warn" : "idle";
-  const deviceLabel = deviceStatus && deviceFresh ? deviceStatus.ok ? "Firmware OK" : "Firmware feil" : deviceStatus ? "Firmware stille" : "Venter på firmware";
+  const monitoringActive = airspaceMonitoringForMode(mode);
   return (
     <div style={{ ...cardStyle("16px"), display: "grid", gap: "14px" }}>
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "12px" }}>
         <div>
-          <div style={{ fontSize: "14px", fontWeight: 750, letterSpacing: "-0.01em" }}>Skjermstatus</div>
+          <div style={{ fontSize: "14px", fontWeight: 750, letterSpacing: "-0.01em" }}>Screen Status</div>
           <div style={{ marginTop: "4px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>
-            {props.screenState.active ? "Panelet er satt til å vise innhold." : "Panelet er satt i av-modus."}
+            {statusSubtext}
           </div>
         </div>
-        <StatusPill label={props.screenState.active ? "På" : "Av"} tone={powerTone} />
+        <StatusPill label={props.screenState.active ? "On" : "Off"} tone={powerTone} />
       </div>
 
       <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
-        <StatusPill label={deviceLabel} tone={deviceTone} />
-        <StatusPill label={signalLabel} tone={signalTone} />
-        <StatusPill label={liveSourceLabel} tone={liveSourceTone} />
-        <StatusPill label={props.config.device.displayMode === "clock" ? "Klokke" : "Flyvisning"} tone="idle" />
-        <StatusPill label={props.screenState.brightnessMode === "night" ? "Nattlys" : "Daglys"} tone="idle" />
+        <StatusPill label={statusTitle} tone={props.screenState.active ? "good" : "idle"} />
+        <StatusPill label={monitoringActive ? "Monitoring Active" : "Airspace Monitoring Disabled"} tone={monitoringActive ? "good" : "idle"} />
+        {boardActive ? <StatusPill label="Airport Board Active" tone="good" /> : null}
+        {mode === "clock" ? <StatusPill label="Airport Board Disabled" tone="idle" /> : null}
+        <StatusPill label={props.screenState.brightnessMode === "night" ? "Night Mode Active" : "Day Mode Active"} tone="good" />
+        <StatusPill label={liveSource?.ok === false ? "Flight Data Unavailable" : "Flight Data Available"} tone={liveSourceTone} />
+        <StatusPill label={deviceStatus && deviceFresh ? "Screen Connected" : "Screen Not Seen"} tone={deviceTone} />
+        <StatusPill label={props.preview.updatedAt ? "Display Service Online" : "Display Service Waiting"} tone={signalTone} />
       </div>
 
       {props.preview.error ? <div style={{ borderRadius: "12px", background: "rgba(255, 38, 0, 0.08)", color: "#8b1f12", padding: "10px 12px", fontSize: "12px", lineHeight: 1.45 }}>{props.preview.error}</div> : null}
       {liveSource?.ok === false && liveSource.error ? <div style={{ borderRadius: "12px", background: "rgba(255, 38, 0, 0.08)", color: "#8b1f12", padding: "10px 12px", fontSize: "12px", lineHeight: 1.45 }}>{liveSource.error}</div> : null}
 
-      <div style={{ display: "grid", gap: "8px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>
+      <details style={{ ...cardStyle("0"), background: "rgba(255, 255, 255, 0.46)" }}>
+        <summary style={{ padding: "12px 13px", cursor: "pointer", fontSize: "12px", fontWeight: 750, letterSpacing: "0.06em", textTransform: "uppercase" }}>Advanced Diagnostics</summary>
+        <div style={{ display: "grid", gap: "8px", borderTop: "1px solid rgba(60, 36, 21, 0.1)", padding: "12px 13px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}>
-          <span>Siste displaydata</span>
+          <span>Last payload</span>
           <span style={{ color: "var(--foreground)", fontFamily: '"JetBrains Mono", monospace' }}>{shortTime(props.preview.updatedAt)}</span>
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}>
-          <span>Sist sett skjerm</span>
+          <span>Last display heartbeat</span>
           <span style={{ color: "var(--foreground)", fontFamily: '"JetBrains Mono", monospace' }}>{shortTime(deviceStatus?.updatedAt)}</span>
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}>
           <span>Wi-Fi</span>
-          <span style={{ color: "var(--foreground)", textAlign: "right" }}>{deviceStatus?.wifi?.ssid || "ukjent"}</span>
+          <span style={{ color: "var(--foreground)", textAlign: "right" }}>{deviceStatus?.wifi?.ssid || "Unknown"}</span>
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}>
           <span>Signal</span>
           <span style={{ color: "var(--foreground)", textAlign: "right" }}>{wifiSignalLabel(deviceStatus?.wifi?.rssi)}</span>
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}>
-          <span>Sist aktivert</span>
+          <span>Last turned on</span>
           <span style={{ color: "var(--foreground)", fontFamily: '"JetBrains Mono", monospace' }}>{shortTime(props.screenState.lastActivatedAt)}</span>
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}>
-          <span>Sist deaktivert</span>
+          <span>Last turned off</span>
           <span style={{ color: "var(--foreground)", fontFamily: '"JetBrains Mono", monospace' }}>{shortTime(props.screenState.lastDeactivatedAt)}</span>
         </div>
-      </div>
+        </div>
+      </details>
     </div>
   );
 }
@@ -1871,6 +1956,9 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
         const isFollowLayout = activeFlight.layout === "follow_cycle" || activeFlight.layout === "follow_status";
         const detailCycleStartedAt = isFollowLayout ? followPhaseStartedAtRef.current : currentFlightCycleStartedAt;
         drawLiveFlightLayoutExact(renderCtx, activeFlight, props.config, logoUrl ? logoCacheRef.current.get(logoUrl) : undefined, detailCycleStartedAt, tickerStartedAtRef.current, now, flights.length);
+      } else if (props.config.device.displayMode === "airspace") {
+        drawLedText(renderCtx, "WAITING", 43, 23, "#f6b800", 48);
+        drawLedText(renderCtx, "FOR AIRCRAFT", 27, 36, "#f4f7ff", 74);
       } else if (props.preview.idleScreens[0]?.rows?.length) {
         const idleScreens = props.preview.idleScreens;
         const { index: idleIndex, cycleStartedAt: idleCycleStartedAt } = getActiveIdleCycle(idleScreens, props.config, cycleStartedAtRef.current, now);
@@ -2035,10 +2123,10 @@ export default function App() {
       if (response.screenState) setScreenState(response.screenState);
       if (response.soundState) setSoundState(response.soundState);
       setPreview((current) => ({ ...current, deviceStatus: response.deviceStatus ?? current.deviceStatus }));
-      setStatus("Innstillinger lastet");
+      setStatus("Settings loaded");
       setStatusTone("idle");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Kunne ikke hente config");
+      setStatus(error instanceof Error ? error.message : "Could not load settings");
       setStatusTone("error");
     }
   }
@@ -2047,7 +2135,7 @@ export default function App() {
     try {
       const data = await apiFetch<DisplayPayload>(`/api/display?ts=${Date.now()}`);
       setPreview({
-        meta: data.updatedAt ? `Oppdatert ${new Date(data.updatedAt).toLocaleTimeString("nb-NO")}` : "Display-data lastet",
+        meta: data.updatedAt ? `Updated ${new Date(data.updatedAt).toLocaleTimeString("en-GB")}` : "Display data loaded",
         flights: Array.isArray(data.flights) ? data.flights : [],
         idleScreens: Array.isArray(data.idleScreens) ? data.idleScreens : [],
         avinorRows: preview.avinorRows,
@@ -2059,7 +2147,7 @@ export default function App() {
       });
       if (data.screenState) setScreenState(data.screenState);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Kunne ikke hente display-data";
+      const message = error instanceof Error ? error.message : "Could not load display data";
       setPreview((current) => ({ ...current, meta: message, error: message }));
     }
   }
@@ -2099,7 +2187,7 @@ export default function App() {
       setStatusTone("success");
       await loadPreview();
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Kunne ikke lagre");
+      setStatus(error instanceof Error ? error.message : "Could not save settings");
       setStatusTone("error");
     } finally {
       setBusy(false);
@@ -2114,11 +2202,11 @@ export default function App() {
         headers: { "Content-Type": "application/json" }
       });
       setScreenState(next);
-      setStatus(`Skjerm ${next.active ? "aktivert" : "deaktivert"}`);
+      setStatus(`Screen ${next.active ? "turned on" : "turned off"}`);
       setStatusTone("success");
       await loadPreview();
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Kunne ikke endre skjermstatus");
+      setStatus(error instanceof Error ? error.message : "Could not change screen state");
       setStatusTone("error");
     } finally {
       setBusy(false);
@@ -2134,10 +2222,10 @@ export default function App() {
         body: JSON.stringify({ source: "mobile-react" })
       });
       setSoundState(next);
-      setStatus("Lydtest trigget");
+      setStatus("Sound test started");
       setStatusTone("success");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Lydtest feilet");
+      setStatus(error instanceof Error ? error.message : "Sound test failed");
       setStatusTone("error");
     } finally {
       setBusy(false);
@@ -2169,7 +2257,7 @@ export default function App() {
           <SkyframeLogo className="skyframe-logo" />
           <div style={{ position: "relative", paddingLeft: "13px" }}>
             <span
-              title={preview.deviceStatus && firmwareFresh ? (preview.deviceStatus.ok ? "Firmware OK" : "Firmware feil") : "Venter på firmware"}
+              title={preview.deviceStatus && firmwareFresh ? (preview.deviceStatus.ok ? "Screen connected" : "Screen error") : "Waiting for screen"}
               style={{
                 position: "absolute",
                 left: 0,
@@ -2186,8 +2274,8 @@ export default function App() {
             type="button"
             onClick={() => void toggleScreen()}
             disabled={busy}
-            aria-label={screenState.active ? "Slå av skjerm" : "Slå på skjerm"}
-            title={screenState.active ? "Skjermen er på" : "Skjermen er av"}
+            aria-label={screenState.active ? "Turn screen off" : "Turn screen on"}
+            title={screenState.active ? "Screen is on" : "Screen is off"}
             style={{
               position: "relative",
               width: "42px",
@@ -2269,7 +2357,7 @@ export default function App() {
           <LoadingSkeleton />
         ) : (
         <div ref={slidesRef} style={appStyles.slides}>
-          <section style={appStyles.slide}>
+          <section style={slideStyle("location")}>
             <div style={{ display: "grid", gap: "14px" }}>
               <MapPicker
                 lat={config.lat}
@@ -2302,51 +2390,43 @@ export default function App() {
             </div>
           </section>
 
-          <section style={appStyles.slide}>
+          <section style={slideStyle("display")}>
             <div style={{ display: "grid", gap: "14px" }}>
-              <Field label="Display mode">
-                <SelectInput value={config.device.displayMode} onChange={(event) => updateConfig((current) => ({ ...current, device: { ...current.device, displayMode: event.target.value as "flight" | "clock" } }))}>
-                  <option value="flight">Flight display</option>
-                  <option value="clock">Clock</option>
-                </SelectInput>
-              </Field>
-              <SliderField label="Brightness day" value={config.device.brightness} min={1} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, brightness: value } }))} />
+              <DisplayModePicker
+                value={config.device.displayMode}
+                onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, displayMode: value, airspaceMonitoringEnabled: airspaceMonitoringForMode(value) } }))}
+              />
+              <SliderField label="Day brightness" value={config.device.brightness} min={1} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, brightness: value } }))} />
               <SliderField label="Night brightness" value={config.device.nightMode.brightness} min={0} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, nightMode: { ...current.device.nightMode, brightness: value } } }))} />
               <SliderField label="Config refresh" value={config.device.configRefreshSeconds} min={60} max={3600} step={30} suffix=" s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, configRefreshSeconds: value } }))} />
               <DisplayStatusCard config={config} screenState={screenState} preview={preview} statusTone={statusTone} />
             </div>
           </section>
 
-          <section style={appStyles.slide}>
+          <section style={slideStyle("clock")}>
             <div style={{ display: "grid", gap: "14px" }}>
               <div style={{ display: "grid", gap: "12px", gridTemplateColumns: "1fr 1fr" }}>
-                <ColorPicker label="Klokke topp" value={config.device.clockTopColor} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, clockTopColor: value } }))} />
-                <ColorPicker label="Klokke bunn" value={config.device.clockColor} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, clockColor: value } }))} />
+                <ColorPicker label="Clock top" value={config.device.clockTopColor} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, clockTopColor: value } }))} />
+                <ColorPicker label="Clock bottom" value={config.device.clockColor} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, clockColor: value } }))} />
               </div>
               <ToggleRow label="Clock tick enabled" checked={config.device.clockTickEnabled} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, clockTickEnabled: value } }))} />
               <SliderField label="Clock tick volume" value={config.device.clockTickVolumePercent} min={0} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, clockTickVolumePercent: value } }))} />
             </div>
           </section>
 
-          <section style={appStyles.slide}>
+          <section style={slideStyle("aircraft")}>
             <div style={{ display: "grid", gap: "14px" }}>
-              <ToggleRow
-                label="Overvåk luftrommet"
-                hint="Når denne er av, henter Worker ikke live flydata. Tidstabell fra Avinor vises fortsatt."
-                checked={config.device.airspaceMonitoringEnabled}
-                onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, airspaceMonitoringEnabled: value } }))}
-              />
               <SliderField label="Fetch interval" value={config.device.pollSeconds} min={30} max={900} step={5} suffix=" s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, pollSeconds: value } }))} />
               <SliderField label="Audio volume" value={config.device.audioVolumePercent} min={0} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, audioVolumePercent: value } }))} />
               <button type="button" onClick={() => void triggerSoundTest()} style={{ height: "42px", borderRadius: "8px", border: "1px solid var(--border-mid)", background: "var(--card)", color: "var(--foreground)" }}>
-                Test flight-lyd
+                Test flight sound
               </button>
-              <div style={{ fontSize: "12px", color: "var(--muted-foreground)" }}>Siste flight-lydtest: {formatTimestamp(soundState.lastTriggeredAt)}</div>
+              <div style={{ fontSize: "12px", color: "var(--muted-foreground)" }}>Last sound test: {formatTimestamp(soundState.lastTriggeredAt)}</div>
               <div style={{ ...cardStyle(), display: "grid", gap: "12px" }}>
                 <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", cursor: "pointer" }}>
                   <span style={{ minWidth: 0, flex: "1 1 auto" }}>
-                    <span style={{ display: "block", fontSize: "14px" }}>Følg flightnummer</span>
-                    <span style={{ display: "block", marginTop: "4px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.4 }}>Når dette er av ignoreres listen under.</span>
+                    <span style={{ display: "block", fontSize: "14px" }}>Track flight numbers</span>
+                    <span style={{ display: "block", marginTop: "4px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.4 }}>Tracked flights can activate Airspace mode.</span>
                   </span>
                   <span style={{ position: "relative", width: "46px", minWidth: "46px", flex: "0 0 46px", height: "28px", borderRadius: "999px", background: config.follow.enabled ? "var(--primary)" : "var(--secondary)", transition: "background 160ms ease" }}>
                     <input type="checkbox" checked={config.follow.enabled} onChange={(event) => updateConfig((current) => ({ ...current, follow: { ...current.follow, enabled: event.target.checked } }))} style={{ position: "absolute", inset: 0, opacity: 0 }} />
@@ -2374,7 +2454,7 @@ export default function App() {
                   />
                 </Field>
               </div>
-              <Advanced title="Flight filters">
+              <Advanced title="Aircraft filters">
                 <div style={{ display: "grid", gap: "10px" }}>
                   {Object.entries(categoryLabels).map(([code, info]) => {
                     const typedCode = code as AircraftCategoryCode;
@@ -2459,16 +2539,16 @@ export default function App() {
             </div>
           </section>
 
-          <section style={appStyles.slide}>
+          <section style={slideStyle("timetable")}>
             <div style={{ display: "grid", gap: "14px" }}>
-              <SliderField label="Hold each timetable page" value={config.device.timetableCycleSeconds} min={2} max={60} suffix=" s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, timetableCycleSeconds: value } }))} />
-              <SliderField label="Rullehastighet" value={config.device.timetableScrollPixelsPerSecond} min={4} max={40} suffix=" px/s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, timetableScrollPixelsPerSecond: value } }))} />
-              <SliderField label="Bytteanimasjon" value={config.device.timetableTransitionMs / 1000} min={0.2} max={1} step={0.1} suffix=" s" formatValue={(value) => value.toFixed(1)} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, timetableTransitionMs: Math.round(value * 1000) } }))} />
-              <SliderField label="Avganger antall" value={config.device.departureTimetableItemCount} min={4} max={40} step={4} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, departureTimetableItemCount: value, timetableItemCount: value } }))} />
-              <SliderField label="Ankomster antall" value={config.device.arrivalTimetableItemCount} min={4} max={40} step={4} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, arrivalTimetableItemCount: value } }))} />
-              <SliderField label="Avganger fremover" value={config.device.departureAvinorWindowHours} min={1} max={24} suffix=" t" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, departureAvinorWindowHours: value, avinorWindowHours: value } }))} />
-              <SliderField label="Ankomster fremover" value={config.device.arrivalAvinorWindowHours} min={1} max={24} suffix=" t" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, arrivalAvinorWindowHours: value } }))} />
-              <Advanced title="Timetable colors">
+              <SliderField label="Hold each board page" value={config.device.timetableCycleSeconds} min={2} max={60} suffix=" s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, timetableCycleSeconds: value } }))} />
+              <SliderField label="Scroll speed" value={config.device.timetableScrollPixelsPerSecond} min={4} max={100} suffix=" px/s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, timetableScrollPixelsPerSecond: value } }))} />
+              <SliderField label="Page transition" value={config.device.timetableTransitionMs / 1000} min={0.2} max={1} step={0.1} suffix=" s" formatValue={(value) => value.toFixed(1)} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, timetableTransitionMs: Math.round(value * 1000) } }))} />
+              <SliderField label="Departures" value={config.device.departureTimetableItemCount} min={0} max={40} step={1} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, departureTimetableItemCount: value, timetableItemCount: value } }))} />
+              <SliderField label="Arrivals" value={config.device.arrivalTimetableItemCount} min={0} max={40} step={1} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, arrivalTimetableItemCount: value } }))} />
+              <SliderField label="Departures lookahead" value={config.device.departureAvinorWindowHours} min={1} max={24} suffix=" h" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, departureAvinorWindowHours: value, avinorWindowHours: value } }))} />
+              <SliderField label="Arrivals lookahead" value={config.device.arrivalAvinorWindowHours} min={1} max={24} suffix=" h" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, arrivalAvinorWindowHours: value } }))} />
+              <Advanced title="Airport Board colors">
                 <div style={{ display: "grid", gap: "12px", gridTemplateColumns: "1fr 1fr" }}>
                   {Object.entries(config.device.timetableColors).map(([key, value]) => (
                     <ColorPicker
@@ -2483,24 +2563,24 @@ export default function App() {
             </div>
           </section>
 
-          <section style={appStyles.slide}>
+          <section style={slideStyle("api")}>
             <div style={{ display: "grid", gap: "14px" }}>
               <div style={cardStyle()}>
                 <div style={{ fontSize: "14px", fontWeight: 600 }}>Display preview</div>
-                <div style={{ marginTop: "6px", fontSize: "12px", color: "var(--muted-foreground)" }}>{preview.meta || "Ingen data lastet"}</div>
+                <div style={{ marginTop: "6px", fontSize: "12px", color: "var(--muted-foreground)" }}>{preview.meta || "No data loaded"}</div>
                 <div style={{ marginTop: "12px" }}>
-                  <ToggleRow label="Lyd i emulator" hint="Slår bare av/på lyd i web-previewen. Skjermen styres fortsatt av Clock/aircraft-lydinnstillingene." checked={emulatorSoundEnabled} onChange={setEmulatorSoundEnabled} />
+                  <ToggleRow label="Emulator sound" hint="Only controls sound in the browser preview." checked={emulatorSoundEnabled} onChange={setEmulatorSoundEnabled} />
                 </div>
                 <div style={{ display: "flex", gap: "10px", marginTop: "12px" }}>
                   <button type="button" onClick={() => void loadPreview()} style={{ flex: 1, height: "40px", borderRadius: "8px", border: 0, background: "var(--primary)", color: "#fff" }}>
-                    Oppdater skjermdata
+                    Refresh display
                   </button>
                   <button type="button" onClick={() => void loadAvinor()} style={{ flex: 1, height: "40px", borderRadius: "8px", border: "1px solid var(--border-mid)", background: "var(--card)", color: "var(--foreground)" }}>
-                    Oppdater Avinor
+                    Refresh airport data
                   </button>
                 </div>
                 <div style={{ marginTop: "10px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>
-                  Skjermdata bruker samme endepunkt som LED-panelet. Avinor oppdaterer tidstabellgrunnlaget alene.
+                  The preview uses the same content feed as the physical display.
                 </div>
               </div>
               {preview.flights.length ? (
@@ -2525,7 +2605,7 @@ export default function App() {
                   </article>
                 ))
               ) : (
-                <div style={{ ...cardStyle(), color: "var(--muted-foreground)", fontSize: "13px" }}>Ingen fly i valgt radius akkurat nå.</div>
+                <div style={{ ...cardStyle(), color: "var(--muted-foreground)", fontSize: "13px" }}>No aircraft nearby right now.</div>
               )}
 
               <Advanced title="API links">
@@ -2551,7 +2631,7 @@ export default function App() {
               </Advanced>
 
               {preview.avinorRows.length ? (
-                <Advanced title="Avinor raw preview">
+                <Advanced title="Airport data preview">
                   <div style={{ display: "grid", gap: "10px" }}>
                     {preview.avinorRows.slice(0, 6).map((row, index) => (
                       <div key={`${row.resolved?.flightId ?? "row"}-${index}`} style={cardStyle("10px 12px")}>
@@ -2592,7 +2672,7 @@ export default function App() {
             transition: "background 160ms ease, color 160ms ease, box-shadow 160ms ease"
           }}
         >
-          {busy ? "Lagrer..." : "Save settings"}
+          {busy ? "Saving..." : "Save settings"}
         </button>
         <div
           style={{

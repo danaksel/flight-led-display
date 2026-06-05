@@ -46,7 +46,7 @@ type FollowSettings = {
 
 type DeviceSettings = {
   enabled: boolean;
-  displayMode: "flight" | "clock";
+  displayMode: DisplayBehaviorMode;
   airspaceMonitoringEnabled: boolean;
   allowedAircraftCategories: AircraftCategoryCode[];
   brightness: number;
@@ -102,6 +102,8 @@ type DeviceSettings = {
     brightness: number;
   };
 };
+
+type DisplayBehaviorMode = "airspace" | "hybrid" | "airport_board" | "clock";
 
 type ScreenState = {
   active: boolean;
@@ -557,7 +559,7 @@ export default {
       if (url.pathname === "/api/screen-state/deactivate" && request.method === "POST") return writeScreenState(env, { active: false }, "homey-api");
       if (url.pathname === "/api/display-mode" && request.method === "GET") return displayModeResponse(env);
       if (url.pathname === "/api/display-mode" && request.method === "POST") return saveDisplayMode(request, env);
-      if (url.pathname === "/api/display-mode/flight" && request.method === "POST") return writeDisplayMode(env, "flight", "homey-api");
+      if (url.pathname === "/api/display-mode/flight" && request.method === "POST") return writeDisplayMode(env, "hybrid", "homey-api");
       if (url.pathname === "/api/display-mode/clock" && request.method === "POST") return writeDisplayMode(env, "clock", "homey-api");
       if (url.pathname === "/api/brightness-mode" && request.method === "GET") return brightnessModeResponse(env);
       if (url.pathname === "/api/brightness-mode" && request.method === "POST") return saveBrightnessMode(request, env);
@@ -969,12 +971,14 @@ async function clockTickStateResponse(env: Env): Promise<Response> {
 async function writeDisplayMode(env: Env, displayMode: DeviceSettings["displayMode"], source = "api"): Promise<Response> {
   const config = await getConfig(env);
   const normalizedDevice = normalizeDeviceSettings(config.device);
+  const normalizedDisplayMode = normalizeDisplayBehaviorMode(displayMode);
   const updatedAt = new Date().toISOString();
   const next: Config = {
     ...config,
     device: {
       ...normalizedDevice,
-      displayMode
+      displayMode: normalizedDisplayMode,
+      airspaceMonitoringEnabled: airspaceMonitoringForMode(normalizedDisplayMode)
     },
     updatedAt
   };
@@ -991,7 +995,7 @@ async function writeDisplayMode(env: Env, displayMode: DeviceSettings["displayMo
     source: source.slice(0, 80)
   });
   return jsonResponse({
-    displayMode,
+    displayMode: normalizedDisplayMode,
     updatedAt,
     source: source.slice(0, 80)
   }, 200, { "Cache-Control": "no-store" });
@@ -1091,12 +1095,13 @@ async function saveDisplayMode(request: Request, env: Env): Promise<Response> {
   }
 
   const mode = firstString(body && typeof body === "object" ? body as Record<string, unknown> : {}, ["displayMode", "mode"]);
-  if (mode !== "flight" && mode !== "clock") {
-    return jsonResponse({ error: "Expected displayMode or mode to be 'flight' or 'clock'" }, 400, { "Cache-Control": "no-store" });
+  const normalizedMode = normalizeDisplayBehaviorMode(mode);
+  if (!mode || !["airspace", "hybrid", "airport_board", "clock", "flight"].includes(mode)) {
+    return jsonResponse({ error: "Choose airspace, hybrid, airport_board, or clock." }, 400, { "Cache-Control": "no-store" });
   }
 
   const source = firstString(body && typeof body === "object" ? body as Record<string, unknown> : {}, ["source"]) || "api";
-  return writeDisplayMode(env, mode, source);
+  return writeDisplayMode(env, normalizedMode, source);
 }
 
 async function triggerSoundTest(request: Request, env: Env): Promise<Response> {
@@ -1415,10 +1420,8 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
   const night = v.nightMode && typeof v.nightMode === "object" ? v.nightMode as Partial<DeviceSettings["nightMode"]> : {};
   return {
     enabled: typeof v.enabled === "boolean" ? v.enabled : true,
-    displayMode: v.displayMode === "clock" ? "clock" : "flight",
-    airspaceMonitoringEnabled: typeof (v as { airspaceMonitoringEnabled?: unknown }).airspaceMonitoringEnabled === "boolean"
-      ? Boolean((v as { airspaceMonitoringEnabled?: unknown }).airspaceMonitoringEnabled)
-      : true,
+    displayMode: normalizeDisplayBehaviorMode(v.displayMode),
+    airspaceMonitoringEnabled: airspaceMonitoringForMode(normalizeDisplayBehaviorMode(v.displayMode)),
     allowedAircraftCategories: normalizeAircraftCategoryFilter((v as { allowedAircraftCategories?: unknown }).allowedAircraftCategories),
     brightness: clampNumber(v.brightness, 1, 100, 80),
     audioVolumePercent: clampNumber((v as { audioVolumePercent?: unknown }).audioVolumePercent, 0, 100, 35),
@@ -1429,13 +1432,13 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
     pollSeconds: clampNumber(v.pollSeconds, 30, 900, 90),
     displayCycleSeconds: clampNumber(v.displayCycleSeconds, 2, 30, 5),
     timetableCycleSeconds: clampNumber((v as { timetableCycleSeconds?: unknown }).timetableCycleSeconds, 2, 60, 7),
-    timetableItemCount: clampNumber((v as { timetableItemCount?: unknown }).timetableItemCount, 4, 40, 8),
-    departureTimetableItemCount: clampNumber((v as { departureTimetableItemCount?: unknown }).departureTimetableItemCount, 4, 40, clampNumber((v as { timetableItemCount?: unknown }).timetableItemCount, 4, 40, 8)),
-    arrivalTimetableItemCount: clampNumber((v as { arrivalTimetableItemCount?: unknown }).arrivalTimetableItemCount, 4, 40, clampNumber((v as { timetableItemCount?: unknown }).timetableItemCount, 4, 40, 8)),
+    timetableItemCount: clampNumber((v as { timetableItemCount?: unknown }).timetableItemCount, 0, 40, 8),
+    departureTimetableItemCount: clampNumber((v as { departureTimetableItemCount?: unknown }).departureTimetableItemCount, 0, 40, clampNumber((v as { timetableItemCount?: unknown }).timetableItemCount, 0, 40, 8)),
+    arrivalTimetableItemCount: clampNumber((v as { arrivalTimetableItemCount?: unknown }).arrivalTimetableItemCount, 0, 40, clampNumber((v as { timetableItemCount?: unknown }).timetableItemCount, 0, 40, 8)),
     avinorWindowHours: clampNumber((v as { avinorWindowHours?: unknown }).avinorWindowHours, 1, 24, 4),
     departureAvinorWindowHours: clampNumber((v as { departureAvinorWindowHours?: unknown }).departureAvinorWindowHours, 1, 24, clampNumber((v as { avinorWindowHours?: unknown }).avinorWindowHours, 1, 24, 4)),
     arrivalAvinorWindowHours: clampNumber((v as { arrivalAvinorWindowHours?: unknown }).arrivalAvinorWindowHours, 1, 24, clampNumber((v as { avinorWindowHours?: unknown }).avinorWindowHours, 1, 24, 4)),
-    timetableScrollPixelsPerSecond: clampNumber((v as { timetableScrollPixelsPerSecond?: unknown }).timetableScrollPixelsPerSecond, 4, 40, 18),
+    timetableScrollPixelsPerSecond: clampNumber((v as { timetableScrollPixelsPerSecond?: unknown }).timetableScrollPixelsPerSecond, 4, 100, 40),
     timetableTransitionMs: clampNumber((v as { timetableTransitionMs?: unknown }).timetableTransitionMs, 200, 1000, 400),
     scrollPixelsPerSecond: clampNumber(v.scrollPixelsPerSecond, 2, 30, 9),
     configRefreshSeconds: clampNumber(v.configRefreshSeconds, 60, 3600, 300),
@@ -1452,6 +1455,16 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
       brightness: clampNumber(night.brightness, 0, 100, 0)
     }
   };
+}
+
+function normalizeDisplayBehaviorMode(value: unknown): DisplayBehaviorMode {
+  if (value === "airspace" || value === "hybrid" || value === "airport_board" || value === "clock") return value;
+  if (value === "flight") return "hybrid";
+  return "hybrid";
+}
+
+function airspaceMonitoringForMode(mode: DisplayBehaviorMode): boolean {
+  return mode === "airspace" || mode === "hybrid";
 }
 
 function normalizeAircraftCategoryFilter(value: unknown): AircraftCategoryCode[] {
@@ -1575,14 +1588,27 @@ function avinorWindowHoursForDirection(device: DeviceSettings, direction: "A" | 
 async function getIdleScreens(env: Env, config: Config): Promise<IdleScreen[]> {
   const airport = normalizeAirportCode(config.homeAirportIata, env.HOME_AIRPORT_IATA || "OSL");
   const device = normalizeDeviceSettings(config.device);
+  if (device.departureTimetableItemCount === 0 && device.arrivalTimetableItemCount === 0) {
+    return [{
+      title: "DEPARTURES",
+      kind: "departures",
+      rows: [{
+        flightId: "",
+        airport: "",
+        time: "",
+        status: "empty",
+        message: "You said zero.|Zero to show."
+      }]
+    }];
+  }
   const [departures, arrivals] = await Promise.all([
-    getAvinorFlights(env, airport, "D", config),
-    getAvinorFlights(env, airport, "A", config)
+    device.departureTimetableItemCount > 0 ? getAvinorFlights(env, airport, "D", config) : Promise.resolve([]),
+    device.arrivalTimetableItemCount > 0 ? getAvinorFlights(env, airport, "A", config) : Promise.resolve([])
   ]);
 
   return [
-    ...toIdleScreens("DEPARTURES", "departures", departures, avinorWindowHoursForDirection(device, "D")),
-    ...toIdleScreens("ARRIVALS", "arrivals", arrivals, avinorWindowHoursForDirection(device, "A"))
+    ...(device.departureTimetableItemCount > 0 ? toIdleScreens("DEPARTURES", "departures", departures, avinorWindowHoursForDirection(device, "D")) : []),
+    ...(device.arrivalTimetableItemCount > 0 ? toIdleScreens("ARRIVALS", "arrivals", arrivals, avinorWindowHoursForDirection(device, "A")) : [])
   ];
 }
 
@@ -1631,6 +1657,7 @@ async function getAvinorFlights(env: Env, airport: string, direction: "A" | "D",
   const device = normalizeDeviceSettings(config.device);
   const windowHours = avinorWindowHoursForDirection(device, direction);
   const itemCount = timetableItemCountForDirection(device, direction);
+  if (itemCount <= 0) return [];
   const cacheKey = `avinor:board:v5:${airport}:${direction}:${windowHours}:${itemCount}`;
   const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
   if (Array.isArray(cached)) return cached as AvinorFlight[];
@@ -2001,12 +2028,19 @@ async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
     });
   }
 
+  if (normalizedDevice.displayMode === "airport_board") {
+    const idleScreens = await getIdleScreens(env, config);
+    return jsonResponse(await displayPayload(env, config, screenState, compact, "idle", [], [], [], idleScreens, liveSourceStatus), 200, {
+      "Cache-Control": "public, max-age=15"
+    });
+  }
+
   const limit = Math.max(1, Math.min(50, parseNumber(env.DISPLAY_LIMIT, 8)));
   const follow = normalizeFollowSettings(config.follow);
   let nearbyFlights: DisplayFlight[] = [];
   let followFlights: DisplayFlight[] = [];
 
-  const airspaceMonitoringEnabled = config.device?.airspaceMonitoringEnabled !== false;
+  const airspaceMonitoringEnabled = airspaceMonitoringForMode(normalizedDevice.displayMode);
   if (airspaceMonitoringEnabled) {
     try {
       if (follow.enabled && follow.flights.length) {
@@ -2027,8 +2061,9 @@ async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
     enrichFollowEtaTimes(config, displayFlights);
     await enrichFollowLocation(env, displayFlights);
   }
-  const idleScreens = displayFlights.length ? [] : await getIdleScreens(env, config);
-  const payload = displayPayload(env, config, screenState, compact, mode, followFlights, nearbyFlights, displayFlights, idleScreens, liveSourceStatus);
+  const idleScreens = displayFlights.length || normalizedDevice.displayMode === "airspace" ? [] : await getIdleScreens(env, config);
+  const payloadMode = normalizedDevice.displayMode === "airspace" && !displayFlights.length ? "airspace_waiting" : mode;
+  const payload = displayPayload(env, config, screenState, compact, payloadMode, followFlights, nearbyFlights, displayFlights, idleScreens, liveSourceStatus);
 
   return jsonResponse(await payload, 200, {
     "Cache-Control": "public, max-age=15"
@@ -2054,8 +2089,8 @@ async function displayPayload(
     ? {
         updatedAt: new Date().toISOString(),
         mode,
-        suspended: mode === "disabled" || mode === "night" || mode === "remote_disabled",
-        airspaceMonitoring: config.device?.airspaceMonitoringEnabled !== false,
+        suspended: mode === "disabled" || mode === "night" || mode === "remote_disabled" || mode === "airspace_waiting",
+        airspaceMonitoring: airspaceMonitoringForMode(normalizedDevice.displayMode),
         screenActive: screenState.active,
         screenState,
         deviceStatus,
@@ -2072,7 +2107,7 @@ async function displayPayload(
     : {
         updatedAt: new Date().toISOString(),
         mode,
-        airspaceMonitoring: config.device?.airspaceMonitoringEnabled !== false,
+        airspaceMonitoring: airspaceMonitoringForMode(normalizedDevice.displayMode),
         screenActive: screenState.active,
         screenState,
         deviceStatus,
