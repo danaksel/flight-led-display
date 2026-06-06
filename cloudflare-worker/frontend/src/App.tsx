@@ -22,8 +22,6 @@ type Config = {
     allowedAircraftCategories: AircraftCategoryCode[];
     brightness: number;
     audioVolumePercent: number;
-    clockTickEnabled: boolean;
-    clockTickVolumePercent: number;
     pollSeconds: number;
     displayCycleSeconds: number;
     timetableCycleSeconds: number;
@@ -357,8 +355,6 @@ const defaultConfig: Config = {
     allowedAircraftCategories: defaultAircraftCategories,
     brightness: 80,
     audioVolumePercent: 35,
-    clockTickEnabled: false,
-    clockTickVolumePercent: 20,
     pollSeconds: 90,
     displayCycleSeconds: 5,
     timetableCycleSeconds: 7,
@@ -410,7 +406,6 @@ const defaultSoundState: SoundState = {
 };
 
 const adminTokenStorageKey = "flightDisplayAdminToken";
-const emulatorTickPcmBase64 = "sf+x/08A2P93ADr/xgAS/58AAABPAJv+FgFPABL/7gCb/hYBif8oALH/KACJ/ygAKACJ/58AEv/GAIn/TwAAAAAAsf93AGH/dwCJ/40Bl/xFBWj4sgpY8FIW3OJQH+fo+gZNCSns9RiU5uMZD+nQD2kDQeQGLAzTGiJm7Uv+uxkrxFlh0Ir5bFeyhycc+orrKiqsv3pJMb3UMOXx+edVLKfRYTKzw+NMWJ6wZVmpEz041ecbp/CYB4X9LAL8/RoDEv8WAU8A2P86/wAAxgC1AQAAS/49AU8AOv/GAGH/nwBPAMP+AADuAOr+7gCx/4n/xgA6/xYBEv/GAIn/2P8WAXP+PQES/58Asf+x/58AEv9PAE8Asf8oAAAATwA6/8YAsf/Y/ygA2P+fAIn/TwAoANj/KACx/08Aif93AAAAsf/GAGH/KAAoALH/AABPALH/TwAoANj/AAAoAAAAif+fAGH/TwAAANj/KAAAAAAAAAAoALH/TwCx/ygAAADY/ygAAAAAAAAAKADY/ygA2P8oANj/AAAAAAAAAAAAANj/KADY/ygAAADY/ygAAAAAAAAAAAAAAAAA2P8oANj/KAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
 const appStyles = {
   shell: {
@@ -475,23 +470,6 @@ const appStyles = {
     transform: "translateZ(0)"
   }
 };
-
-function buildEmulatorTickBuffer(audioContext: AudioContext): AudioBuffer {
-  const binary = atob(emulatorTickPcmBase64);
-  const frameCount = Math.floor(binary.length / 2);
-  const audioBuffer = audioContext.createBuffer(1, frameCount, 16000);
-  const channel = audioBuffer.getChannelData(0);
-
-  for (let frame = 0; frame < frameCount; frame += 1) {
-    const low = binary.charCodeAt(frame * 2);
-    const high = binary.charCodeAt(frame * 2 + 1);
-    const sample = low | (high << 8);
-    const signed = sample > 0x7fff ? sample - 0x10000 : sample;
-    channel[frame] = signed / 32768;
-  }
-
-  return audioBuffer;
-}
 
 function normalizeHexColor(value: unknown, fallback: string): string {
   const raw = typeof value === "string" ? value.trim() : "";
@@ -581,8 +559,6 @@ function normalizeConfig(input: Partial<Config> & Record<string, unknown>): Conf
         : defaultAircraftCategories,
       brightness: Number(device.brightness ?? defaultConfig.device.brightness),
       audioVolumePercent: Number(device.audioVolumePercent ?? defaultConfig.device.audioVolumePercent),
-      clockTickEnabled: Boolean(device.clockTickEnabled),
-      clockTickVolumePercent: Number(device.clockTickVolumePercent ?? defaultConfig.device.clockTickVolumePercent),
       pollSeconds: Number(device.pollSeconds ?? defaultConfig.device.pollSeconds),
       displayCycleSeconds: Number(device.displayCycleSeconds ?? defaultConfig.device.displayCycleSeconds),
       timetableCycleSeconds: Number(device.timetableCycleSeconds ?? defaultConfig.device.timetableCycleSeconds),
@@ -928,13 +904,13 @@ function getClockTextRowColor(centerY: number, topColor: string, bottomColor: st
 }
 
 function drawThinClockSegment(ctx: CanvasRenderingContext2D, segment: string, x: number, y: number) {
-  if (segment === "a") ctx.fillRect(x + 1, y, 5, 1);
-  if (segment === "b") ctx.fillRect(x + 6, y + 1, 1, 7);
-  if (segment === "c") ctx.fillRect(x + 6, y + 9, 1, 7);
-  if (segment === "d") ctx.fillRect(x + 1, y + 16, 5, 1);
+  if (segment === "a") ctx.fillRect(x + 1, y, 23, 1);
+  if (segment === "b") ctx.fillRect(x + 24, y + 1, 1, 7);
+  if (segment === "c") ctx.fillRect(x + 24, y + 9, 1, 7);
+  if (segment === "d") ctx.fillRect(x + 1, y + 16, 23, 1);
   if (segment === "e") ctx.fillRect(x, y + 9, 1, 7);
   if (segment === "f") ctx.fillRect(x, y + 1, 1, 7);
-  if (segment === "g") ctx.fillRect(x + 1, y + 8, 5, 1);
+  if (segment === "g") ctx.fillRect(x + 1, y + 8, 23, 1);
 }
 
 function drawThinClockChar(ctx: CanvasRenderingContext2D, char: string, x: number, y: number, color: string) {
@@ -958,7 +934,7 @@ function drawThinClockChar(ctx: CanvasRenderingContext2D, char: string, x: numbe
 function drawThinClockPair(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, color: string) {
   const value = String(text || "--").padStart(2, "-").slice(0, 2);
   drawThinClockChar(ctx, value[0], x, y, color);
-  drawThinClockChar(ctx, value[1], x + 9, y, color);
+  drawThinClockChar(ctx, value[1], x + 30, y, color);
 }
 
 function drawClockTimeStack(ctx: CanvasRenderingContext2D, x: number, time: ReturnType<typeof getClockTimeParts>, topColor: string, bottomColor: string) {
@@ -998,7 +974,7 @@ function drawClockLayoutExact(ctx: CanvasRenderingContext2D, config: Config, fal
     ctx.fillRect(4, 3, activeSeconds, 1);
   }
 
-  drawClockTimeStack(ctx, 70, time, topColor, bottomColor);
+  drawClockTimeStack(ctx, 69, time, topColor, bottomColor);
 }
 
 function drawIdleRowExact(
@@ -1960,7 +1936,7 @@ function MapPicker(props: { lat: number; lon: number; radiusKm: number; onChange
   return <div ref={containerRef} style={{ height: "220px", overflow: "hidden", borderRadius: "15px", border: "1px solid rgba(60, 36, 21, 0.2)" }} />;
 }
 
-function EmulatorPreview(props: { config: Config; preview: PreviewState; screenState: ScreenState; soundEnabled: boolean }) {
+function EmulatorPreview(props: { config: Config; preview: PreviewState; screenState: ScreenState }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const logoCacheRef = useRef<Map<string, HTMLImageElement | null>>(new Map());
   const [logoVersion, setLogoVersion] = useState(0);
@@ -1972,9 +1948,6 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
   const clockFallingMinuteIndexRef = useRef<number | null>(null);
   const clockFallingStartedAtRef = useRef(0);
   const lastFlightSignatureRef = useRef("");
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const tickBufferRef = useRef<AudioBuffer | null>(null);
-  const audioUnlockedRef = useRef(false);
   const runtimeSignature = useMemo(() => JSON.stringify({
     displayMode: props.config.device.displayMode,
     flights: props.preview.flights.map((flight) => makeFlightSignature(flight)),
@@ -1991,75 +1964,6 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
     clockFallingStartedAtRef.current = 0;
     lastFlightSignatureRef.current = "";
   }, [runtimeSignature]);
-
-  async function ensureEmulatorAudioReady() {
-    try {
-      if (!audioContextRef.current) {
-        const audioWindow = window as typeof window & { webkitAudioContext?: typeof AudioContext };
-        const AudioContextCtor = audioWindow.AudioContext ?? audioWindow.webkitAudioContext;
-        if (!AudioContextCtor) return null;
-        audioContextRef.current = new AudioContextCtor();
-      }
-      if (audioContextRef.current.state === "suspended") {
-        await audioContextRef.current.resume();
-      }
-      if (!tickBufferRef.current) {
-        tickBufferRef.current = buildEmulatorTickBuffer(audioContextRef.current);
-      }
-      audioUnlockedRef.current = true;
-      return audioContextRef.current;
-    } catch {
-      return null;
-    }
-  }
-
-  async function playEmulatorClockTick() {
-    if (!audioUnlockedRef.current) return;
-    const audioContext = await ensureEmulatorAudioReady();
-    const tickBuffer = tickBufferRef.current;
-    if (!audioContext || !tickBuffer) return;
-
-    const source = audioContext.createBufferSource();
-    const gain = audioContext.createGain();
-    source.buffer = tickBuffer;
-    gain.gain.value = clamp(props.config.device.clockTickVolumePercent, 0, 100) / 100;
-    source.connect(gain);
-    gain.connect(audioContext.destination);
-    source.start();
-  }
-
-  useEffect(() => {
-    const unlockAudio = () => {
-      void ensureEmulatorAudioReady();
-    };
-    window.addEventListener("pointerdown", unlockAudio, { passive: true });
-    window.addEventListener("keydown", unlockAudio);
-    window.addEventListener("touchstart", unlockAudio, { passive: true });
-    return () => {
-      window.removeEventListener("pointerdown", unlockAudio);
-      window.removeEventListener("keydown", unlockAudio);
-      window.removeEventListener("touchstart", unlockAudio);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!props.screenState.active || !props.soundEnabled) return;
-    if (props.config.device.displayMode !== "clock") return;
-    if (!props.config.device.clockTickEnabled || props.config.device.clockTickVolumePercent <= 0) return;
-
-    let timer = 0;
-    const scheduleNextTick = () => {
-      const now = Date.now();
-      const delay = Math.max(20, 1000 - (now % 1000));
-      timer = window.setTimeout(() => {
-        void playEmulatorClockTick();
-        scheduleNextTick();
-      }, delay);
-    };
-
-    scheduleNextTick();
-    return () => window.clearTimeout(timer);
-  }, [props.config.device.clockTickEnabled, props.config.device.clockTickVolumePercent, props.config.device.displayMode, props.screenState.active, props.soundEnabled]);
 
   useEffect(() => {
     if (!props.screenState.active) return;
@@ -2255,7 +2159,6 @@ export default function App() {
   const [activeSection, setActiveSection] = useState(0);
   const [busy, setBusy] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
-  const [emulatorSoundEnabled, setEmulatorSoundEnabled] = useState(true);
   const slidesRef = useRef<HTMLDivElement | null>(null);
   const navRef = useRef<HTMLDivElement | null>(null);
   const navDragRef = useRef({ active: false, pointerId: -1, x: 0, left: 0, moved: false, pressedIndex: -1 });
@@ -2491,7 +2394,7 @@ export default function App() {
         </div>
       </header>
 
-      <EmulatorPreview config={config} preview={preview} screenState={screenState} soundEnabled={emulatorSoundEnabled} />
+      <EmulatorPreview config={config} preview={preview} screenState={screenState} />
 
       <div
         ref={navRef}
@@ -2613,8 +2516,6 @@ export default function App() {
                   <ColorPicker label="Clock bottom" value={config.device.clockColor} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, clockColor: value } }))} />
                 </div>
               </ColorPresetManager>
-              <ToggleRow label="Clock tick enabled" checked={config.device.clockTickEnabled} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, clockTickEnabled: value } }))} />
-              <SliderField label="Clock tick volume" value={config.device.clockTickVolumePercent} min={0} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, clockTickVolumePercent: value } }))} />
             </div>
           </section>
 
@@ -2788,9 +2689,6 @@ export default function App() {
               <div style={cardStyle()}>
                 <div style={{ fontSize: "14px", fontWeight: 600 }}>Display preview</div>
                 <div style={{ marginTop: "6px", fontSize: "12px", color: "var(--muted-foreground)" }}>{preview.meta || "No data loaded"}</div>
-                <div style={{ marginTop: "12px" }}>
-                  <ToggleRow label="Emulator sound" hint="Only controls sound in the browser preview." checked={emulatorSoundEnabled} onChange={setEmulatorSoundEnabled} />
-                </div>
                 <div style={{ display: "flex", gap: "10px", marginTop: "12px" }}>
                   <button type="button" onClick={() => void loadPreview()} style={{ flex: 1, height: "40px", borderRadius: "8px", border: 0, background: "var(--primary)", color: "#fff" }}>
                     Refresh display

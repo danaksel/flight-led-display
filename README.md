@@ -76,7 +76,6 @@ Fungerende ende-til-ende på Waveshare ESP32-S3-RGB-Matrix og 128 x 64 HUB75-pan
 - Webpanelet poller `/api/device-status` ca. hvert 15. sekund og viser firmware/Wi-Fi-status i display-seksjonen
 - Når skjermen er av, er panelet svart og firmware henter ikke flydata, bare config/status
 - Lydtest og PA-varsel styres fra webpanelets lydvolum
-- Klokketick har egen enable/volume og bruker separat tic-volum i firmware
 - PA-lyden spilles bare når skjermen går fra idle/ingen fly til live flyvisning, ikke for hvert fly i samme live-periode
 - KV-cache for config, screen/sound state, airline-navn, airport-navn, Avinor-data, live flydata og geokoding
 
@@ -102,9 +101,6 @@ Fungerende ende-til-ende på Waveshare ESP32-S3-RGB-Matrix og 128 x 64 HUB75-pan
 
 - `/api/sound-test`
   POST-endepunkt som øker lydtest-`nonce`. ESP32 spiller testlyd når den ser en ny `nonce`. Testen bruker lydvolumet som er lagret i config.
-
-- `/api/clock-tick`
-  GET/POST for klokketick aktivert/deaktivert og eget klokketick-volum.
 
 - `/api/screen-state`
   GET/POST for skjerm av/på fra eksterne systemer. Når skjermen er av, skal ESP32 holde panelet svart og ikke hente live flydata.
@@ -597,7 +593,7 @@ PA_CTRL    IO11
 
 Viktig: Arduino `I2S`-wrapperen setter ikke MCLK på dette oppsettet. Firmware bruker derfor ESP-IDF I2S-driveren direkte for lyd, med I2S0 og eksplisitt `mck_io_num = 12`. HUB75-biblioteket bruker I2S1.
 
-Testlyd ved 5 % var praktisk talt uhørbar på denne lydveien. Første bekreftede hørbare nivå var 35 %. PA-/testlydvolum styres med `Audio volume` i webpanelet. Klokketick styres separat med `Clock tick enabled` og `Clock tick volume`; firmware skalerer tic-samplene uavhengig av PA-volumet.
+Testlyd ved 5 % var praktisk talt uhørbar på denne lydveien. Første bekreftede hørbare nivå var 35 %. PA-/testlydvolum styres med `Audio volume` i webpanelet.
 
 ## Referanse
 

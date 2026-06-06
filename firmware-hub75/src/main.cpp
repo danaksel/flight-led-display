@@ -10,7 +10,6 @@
 #include <sys/time.h>
 #include "WiFiSecrets.h"
 #include "pa_audio.h"
-#include "tic_audio.h"
 #include "splash_image.h"
 
 #ifndef FLIGHT_DEVICE_TOKEN
@@ -59,13 +58,13 @@ constexpr uint8_t ClockSecondsWidth = ClockSecondsEndX - ClockSecondsStartX + 1;
 constexpr uint8_t ClockActiveRowY = 3;
 constexpr uint8_t ClockStackTopY = 4;
 constexpr uint8_t ClockStackBottomY = 62;
-constexpr uint8_t ClockTextStartX = 70;
+constexpr uint8_t ClockTextStartX = 69;
 constexpr uint8_t ClockTextTopY = 3;
 constexpr uint8_t ClockTextMiddleY = 24;
 constexpr uint8_t ClockTextBottomY = 45;
-constexpr uint8_t ClockDigitWidth = 7;
+constexpr uint8_t ClockDigitWidth = 25;
 constexpr uint8_t ClockDigitHeight = 17;
-constexpr uint8_t ClockDigitAdvance = 9;
+constexpr uint8_t ClockDigitAdvance = 30;
 constexpr uint16_t ClockMinuteFallMs = 400;
 constexpr uint16_t TickerHoldMs = 900;
 constexpr uint32_t AudioSampleRate = 16000;
@@ -161,8 +160,6 @@ bool liveFlightsPreviouslyVisible = false;
 bool audioTestNonceSeen = false;
 uint8_t audioVolumePercent = AudioVolumePercentDefault;
 uint8_t activeAudioVolumePercent = AudioVolumePercentDefault;
-bool clockTickEnabled = false;
-uint8_t clockTickVolumePercent = ClockTickVolumePercentDefault;
 int8_t audioI2cSdaPin = -1;
 int8_t audioI2cSclPin = -1;
 uint32_t lastSoundTestNonce = 0;
@@ -172,7 +169,6 @@ uint32_t lastClockRenderAt = 0;
 uint32_t clockFallingStartedAt = 0;
 int8_t lastClockMinute = -1;
 int8_t lastClockSecond = -1;
-int8_t lastClockTickSecond = -1;
 int8_t fallingClockMinuteIndex = -1;
 size_t audioPlaybackOffset = 0;
 int16_t audioChunkBuffer[AudioChunkFrames * 2] = {};
@@ -211,10 +207,7 @@ void sendDeviceStatus();
 bool requestConfigFetch();
 bool requestDisplayFetch();
 void queuePaSound(const char *reason);
-void queueClockTickSound();
-void updateClockTickSound();
-void handleRemoteSoundState(uint32_t remoteSoundTestNonce, uint8_t nextAudioVolumePercent,
-                            bool nextClockTickEnabled, uint8_t nextClockTickVolumePercent);
+void handleRemoteSoundState(uint32_t remoteSoundTestNonce, uint8_t nextAudioVolumePercent);
 uint8_t percentToEs8311Volume(uint8_t percent);
 bool ensureAudioReady();
 bool readLocalTime(struct tm &timeinfo);
@@ -671,44 +664,6 @@ void queuePaSound(const char *reason)
     Serial.println("PA sound finished");
 }
 
-void queueClockTickSound()
-{
-    if (!clockTickEnabled) return;
-    if (clockTickVolumePercent == 0) return;
-    if (!ensureAudioReady()) return;
-    if (audioPlaying) return;
-
-    audioPlaying = true;
-    playRawSoundBlocking(tic_audio_mono_16k_raw, tic_audio_mono_16k_raw_len, 100, clockTickVolumePercent);
-    audioPlaying = false;
-}
-
-void updateClockTickSound()
-{
-    if (!screenActive || !clockLayoutActive || !clockTickEnabled || clockTickVolumePercent == 0)
-    {
-        lastClockTickSecond = -1;
-        return;
-    }
-
-    struct tm timeinfo;
-    if (!readLocalTime(timeinfo))
-    {
-        lastClockTickSecond = -1;
-        return;
-    }
-
-    if (lastClockTickSecond < 0)
-    {
-        lastClockTickSecond = timeinfo.tm_sec;
-        return;
-    }
-
-    if (timeinfo.tm_sec == lastClockTickSecond) return;
-    lastClockTickSecond = timeinfo.tm_sec;
-    queueClockTickSound();
-}
-
 String normalizeLedText(const String &value)
 {
     String result = value;
@@ -942,13 +897,13 @@ uint16_t clockTextFieldColor(uint8_t centerY)
 
 void drawThinClockSegment(int16_t x, int16_t y, char segment, uint16_t color)
 {
-    if (segment == 'a') display->drawFastHLine(x + 1, y, 5, color);
-    if (segment == 'b') display->drawFastVLine(x + 6, y + 1, 7, color);
-    if (segment == 'c') display->drawFastVLine(x + 6, y + 9, 7, color);
-    if (segment == 'd') display->drawFastHLine(x + 1, y + 16, 5, color);
+    if (segment == 'a') display->drawFastHLine(x + 1, y, 23, color);
+    if (segment == 'b') display->drawFastVLine(x + 24, y + 1, 7, color);
+    if (segment == 'c') display->drawFastVLine(x + 24, y + 9, 7, color);
+    if (segment == 'd') display->drawFastHLine(x + 1, y + 16, 23, color);
     if (segment == 'e') display->drawFastVLine(x, y + 9, 7, color);
     if (segment == 'f') display->drawFastVLine(x, y + 1, 7, color);
-    if (segment == 'g') display->drawFastHLine(x + 1, y + 8, 5, color);
+    if (segment == 'g') display->drawFastHLine(x + 1, y + 8, 23, color);
 }
 
 void drawThinClockChar(int16_t x, int16_t y, char c, uint16_t color)
@@ -1906,12 +1861,9 @@ bool postJson(const char *url, const String &payload, String &body, int &httpCod
     return httpCode >= 200 && httpCode < 300;
 }
 
-void handleRemoteSoundState(uint32_t remoteSoundTestNonce, uint8_t nextAudioVolumePercent,
-                            bool nextClockTickEnabled, uint8_t nextClockTickVolumePercent)
+void handleRemoteSoundState(uint32_t remoteSoundTestNonce, uint8_t nextAudioVolumePercent)
 {
     applyAudioVolume(nextAudioVolumePercent);
-    clockTickEnabled = nextClockTickEnabled;
-    clockTickVolumePercent = constrain(nextClockTickVolumePercent, static_cast<uint8_t>(0), static_cast<uint8_t>(100));
 
     if (!audioTestNonceSeen)
     {
@@ -1947,10 +1899,8 @@ void fetchSoundState()
     }
 
     const uint8_t nextAudioVolumePercent = constrain(doc["volumePercent"] | AudioVolumePercentDefault, 0, 100);
-    const bool nextClockTickEnabled = doc["clockTickEnabled"] | false;
-    const uint8_t nextClockTickVolumePercent = constrain(doc["clockTickVolumePercent"] | ClockTickVolumePercentDefault, 0, 100);
     const uint32_t remoteSoundTestNonce = doc["testNonce"] | 0;
-    handleRemoteSoundState(remoteSoundTestNonce, nextAudioVolumePercent, nextClockTickEnabled, nextClockTickVolumePercent);
+    handleRemoteSoundState(remoteSoundTestNonce, nextAudioVolumePercent);
 }
 
 void fetchRealtimeState()
@@ -1978,8 +1928,6 @@ void fetchRealtimeState()
     const String screenVersion = valueOr(doc["screenVersion"]);
     const uint32_t soundNonce = doc["soundTestNonce"] | 0;
     const uint8_t nextAudioVolumePercent = constrain(doc["volumePercent"] | AudioVolumePercentDefault, 0, 100);
-    const bool nextClockTickEnabled = doc["clockTickEnabled"] | clockTickEnabled;
-    const uint8_t nextClockTickVolumePercent = constrain(doc["clockTickVolumePercent"] | clockTickVolumePercent, 0, 100);
 
     if (!realtimeStateSeen)
     {
@@ -1987,7 +1935,7 @@ void fetchRealtimeState()
         lastRealtimeScreenVersion = screenVersion;
         lastRealtimeSoundNonce = soundNonce;
         realtimeStateSeen = true;
-        handleRemoteSoundState(soundNonce, nextAudioVolumePercent, nextClockTickEnabled, nextClockTickVolumePercent);
+        handleRemoteSoundState(soundNonce, nextAudioVolumePercent);
         return;
     }
 
@@ -2008,12 +1956,7 @@ void fetchRealtimeState()
     if (soundNonce > lastRealtimeSoundNonce)
     {
         lastRealtimeSoundNonce = soundNonce;
-        handleRemoteSoundState(soundNonce, nextAudioVolumePercent, nextClockTickEnabled, nextClockTickVolumePercent);
-    }
-    else
-    {
-        clockTickEnabled = nextClockTickEnabled;
-        clockTickVolumePercent = nextClockTickVolumePercent;
+        handleRemoteSoundState(soundNonce, nextAudioVolumePercent);
     }
 }
 
@@ -2090,7 +2033,7 @@ void handleRealtimeText(const uint8_t *payload, size_t length)
     {
         const uint8_t nextAudioVolumePercent = constrain(doc["volumePercent"] | AudioVolumePercentDefault, 0, 100);
         const uint32_t remoteSoundTestNonce = doc["testNonce"] | 0;
-        handleRemoteSoundState(remoteSoundTestNonce, nextAudioVolumePercent, clockTickEnabled, clockTickVolumePercent);
+        handleRemoteSoundState(remoteSoundTestNonce, nextAudioVolumePercent);
     }
 }
 
@@ -2458,10 +2401,6 @@ bool applyDeviceConfigPayload(const String &body, int httpCode, bool httpOk)
     {
         redrawActiveContent();
     }
-    else
-    {
-        drawStatusLines("CONFIG...", "GET device-config", "Waiting", "", colorHeader());
-    }
 
     if (!httpOk)
     {
@@ -2479,7 +2418,7 @@ bool applyDeviceConfigPayload(const String &body, int httpCode, bool httpOk)
         }
         else
         {
-            drawError("CONFIG FAIL", "HTTP " + String(httpCode));
+            drawBlackScreen();
         }
         return false;
     }
@@ -2502,7 +2441,7 @@ bool applyDeviceConfigPayload(const String &body, int httpCode, bool httpOk)
         }
         else
         {
-            drawError("CONFIG JSON", error.c_str());
+            drawBlackScreen();
         }
         return false;
     }
@@ -2554,8 +2493,6 @@ bool applyDeviceConfigPayload(const String &body, int httpCode, bool httpOk)
 
     JsonObject audio = doc["audio"];
     const uint8_t nextAudioVolumePercent = constrain(audio["volumePercent"] | AudioVolumePercentDefault, 0, 100);
-    const bool nextClockTickEnabled = audio["clockTickEnabled"] | false;
-    const uint8_t nextClockTickVolumePercent = constrain(audio["clockTickVolumePercent"] | ClockTickVolumePercentDefault, 0, 100);
     const uint32_t remoteSoundTestNonce = audio["testNonce"] | 0;
 
     const bool timezoneChanged = nextTimeZonePosix != deviceTimeZonePosix;
@@ -2568,7 +2505,7 @@ bool applyDeviceConfigPayload(const String &body, int httpCode, bool httpOk)
 
     effectiveBrightness = requestedBrightness;
     applySafeBrightness(effectiveBrightness);
-    handleRemoteSoundState(remoteSoundTestNonce, nextAudioVolumePercent, nextClockTickEnabled, nextClockTickVolumePercent);
+    handleRemoteSoundState(remoteSoundTestNonce, nextAudioVolumePercent);
 
     if (!screenActive && previousScreenActive)
     {
@@ -2611,9 +2548,6 @@ bool applyDeviceConfigPayload(const String &body, int httpCode, bool httpOk)
     Serial.println(deviceTimeZone);
 
     configFetchActive = false;
-    const String line1 = String("Airport ") + airport;
-    const String line2 = String(screenActive ? "Screen ON" : "Screen OFF") + " / " + String("Mode ") + brightnessMode;
-    const String line3 = String("Cfg ") + configRefreshSeconds + "s Fly " + displayPollSeconds + "s";
     if (!screenActive)
     {
         drawBlackScreen();
@@ -2624,8 +2558,7 @@ bool applyDeviceConfigPayload(const String &body, int httpCode, bool httpOk)
     }
     else
     {
-        drawStatusLines("CONFIG OK", line1.c_str(), line2.c_str(), line3.c_str(), colorSuccess());
-        delay(1200);
+        drawBlackScreen();
     }
     return true;
 }
@@ -2684,7 +2617,7 @@ void drawIdleScreen(uint8_t index)
     clockLayoutActive = false;
     if (idleScreenCount == 0 || index >= idleScreenCount)
     {
-        drawStatusLines("IDLE", "No rows", "", "", colorHeader());
+        drawBlackScreen();
         return;
     }
 
@@ -2946,7 +2879,7 @@ void drawDisplayPayload(JsonDocument &doc)
     else
     {
         liveFlightsPreviouslyVisible = false;
-        drawStatusLines("DISPLAY OK", mode, "No flights/idle", "", colorHeader());
+        drawBlackScreen();
     }
 
     Serial.print("Display OK. mode=");
@@ -2965,10 +2898,6 @@ bool applyDisplayPayload(const String &body, int httpCode, bool httpOk)
     {
         redrawActiveContent();
     }
-    else
-    {
-        drawStatusLines("DISPLAY...", "GET display", "Waiting", "", colorHeader());
-    }
 
     if (!httpOk)
     {
@@ -2982,7 +2911,10 @@ bool applyDisplayPayload(const String &body, int httpCode, bool httpOk)
             redrawActiveContent();
             return false;
         }
-        drawError("DISPLAY FAIL", "HTTP " + String(httpCode));
+        if (!hadActiveLayout)
+        {
+            drawBlackScreen();
+        }
         return false;
     }
 
@@ -2994,7 +2926,10 @@ bool applyDisplayPayload(const String &body, int httpCode, bool httpOk)
         lastDisplayOk = false;
         Serial.print("Display JSON failed: ");
         Serial.println(error.c_str());
-        drawError("DISPLAY JSON", error.c_str());
+        if (!hadActiveLayout)
+        {
+            drawBlackScreen();
+        }
         return false;
     }
 
@@ -3015,6 +2950,7 @@ bool connectWiFi()
     const WifiCandidate candidates[] = {
         {WifiSsid, WifiPassword},
         {WifiFallbackSsid, WifiFallbackPassword},
+        {WifiThirdSsid, WifiThirdPassword},
     };
     constexpr uint32_t TimeoutMs = 6500;
 
@@ -3393,7 +3329,6 @@ void loop()
         lastClockRenderAt = now;
         drawClockMode();
     }
-    updateClockTickSound();
 
     delay(MainLoopDelayMs);
 }

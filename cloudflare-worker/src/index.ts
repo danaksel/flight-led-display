@@ -51,8 +51,6 @@ type DeviceSettings = {
   allowedAircraftCategories: AircraftCategoryCode[];
   brightness: number;
   audioVolumePercent: number;
-  clockTickEnabled: boolean;
-  clockTickVolumePercent: number;
   pollSeconds: number;
   displayCycleSeconds: number;
   timetableCycleSeconds: number;
@@ -606,10 +604,6 @@ export default {
       if (url.pathname === "/api/brightness-mode" && request.method === "POST") return saveBrightnessMode(request, env);
       if (url.pathname === "/api/brightness-mode/day" && request.method === "POST") return writeScreenState(env, { brightnessMode: "day" }, "homey-api");
       if (url.pathname === "/api/brightness-mode/night" && request.method === "POST") return writeScreenState(env, { brightnessMode: "night" }, "homey-api");
-      if (url.pathname === "/api/clock-tick" && request.method === "GET") return clockTickStateResponse(env);
-      if (url.pathname === "/api/clock-tick" && request.method === "POST") return saveClockTickSettings(request, env);
-      if (url.pathname === "/api/clock-tick/enable" && request.method === "POST") return writeClockTickSettings(env, { clockTickEnabled: true }, "homey-api");
-      if (url.pathname === "/api/clock-tick/disable" && request.method === "POST") return writeClockTickSettings(env, { clockTickEnabled: false }, "homey-api");
       if (url.pathname === "/api/sound-test" && request.method === "POST") return triggerSoundTest(request, env);
       if (url.pathname === "/api/flights" && request.method === "GET") return flightsResponse(env, false);
       if (url.pathname === "/api/display" && request.method === "GET") return flightsResponse(env, true);
@@ -673,9 +667,7 @@ function isAutomationApiPath(pathname: string): boolean {
     || pathname === "/api/display-mode"
     || pathname.startsWith("/api/display-mode/")
     || pathname === "/api/brightness-mode"
-    || pathname.startsWith("/api/brightness-mode/")
-    || pathname === "/api/clock-tick"
-    || pathname.startsWith("/api/clock-tick/");
+    || pathname.startsWith("/api/brightness-mode/");
 }
 
 function requestHasToken(request: Request, expectedToken: string, headerName: string): boolean {
@@ -854,9 +846,7 @@ async function configResponse(env: Env): Promise<Response> {
     deviceStatus,
     soundState: {
       ...soundState,
-      volumePercent: normalizedDevice.audioVolumePercent,
-      clockTickEnabled: normalizedDevice.clockTickEnabled,
-      clockTickVolumePercent: normalizedDevice.clockTickVolumePercent
+      volumePercent: normalizedDevice.audioVolumePercent
     },
     aviationstackApiKeyConfigured: Boolean(aviationstackApiKey)
   }, 200, { "Cache-Control": "no-store" });
@@ -914,9 +904,7 @@ async function deviceConfigResponse(env: Env): Promise<Response> {
     screenState,
     audio: {
       testNonce: soundState.testNonce,
-      volumePercent: normalizedDevice.audioVolumePercent,
-      clockTickEnabled: normalizedDevice.clockTickEnabled,
-      clockTickVolumePercent: normalizedDevice.clockTickVolumePercent
+      volumePercent: normalizedDevice.audioVolumePercent
     }
   }, 200, {
     "Cache-Control": "no-store"
@@ -928,9 +916,7 @@ async function soundStateResponse(env: Env): Promise<Response> {
   const normalizedDevice = normalizeDeviceSettings(config.device);
   return jsonResponse({
     ...soundState,
-    volumePercent: normalizedDevice.audioVolumePercent,
-    clockTickEnabled: normalizedDevice.clockTickEnabled,
-    clockTickVolumePercent: normalizedDevice.clockTickVolumePercent
+    volumePercent: normalizedDevice.audioVolumePercent
   }, 200, {
     "Cache-Control": "no-store"
   });
@@ -944,9 +930,7 @@ async function realtimeStateResponse(env: Env): Promise<Response> {
     configVersion: config.updatedAt || "",
     screenVersion: screenState.updatedAt || "",
     soundTestNonce: soundState.testNonce,
-    volumePercent: normalizedDevice.audioVolumePercent,
-    clockTickEnabled: normalizedDevice.clockTickEnabled,
-    clockTickVolumePercent: normalizedDevice.clockTickVolumePercent
+    volumePercent: normalizedDevice.audioVolumePercent
   }, 200, {
     "Cache-Control": "no-store"
   });
@@ -991,18 +975,6 @@ async function displayModeResponse(env: Env): Promise<Response> {
   const device = normalizeDeviceSettings(config.device);
   return jsonResponse({
     displayMode: device.displayMode,
-    updatedAt: config.updatedAt || null
-  }, 200, {
-    "Cache-Control": "no-store"
-  });
-}
-
-async function clockTickStateResponse(env: Env): Promise<Response> {
-  const config = await getConfig(env);
-  const device = normalizeDeviceSettings(config.device);
-  return jsonResponse({
-    enabled: device.clockTickEnabled,
-    volumePercent: device.clockTickVolumePercent,
     updatedAt: config.updatedAt || null
   }, 200, {
     "Cache-Control": "no-store"
@@ -1164,65 +1136,8 @@ async function triggerSoundTest(request: Request, env: Env): Promise<Response> {
   });
   return jsonResponse({
     ...soundState,
-    volumePercent: normalizedDevice.audioVolumePercent,
-    clockTickEnabled: normalizedDevice.clockTickEnabled,
-    clockTickVolumePercent: normalizedDevice.clockTickVolumePercent
+    volumePercent: normalizedDevice.audioVolumePercent
   }, 200, { "Cache-Control": "no-store" });
-}
-
-async function writeClockTickSettings(
-  env: Env,
-  patch: Partial<Pick<DeviceSettings, "clockTickEnabled" | "clockTickVolumePercent">>,
-  source = "api"
-): Promise<Response> {
-  const config = await getConfig(env);
-  const device = normalizeDeviceSettings(config.device);
-  const updatedAt = new Date().toISOString();
-  const nextDevice: DeviceSettings = {
-    ...device,
-    clockTickEnabled: typeof patch.clockTickEnabled === "boolean" ? patch.clockTickEnabled : device.clockTickEnabled,
-    clockTickVolumePercent: patch.clockTickVolumePercent === undefined
-      ? device.clockTickVolumePercent
-      : clampNumber(patch.clockTickVolumePercent, 0, 100, device.clockTickVolumePercent)
-  };
-
-  await env.FLIGHT_DISPLAY_KV.put(CONFIG_KEY, JSON.stringify({
-    ...config,
-    device: nextDevice,
-    updatedAt
-  }));
-  await broadcastRealtime(env, {
-    type: "config_changed",
-    updatedAt,
-    source: source.slice(0, 80)
-  });
-  return jsonResponse({
-    enabled: nextDevice.clockTickEnabled,
-    volumePercent: nextDevice.clockTickVolumePercent,
-    updatedAt
-  }, 200, { "Cache-Control": "no-store" });
-}
-
-async function saveClockTickSettings(request: Request, env: Env): Promise<Response> {
-  let body: unknown = {};
-  try {
-    body = await request.json();
-  } catch {
-    return jsonResponse({ error: "Expected JSON body" }, 400, { "Cache-Control": "no-store" });
-  }
-
-  const record = body && typeof body === "object" ? body as Record<string, unknown> : {};
-  const enabled = firstBoolean(record, ["enabled", "active", "on"]);
-  const volumeValue = firstNumber(record, ["volumePercent", "volume"]);
-  if (enabled === undefined && volumeValue === undefined) {
-    return jsonResponse({ error: "Expected enabled and/or volumePercent" }, 400, { "Cache-Control": "no-store" });
-  }
-
-  const source = firstString(record, ["source"]) || "api";
-  return writeClockTickSettings(env, {
-    clockTickEnabled: enabled,
-    clockTickVolumePercent: volumeValue === undefined ? undefined : clamp(volumeValue, 0, 100)
-  }, source);
 }
 
 async function avinorBoardResponse(env: Env): Promise<Response> {
@@ -1466,10 +1381,6 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
     allowedAircraftCategories: normalizeAircraftCategoryFilter((v as { allowedAircraftCategories?: unknown }).allowedAircraftCategories),
     brightness: clampNumber(v.brightness, 1, 100, 80),
     audioVolumePercent: clampNumber((v as { audioVolumePercent?: unknown }).audioVolumePercent, 0, 100, 35),
-    clockTickEnabled: typeof (v as { clockTickEnabled?: unknown }).clockTickEnabled === "boolean"
-      ? Boolean((v as { clockTickEnabled?: unknown }).clockTickEnabled)
-      : false,
-    clockTickVolumePercent: clampNumber((v as { clockTickVolumePercent?: unknown }).clockTickVolumePercent, 0, 100, 20),
     pollSeconds: clampNumber(v.pollSeconds, 30, 900, 90),
     displayCycleSeconds: clampNumber(v.displayCycleSeconds, 2, 30, 5),
     timetableCycleSeconds: clampNumber((v as { timetableCycleSeconds?: unknown }).timetableCycleSeconds, 2, 60, 7),
@@ -4281,7 +4192,7 @@ function renderIndexHtml(): string {
           <h2>Klokke</h2>
         </summary>
         <div class="section-content">
-        <p class="section-note">Alle valg for klokkemodus samlet på ett sted: gradient, sekundtick og egen lydstyrke.</p>
+        <p class="section-note">Alle valg for klokkemodus samlet på ett sted.</p>
         <div class="row">
           <div>
             <label for="clockTopColor">Gradienttopp</label>
@@ -4294,16 +4205,6 @@ function renderIndexHtml(): string {
             <div class="field-help">Eldre linjer og nederste del av klokkefeltet går mot denne fargen.</div>
           </div>
         </div>
-        <label class="inline-toggle" for="clockTickEnabled">
-          <input id="clockTickEnabled" type="checkbox">
-          <span>Klokketick aktiv</span>
-        </label>
-        <div class="range-label">
-          <label for="clockTickVolumePercent">Klokketick-volum</label>
-          <span class="range-value"><span id="clockTickVolumeValue">20</span>%</span>
-        </div>
-        <input id="clockTickVolumePercent" type="range" min="0" max="100" step="1">
-        <div class="field-help">Spilles for hver ny sekund-dot i klokkemodus. Kan også styres fra Homey.</div>
         </div>
       </details>
       <details class="card flight-card">
@@ -4671,9 +4572,6 @@ function renderIndexHtml(): string {
       soundTest: document.querySelector("#soundTest"),
       audioVolumePercent: document.querySelector("#audioVolumePercent"),
       audioVolumeValue: document.querySelector("#audioVolumeValue"),
-      clockTickEnabled: document.querySelector("#clockTickEnabled"),
-      clockTickVolumePercent: document.querySelector("#clockTickVolumePercent"),
-      clockTickVolumeValue: document.querySelector("#clockTickVolumeValue"),
       deviceBrightness: document.querySelector("#deviceBrightness"),
       deviceBrightnessValue: document.querySelector("#deviceBrightnessValue"),
       nightBrightness: document.querySelector("#nightBrightness"),
@@ -4745,21 +4643,17 @@ function renderIndexHtml(): string {
     let tickerStartedAt = performance.now();
     let clockAnimationTimer = null;
     let clockLastMinute = null;
-    let clockLastSecond = null;
     let clockFallingMinuteIndex = null;
     let clockFallingStartedAt = 0;
     let emulatorPollTimer = null;
     let emulatorPolling = false;
     let emulatorPollInFlight = false;
     let formIsDirty = false;
-    let emulatorAudioContext = null;
-    let emulatorTickBuffer = null;
 	    let screenState = { active: true, brightnessMode: "day", lastActivatedAt: null, lastDeactivatedAt: null, lastBrightnessModeChangedAt: null, updatedAt: null, source: null };
 	    let soundState = { testNonce: 0, lastTriggeredAt: null, source: null };
 	    const logoCache = new Map();
 	    const adminTokenStorageKey = "flightDisplayAdminToken";
 	    const defaultAircraftCategories = ["P", "C", "M", "J", "H", "B", "G", "D", "V", "O", "N"];
-      const emulatorTickPcmBase64 = "/v/+/wIA//8DAPv/BQD6/wQAAAACAPf/BwACAPr/BgD3/wcA/f8BAP7/AQD9/wEAAQD9/wQA+v8FAP3/AgAAAAAA/v8DAPz/AwD9/woA6v8iAM//RQCb/5AARP/KAGv/LQA8AID/oQBc/6cAbP9mABYATf8cAd7+3ACI//X/pgB+/nQCDP2/Agv+/wDa/3z/EAFh/toBUf47AaX/Zf8eAdX+RQF7/vABiv2QAtH9igHs/rQAnf8xAPD/DgDz/xQA+v8HAAIA///7/wAABQALAAAA9f8IAAIA+/8FAPz/BAACAPj/AAAGAPn/BgD+//3/BQD7/wcA+v8FAP3///8HAPb/CAD6/wQA/v/+/wQA+v8CAAIA/v8BAAAAAgD7/wUA/v///wEA//8EAP3/AgABAP//AQD+/wIA/f8DAAAA/v8FAPz/AQABAP7/AAACAP7/AgABAP//AAABAAAA/f8EAPz/AgAAAP//AQAAAAAAAAABAP7/AgD+/wEAAAD//wEAAAAAAAAAAQD//wEA//8BAP//AAAAAAAAAAAAAP//AQD//wEAAAD//wEAAAAAAAAAAAAAAAAA//8BAP//AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
     init();
 
@@ -4819,13 +4713,7 @@ function renderIndexHtml(): string {
         input.addEventListener("input", markDirty);
         input.addEventListener("change", markDirty);
       });
-      ["pointerdown", "keydown", "touchstart"].forEach((eventName) => {
-        window.addEventListener(eventName, () => {
-          ensureEmulatorAudioReady();
-        }, { passive: true });
-      });
       els.audioVolumePercent.addEventListener("input", updateAudioVolumeUi);
-      els.clockTickVolumePercent.addEventListener("input", updateClockTickVolumeUi);
       bindRangeValues();
       renderEmulator();
     }
@@ -4869,10 +4757,7 @@ function renderIndexHtml(): string {
       els.clockTopColor.value = device.clockTopColor || "#ffffff";
       els.clockColor.value = device.clockColor || "#081b6b";
       els.audioVolumePercent.value = device.audioVolumePercent ?? 35;
-      els.clockTickEnabled.checked = device.clockTickEnabled === true;
-      els.clockTickVolumePercent.value = device.clockTickVolumePercent ?? 20;
       updateAudioVolumeUi();
-      updateClockTickVolumeUi();
       els.nightBrightness.value = night.brightness ?? 0;
       els.pollSeconds.value = device.pollSeconds ?? 90;
       els.cycleSeconds.value = device.displayCycleSeconds ?? 5;
@@ -4927,13 +4812,11 @@ function renderIndexHtml(): string {
 	          enabled: true,
           displayMode: els.displayMode.value,
 	          airspaceMonitoringEnabled: els.airspaceMonitoringEnabled.checked,
-	          allowedAircraftCategories: els.aircraftCategoryInputs
-	            .filter((input) => input.checked)
-	            .map((input) => input.dataset.aircraftCategory),
+          allowedAircraftCategories: els.aircraftCategoryInputs
+            .filter((input) => input.checked)
+            .map((input) => input.dataset.aircraftCategory),
           brightness: Number(els.deviceBrightness.value),
           audioVolumePercent: Number(els.audioVolumePercent.value),
-          clockTickEnabled: els.clockTickEnabled.checked,
-          clockTickVolumePercent: Number(els.clockTickVolumePercent.value),
           pollSeconds: Number(els.pollSeconds.value),
           displayCycleSeconds: Number(els.cycleSeconds.value),
           timetableCycleSeconds: Number(els.timetableCycleSeconds.value),
@@ -5109,7 +4992,6 @@ function renderIndexHtml(): string {
       els.progressColor,
       els.routeProgressColor,
       els.displayMode,
-      els.clockTickEnabled,
       els.timetableHeaderColor,
       els.timetableDataColor,
       els.timetableTimeColor,
@@ -5580,14 +5462,12 @@ function renderIndexHtml(): string {
         ctx.fillRect(4, 3, activeSeconds, 1);
       }
 
-      drawClockTimeStack(ctx, 70, time, clockTopColor, clockBottomColor);
-      maybePlayEmulatorClockTick(time.second);
+      drawClockTimeStack(ctx, 69, time, clockTopColor, clockBottomColor);
       els.emuMeta.textContent = "Clock layout: sekundlinje fra kolonne 4-63, minutter stablet nederst, HH/MM/SS fra kolonne 70 · " + time.hour + ":" + time.minute + ":" + time.second.toString().padStart(2, "0") + ".";
     }
 
     function resetClockEmulatorState() {
       clockLastMinute = null;
-      clockLastSecond = null;
       clockFallingMinuteIndex = null;
       clockFallingStartedAt = 0;
     }
@@ -5631,7 +5511,7 @@ function renderIndexHtml(): string {
     function drawThinClockPair(ctx, text, x, y, color) {
       const value = String(text || "--").padStart(2, "-").slice(0, 2);
       drawThinClockChar(ctx, value[0], x, y, color);
-      drawThinClockChar(ctx, value[1], x + 9, y, color);
+      drawThinClockChar(ctx, value[1], x + 30, y, color);
     }
 
     function drawThinClockChar(ctx, char, x, y, color) {
@@ -5654,13 +5534,13 @@ function renderIndexHtml(): string {
     }
 
     function drawThinClockSegment(ctx, segment, x, y) {
-      if (segment === "a") ctx.fillRect(x + 1, y, 5, 1);
-      if (segment === "b") ctx.fillRect(x + 6, y + 1, 1, 7);
-      if (segment === "c") ctx.fillRect(x + 6, y + 9, 1, 7);
-      if (segment === "d") ctx.fillRect(x + 1, y + 16, 5, 1);
+      if (segment === "a") ctx.fillRect(x + 1, y, 23, 1);
+      if (segment === "b") ctx.fillRect(x + 24, y + 1, 1, 7);
+      if (segment === "c") ctx.fillRect(x + 24, y + 9, 1, 7);
+      if (segment === "d") ctx.fillRect(x + 1, y + 16, 23, 1);
       if (segment === "e") ctx.fillRect(x, y + 9, 1, 7);
       if (segment === "f") ctx.fillRect(x, y + 1, 1, 7);
-      if (segment === "g") ctx.fillRect(x + 1, y + 8, 5, 1);
+      if (segment === "g") ctx.fillRect(x + 1, y + 8, 23, 1);
     }
 
     function interpolateHexColor(from, to, step, steps) {
@@ -5713,68 +5593,6 @@ function renderIndexHtml(): string {
     function millisecondsUntilNextSecond() {
       const now = new Date();
       return Math.max(50, 1000 - now.getMilliseconds() + 20);
-    }
-
-    async function ensureEmulatorAudioReady() {
-      try {
-        if (!emulatorAudioContext) {
-          const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
-          if (!AudioContextCtor) return null;
-          emulatorAudioContext = new AudioContextCtor();
-        }
-        if (emulatorAudioContext.state === "suspended") {
-          await emulatorAudioContext.resume();
-        }
-        if (!emulatorTickBuffer) {
-          emulatorTickBuffer = buildEmulatorTickBuffer(emulatorAudioContext);
-        }
-        return emulatorAudioContext;
-      } catch {
-        return null;
-      }
-    }
-
-    function buildEmulatorTickBuffer(audioContext) {
-      const binary = atob(emulatorTickPcmBase64);
-      const pcmBytes = new Uint8Array(binary.length);
-      for (let index = 0; index < binary.length; index += 1) {
-        pcmBytes[index] = binary.charCodeAt(index);
-      }
-      const frameCount = Math.floor(pcmBytes.length / 2);
-      const audioBuffer = audioContext.createBuffer(1, frameCount, 16000);
-      const channel = audioBuffer.getChannelData(0);
-      for (let frame = 0; frame < frameCount; frame += 1) {
-        const low = pcmBytes[frame * 2];
-        const high = pcmBytes[frame * 2 + 1];
-        const sample = (high << 8) | low;
-        const signed = sample > 0x7fff ? sample - 0x10000 : sample;
-        channel[frame] = signed / 32768;
-      }
-      return audioBuffer;
-    }
-
-    function maybePlayEmulatorClockTick(second) {
-      if (clockLastSecond === null) {
-        clockLastSecond = second;
-        return;
-      }
-      if (second === clockLastSecond) return;
-      clockLastSecond = second;
-      if (!els.clockTickEnabled.checked) return;
-      playEmulatorClockTick();
-    }
-
-    async function playEmulatorClockTick() {
-      const audioContext = await ensureEmulatorAudioReady();
-      if (!audioContext || !emulatorTickBuffer) return;
-
-      const source = audioContext.createBufferSource();
-      source.buffer = emulatorTickBuffer;
-      const gain = audioContext.createGain();
-      gain.gain.value = Math.max(0, Math.min(1, Number(els.clockTickVolumePercent.value || 0) / 100));
-      source.connect(gain);
-      gain.connect(audioContext.destination);
-      source.start();
     }
 
     function buildClockCirclePoints(centerX, centerY, radius, count) {
@@ -6138,10 +5956,6 @@ function renderIndexHtml(): string {
       els.audioVolumeValue.textContent = String(Math.round(Number(els.audioVolumePercent.value || 0)));
     }
 
-    function updateClockTickVolumeUi() {
-      els.clockTickVolumeValue.textContent = String(Math.round(Number(els.clockTickVolumePercent.value || 0)));
-    }
-
     function updateFollowInputUi() {
       els.followFlightsLabel.textContent = "Flightnummer";
       els.followFlights.placeholder = "SK4673, DY1304, DOC45";
@@ -6152,7 +5966,6 @@ function renderIndexHtml(): string {
       [
         els.radius,
         els.audioVolumePercent,
-        els.clockTickVolumePercent,
         els.deviceBrightness,
         els.nightBrightness,
         els.pollSeconds,
@@ -6175,7 +5988,6 @@ function renderIndexHtml(): string {
       const pairs = [
         [els.radius, els.radiusValue],
         [els.audioVolumePercent, els.audioVolumeValue],
-        [els.clockTickVolumePercent, els.clockTickVolumeValue],
         [els.deviceBrightness, els.deviceBrightnessValue],
         [els.nightBrightness, els.nightBrightnessValue],
         [els.pollSeconds, els.pollSecondsValue],
