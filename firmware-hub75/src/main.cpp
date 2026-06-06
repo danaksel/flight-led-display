@@ -9,6 +9,7 @@
 #include <driver/i2s.h>
 #include <sys/time.h>
 #include "WiFiSecrets.h"
+#include "WifiSetupManager.h"
 #include "pa_audio.h"
 #include "splash_image.h"
 
@@ -78,7 +79,11 @@ constexpr int16_t TimetableRowsTopY = 15;
 constexpr int16_t TimetableRowsBottomY = 64;
 constexpr uint8_t MainLoopDelayMs = 20;
 constexpr uint8_t WifiReconnectSeconds = 30;
+constexpr uint8_t SetupButtonPin = 0;
+constexpr uint32_t WifiConnectTimeoutMs = 6500;
 constexpr uint16_t ConfigFallbackPollSeconds = 300;
+constexpr const char *BrandName = "SKYFRAME";
+constexpr const char *SetupAccessPointName = "SKYFRAME-SETUP";
 constexpr uint8_t SpeakerI2cSdaPin = 47;
 constexpr uint8_t SpeakerI2cSclPin = 48;
 constexpr uint8_t SpeakerMclkPin = 12;
@@ -112,6 +117,7 @@ struct IdleScreen
 
 MatrixPanel_I2S_DMA *display = nullptr;
 WebSocketsClient realtimeSocket;
+WifiSetupManager wifiSetupManager;
 uint32_t nextConfigFetchAt = 0;
 uint32_t nextDisplayFetchAt = 0;
 uint32_t nextWifiReconnectAt = 0;
@@ -212,6 +218,11 @@ uint8_t percentToEs8311Volume(uint8_t percent);
 bool ensureAudioReady();
 bool readLocalTime(struct tm &timeinfo);
 void drawFetchIndicator();
+void enterSetupMode(const char *reason);
+void handleSetupManagerEvent(WifiSetupManager::Event event, const String &primary, const String &secondary);
+void drawBrandedStatusLines(const char *title, const char *line1, const char *line2, const char *line3, uint16_t color);
+String defaultHostname();
+void applyStationHostname();
 
 void startRealtimeTaskIfNeeded()
 {
@@ -1494,23 +1505,27 @@ void drawBlackScreen()
 
 void drawSplashImage()
 {
+    display->fillScreen(panelColor(0, 0, 0));
+    const uint16_t white = panelColor(0xFF, 0xFF, 0xFF);
     uint32_t pixel = 0;
     constexpr uint32_t totalPixels = static_cast<uint32_t>(SplashWidth) * static_cast<uint32_t>(SplashHeight);
-    for (uint16_t runIndex = 0; runIndex < SplashRunCount && pixel < totalPixels; ++runIndex)
+    for (uint16_t byteIndex = 0; byteIndex < SplashBitmapBytes && pixel < totalPixels; ++byteIndex)
     {
-        const uint16_t count = pgm_read_word(&SplashImageRuns[runIndex].count);
-        const uint16_t color = pgm_read_word(&SplashImageRuns[runIndex].color);
-        for (uint16_t i = 0; i < count && pixel < totalPixels; ++i, ++pixel)
+        const uint8_t packed = pgm_read_byte(&SplashBitmap[byteIndex]);
+        for (uint8_t bitIndex = 0; bitIndex < 8 && pixel < totalPixels; ++bitIndex, ++pixel)
         {
-            display->drawPixel(pixel % PanelWidth, pixel / PanelWidth, color);
+            if ((packed & (0x80 >> bitIndex)) != 0)
+            {
+                display->drawPixel(pixel % PanelWidth, pixel / PanelWidth, white);
+            }
         }
     }
 }
 
-void drawSplashTextLine(const String &text, int16_t y)
+void drawSplashTextLine(const String &text, int16_t y, uint16_t color = 0)
 {
-    const uint16_t black = panelColor(0, 0, 0);
-    drawTextFit(text, 2, y, black, 125);
+    const uint16_t textColor = color ? color : colorData();
+    drawTextFit(text, 3, y, textColor, 122);
 }
 
 void drawStartupSplashStatus(const char *title, const char *line1, const char *line2)
@@ -1519,9 +1534,9 @@ void drawStartupSplashStatus(const char *title, const char *line1, const char *l
     liveLayoutActive = false;
     clockLayoutActive = false;
     drawSplashImage();
-    drawSplashTextLine(title, 37);
-    drawSplashTextLine(line1, 45);
-    drawSplashTextLine(line2, 53);
+    drawSplashTextLine(title, 34, colorHeader());
+    drawSplashTextLine(line1, 44, colorData());
+    drawSplashTextLine(line2, 54, colorData());
     presentFrame();
 }
 
@@ -1609,6 +1624,22 @@ void drawStatusLines(const char *title, const char *line1, const char *line2, co
     display->print(line2);
     display->setCursor(4, 50);
     display->print(line3);
+    presentFrame();
+}
+
+void drawBrandedStatusLines(const char *title, const char *line1, const char *line2, const char *line3, uint16_t color)
+{
+    idleLayoutActive = false;
+    liveLayoutActive = false;
+    clockLayoutActive = false;
+    drawSplashImage();
+    drawSplashTextLine(title, 34, color);
+    drawSplashTextLine(line1, 44, colorData());
+    drawSplashTextLine(line2, 54, colorData());
+    if (line3 && line3[0] != '\0')
+    {
+        drawTextRight(line3, 124, 54, colorData(), 42);
+    }
     presentFrame();
 }
 
@@ -2052,6 +2083,7 @@ String buildDeviceStatusPayload()
 
     JsonObject wifi = doc["wifi"].to<JsonObject>();
     wifi["connected"] = true;
+    wifi["hostname"] = defaultHostname();
     wifi["ssid"] = WiFi.SSID();
     wifi["rssi"] = WiFi.RSSI();
     wifi["ip"] = WiFi.localIP().toString();
@@ -2941,110 +2973,104 @@ bool applyDisplayPayload(const String &body, int httpCode, bool httpOk)
 
 bool connectWiFi()
 {
-    struct WifiCandidate
+    String ssid;
+    String password;
+    if (!wifiSetupManager.loadStoredCredentials(ssid, password))
     {
-        const char *ssid;
-        const char *password;
-    };
+        Serial.println("No stored Wi-Fi credentials found");
+        return false;
+    }
 
-    const WifiCandidate candidates[] = {
-        {WifiSsid, WifiPassword},
-        {WifiFallbackSsid, WifiFallbackPassword},
-        {WifiThirdSsid, WifiThirdPassword},
-    };
-    constexpr uint32_t TimeoutMs = 6500;
+    Serial.print("Connecting to saved Wi-Fi SSID: ");
+    Serial.println(ssid);
 
     WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);
+    applyStationHostname();
+    WiFi.disconnect(false, true);
+    delay(100);
+    WiFi.begin(ssid.c_str(), password.c_str());
 
-    for (const WifiCandidate &candidate : candidates)
+    if (screenActive)
     {
-        if (!candidate.ssid || candidate.ssid[0] == '\0')
+        drawWifiStatus("WIFI...", ssid.c_str(), "Connecting", colorHeader());
+    }
+    else
+    {
+        drawBlackScreen();
+    }
+
+    const uint32_t startedAt = millis();
+    uint8_t dotCount = 0;
+    wl_status_t status = WL_IDLE_STATUS;
+
+    while (millis() - startedAt < WifiConnectTimeoutMs)
+    {
+        delay(250);
+        status = WiFi.status();
+        if (status == WL_CONNECTED)
         {
-            continue;
+            break;
         }
 
-        Serial.print("Connecting to Wi-Fi SSID: ");
-        Serial.println(candidate.ssid);
+        Serial.print(".");
+        if (screenActive)
+        {
+            if (startupSplashActive)
+            {
+                String dots;
+                for (uint8_t i = 0; i < dotCount; ++i)
+                {
+                    dots += ".";
+                }
+                drawStartupSplashStatus("WIFI...", ssid.c_str(), dots.c_str());
+            }
+            else
+            {
+                display->fillRect(4, 50, PanelWidth - 8, 8, panelColor(0, 0, 0));
+                display->setCursor(4, 50);
+                display->setTextColor(colorHeader());
+                for (uint8_t i = 0; i < dotCount; ++i)
+                {
+                    display->print(".");
+                }
+                presentFrame();
+            }
+        }
+        dotCount = (dotCount + 1) % 18;
+    }
 
-        WiFi.disconnect(false);
-        delay(100);
-        WiFi.begin(candidate.ssid, candidate.password);
+    Serial.println();
+
+    if (WiFi.status() == WL_CONNECTED)
+    {
+        const String ip = WiFi.localIP().toString();
+        Serial.print("Wi-Fi connected. IP: ");
+        Serial.println(ip);
+        Serial.print("RSSI: ");
+        Serial.println(WiFi.RSSI());
+        initLocalTime();
 
         if (screenActive)
         {
-            drawWifiStatus("WIFI...", candidate.ssid, "Connecting", colorHeader());
+            drawWifiStatus("WIFI OK", ssid.c_str(), ip.c_str(), colorSuccess());
         }
         else
         {
             drawBlackScreen();
         }
-
-        const uint32_t startedAt = millis();
-        uint8_t dotCount = 0;
-
-        while (WiFi.status() != WL_CONNECTED && millis() - startedAt < TimeoutMs)
-        {
-            delay(250);
-            Serial.print(".");
-
-            if (screenActive)
-            {
-                if (startupSplashActive)
-                {
-                    String dots;
-                    for (uint8_t i = 0; i < dotCount; ++i)
-                    {
-                        dots += ".";
-                    }
-                    drawStartupSplashStatus("WIFI...", candidate.ssid, dots.c_str());
-                }
-                else
-                {
-                    display->fillRect(4, 50, PanelWidth - 8, 8, panelColor(0, 0, 0));
-                    display->setCursor(4, 50);
-                    display->setTextColor(colorHeader());
-                    for (uint8_t i = 0; i < dotCount; ++i)
-                    {
-                        display->print(".");
-                    }
-                    presentFrame();
-                }
-            }
-            dotCount = (dotCount + 1) % 18;
-        }
-
-        Serial.println();
-
-        if (WiFi.status() == WL_CONNECTED)
-        {
-            const String ip = WiFi.localIP().toString();
-            Serial.print("Wi-Fi connected. IP: ");
-            Serial.println(ip);
-            Serial.print("RSSI: ");
-            Serial.println(WiFi.RSSI());
-            initLocalTime();
-
-            if (screenActive)
-            {
-                drawWifiStatus("WIFI OK", candidate.ssid, ip.c_str(), colorSuccess());
-            }
-            else
-            {
-                drawBlackScreen();
-            }
-            wifiOfflineNotified = false;
-            return true;
-        }
-
-        Serial.print("Wi-Fi failed for SSID ");
-        Serial.print(candidate.ssid);
-        Serial.print(", status=");
-        Serial.println(static_cast<int>(WiFi.status()));
+        wifiOfflineNotified = false;
+        return true;
     }
+
+    Serial.print("Wi-Fi failed for stored SSID ");
+    Serial.print(ssid);
+    Serial.print(", status=");
+    Serial.println(static_cast<int>(WiFi.status()));
 
     if (screenActive)
     {
-        drawWifiStatus("WIFI FAIL", "All networks", "Retrying", colorCanceled());
+        drawWifiStatus("WIFI FAIL", ssid.c_str(), "Open setup", colorCanceled());
     }
     else
     {
@@ -3052,6 +3078,21 @@ bool connectWiFi()
     }
     wifiOfflineNotified = true;
     return false;
+}
+
+String defaultHostname()
+{
+    char hostname[32] = {};
+    const uint64_t efuseMac = ESP.getEfuseMac();
+    snprintf(hostname, sizeof(hostname), "skyframe-%06llx",
+             static_cast<unsigned long long>(efuseMac & 0xFFFFFFULL));
+    return String(hostname);
+}
+
+void applyStationHostname()
+{
+    const String hostname = defaultHostname();
+    WiFi.setHostname(hostname.c_str());
 }
 
 void scheduleWifiReconnect(uint32_t now)
@@ -3064,6 +3105,44 @@ void resumeNetworkPollingAfterReconnect()
     requestConfigFetch();
     nextConfigFetchAt = UINT32_MAX;
     nextDisplayFetchAt = 0;
+}
+
+void enterSetupMode(const char *reason)
+{
+    Serial.print("Entering setup mode: ");
+    Serial.println(reason);
+    wifiOfflineNotified = true;
+    nextWifiReconnectAt = 0;
+    if (!wifiSetupManager.startSetupMode())
+    {
+        Serial.println("Setup mode failed to start");
+        if (screenActive)
+        {
+            drawBrandedStatusLines("SETUP FAIL", "SKYFRAME AP failed", "Restart device", "", colorCanceled());
+        }
+    }
+}
+
+void handleSetupManagerEvent(WifiSetupManager::Event event, const String &primary, const String &secondary)
+{
+    switch (event)
+    {
+        case WifiSetupManager::Event::SetupModeStarted:
+            drawBrandedStatusLines("SETUP MODE", "Connect to", primary.c_str(), "", colorHeader());
+            break;
+        case WifiSetupManager::Event::SetupConnectAttempt:
+            drawBrandedStatusLines("CONNECTING", primary.c_str(), "Joining network", "", colorHeader());
+            break;
+        case WifiSetupManager::Event::SetupConnectSuccess:
+            drawBrandedStatusLines("SETUP OK", primary.c_str(), "SkyFrame online", "", colorSuccess());
+            break;
+        case WifiSetupManager::Event::SetupConnectFailed:
+            drawBrandedStatusLines("SETUP FAIL", primary.c_str(), "Wrong password?", "Try again", colorCanceled());
+            break;
+        case WifiSetupManager::Event::CredentialsCleared:
+            drawBrandedStatusLines("SETUP MODE", "Saved Wi-Fi", "was removed", "", colorHeader());
+            break;
+    }
 }
 }
 
@@ -3099,7 +3178,9 @@ void setup()
 
     display->clearScreen();
     Serial.println("HUB75 initialized");
-    drawStartupSplashStatus("BOOT", "Starting", "");
+    drawStartupSplashStatus(BrandName, "Starting up", "");
+    wifiSetupManager.begin(SetupAccessPointName, SetupButtonPin);
+    wifiSetupManager.setEventCallback(handleSetupManagerEvent);
     ensureAudioReady();
     networkMutex = xSemaphoreCreateMutex();
     pendingPayloadMutex = xSemaphoreCreateMutex();
@@ -3125,13 +3206,19 @@ void setup()
             &soundPollTaskHandle,
             0);
     }
-    if (connectWiFi())
+
+    if (wifiSetupManager.shouldForceSetupOnBoot())
+    {
+        Serial.println("BOOT held during startup, forcing setup mode");
+        enterSetupMode("boot-button");
+    }
+    else if (connectWiFi())
     {
         resumeNetworkPollingAfterReconnect();
     }
     else
     {
-        scheduleWifiReconnect(millis());
+        enterSetupMode("connect-failed");
     }
 }
 
@@ -3139,6 +3226,15 @@ void loop()
 {
     static uint32_t tick = 0;
     const uint32_t now = millis();
+
+    wifiSetupManager.loop();
+
+    if (wifiSetupManager.shouldReboot())
+    {
+        wifiSetupManager.clearRebootRequest();
+        delay(250);
+        ESP.restart();
+    }
 
     if (now - lastHeartbeatAt >= 1000)
     {
@@ -3158,6 +3254,13 @@ void loop()
             Serial.print(" rssi=");
             Serial.print(WiFi.RSSI());
         }
+        else if (wifiSetupManager.isSetupModeActive())
+        {
+            Serial.print(" setup_ap=");
+            Serial.print(wifiSetupManager.accessPointName());
+            Serial.print(" setup_ip=");
+            Serial.print(wifiSetupManager.accessPointIp());
+        }
         Serial.print(" config_ok=");
         Serial.print(lastConfigOk ? "1" : "0");
         Serial.print(" display_ok=");
@@ -3169,6 +3272,12 @@ void loop()
         Serial.println();
     }
 
+    if (wifiSetupManager.isSetupModeActive())
+    {
+        delay(MainLoopDelayMs);
+        return;
+    }
+
     if (WiFi.status() != WL_CONNECTED)
     {
         if (!wifiOfflineNotified)
@@ -3177,7 +3286,7 @@ void loop()
             Serial.println(static_cast<int>(WiFi.status()));
             if (screenActive)
             {
-                drawWifiStatus("WIFI LOST", WifiSsid, "Retrying", colorCanceled());
+                drawWifiStatus("WIFI LOST", "Saved network", "Open setup", colorCanceled());
             }
             else
             {
@@ -3188,7 +3297,7 @@ void loop()
 
         if (nextWifiReconnectAt == 0 || now >= nextWifiReconnectAt)
         {
-            Serial.println("Retrying Wi-Fi connection");
+            Serial.println("Retrying saved Wi-Fi connection");
             WiFi.disconnect(true);
             delay(100);
             if (connectWiFi())
@@ -3198,7 +3307,9 @@ void loop()
             }
             else
             {
-                scheduleWifiReconnect(millis());
+                enterSetupMode("runtime-disconnect");
+                delay(MainLoopDelayMs);
+                return;
             }
         }
     }

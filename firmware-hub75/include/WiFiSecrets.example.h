@@ -1,7 +1,9 @@
 #pragma once
 
-constexpr const char *WifiSsid = "your-wifi-ssid";
-constexpr const char *WifiPassword = "your-wifi-password";
+// Wi-Fi credentials are now stored on the device through setup mode.
+// These placeholders remain only so existing local headers keep compiling.
+constexpr const char *WifiSsid = "";
+constexpr const char *WifiPassword = "";
 constexpr const char *WifiFallbackSsid = "";
 constexpr const char *WifiFallbackPassword = "";
 constexpr const char *WifiThirdSsid = "";
