@@ -2,6 +2,7 @@
 #include <ArduinoJson.h>
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
 #include <HTTPClient.h>
+#include <Preferences.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <WebSocketsClient.h>
@@ -13,24 +14,21 @@
 #include "pa_audio.h"
 #include "splash_image.h"
 
-#ifndef FLIGHT_DEVICE_TOKEN
-#define FLIGHT_DEVICE_TOKEN ""
-#endif
-
 namespace
 {
 constexpr uint16_t PanelWidth = 128;
 constexpr uint16_t PanelHeight = 64;
 constexpr uint8_t Brightness = 8;
-constexpr const char *DeviceConfigUrl = "https://flight-display-server.dan-aksel.workers.dev/public/device-config";
-constexpr const char *SoundStateUrl = "https://flight-display-server.dan-aksel.workers.dev/public/sound-state";
-constexpr const char *RealtimeStateUrl = "https://flight-display-server.dan-aksel.workers.dev/public/realtime-state";
-constexpr const char *DeviceStatusUrl = "https://flight-display-server.dan-aksel.workers.dev/public/device-status";
-constexpr const char *DisplayUrl = "https://flight-display-server.dan-aksel.workers.dev/public/display";
-constexpr const char *ServerBaseUrl = "https://flight-display-server.dan-aksel.workers.dev";
-constexpr const char *RealtimeHost = "flight-display-server.dan-aksel.workers.dev";
+constexpr const char *DeviceConfigUrl = "https://skyframe.danaksel.no/public/device-config";
+constexpr const char *SoundStateUrl = "https://skyframe.danaksel.no/public/sound-state";
+constexpr const char *RealtimeStateUrl = "https://skyframe.danaksel.no/public/realtime-state";
+constexpr const char *DeviceStatusUrl = "https://skyframe.danaksel.no/public/device-status";
+constexpr const char *DisplayUrl = "https://skyframe.danaksel.no/public/display";
+constexpr const char *ProvisionStartUrl = "https://skyframe.danaksel.no/public/provision/start";
+constexpr const char *ProvisionStatusUrl = "https://skyframe.danaksel.no/public/provision/status";
+constexpr const char *ServerBaseUrl = "https://skyframe.danaksel.no";
+constexpr const char *RealtimeHost = "skyframe.danaksel.no";
 constexpr const char *RealtimePath = "/public/realtime";
-constexpr const char *DeviceToken = FLIGHT_DEVICE_TOKEN;
 constexpr const char *WorkerTlsRootCa = R"EOF(
 -----BEGIN CERTIFICATE-----
 MIICCTCCAY6gAwIBAgINAgPlwGjvYxqccpBQUjAKBggqhkjOPQQDAzBHMQswCQYD
@@ -118,6 +116,7 @@ struct IdleScreen
 MatrixPanel_I2S_DMA *display = nullptr;
 WebSocketsClient realtimeSocket;
 WifiSetupManager wifiSetupManager;
+Preferences devicePreferences;
 uint32_t nextConfigFetchAt = 0;
 uint32_t nextDisplayFetchAt = 0;
 uint32_t nextWifiReconnectAt = 0;
@@ -194,11 +193,20 @@ int pendingDisplayHttpCode = 0;
 String pendingConfigBody;
 String pendingDisplayBody;
 String realtimeExtraHeaders;
+String deviceAuthToken;
+String provisionPairingCode;
+String provisionScreenId;
+String provisionDeviceId;
+uint32_t nextProvisionPollAt = 0;
+uint32_t provisioningDisplayStartedAt = 0;
+uint32_t provisioningDisplayLastDrawAt = 0;
+bool provisioningDisplayActive = false;
 bool realtimeConfigured = false;
 volatile bool realtimePausedForHttp = false;
 String lastRealtimeConfigVersion;
 String lastRealtimeScreenVersion;
 uint32_t lastRealtimeSoundNonce = 0;
+uint32_t lastDeviceCommandNonce = 0;
 bool realtimeStateSeen = false;
 
 void drawIdleScreen(uint8_t index);
@@ -223,6 +231,18 @@ void handleSetupManagerEvent(WifiSetupManager::Event event, const String &primar
 void drawBrandedStatusLines(const char *title, const char *line1, const char *line2, const char *line3, uint16_t color);
 String defaultHostname();
 void applyStationHostname();
+void loadDeviceProvisioning();
+bool hasDeviceToken();
+String hardwareId();
+bool ensureProvisioned();
+bool startProvisioning();
+bool pollProvisioningStatus(bool drawStatus);
+void saveDeviceToken(const String &token, const String &screenId, const String &deviceId);
+void clearDeviceProvisioning();
+void executeDeviceCommand(const String &command, uint32_t nonce);
+void handleDeviceCommandPayload(JsonVariantConst value);
+void drawProvisioningStatus();
+void updateProvisioningStatusDisplay();
 
 void startRealtimeTaskIfNeeded()
 {
@@ -1533,6 +1553,7 @@ void drawStartupSplashStatus(const char *title, const char *line1, const char *l
     idleLayoutActive = false;
     liveLayoutActive = false;
     clockLayoutActive = false;
+    provisioningDisplayActive = false;
     drawSplashImage();
     drawSplashTextLine(title, 34, colorHeader());
     drawSplashTextLine(line1, 44, colorData());
@@ -1632,6 +1653,7 @@ void drawBrandedStatusLines(const char *title, const char *line1, const char *li
     idleLayoutActive = false;
     liveLayoutActive = false;
     clockLayoutActive = false;
+    provisioningDisplayActive = false;
     drawSplashImage();
     drawSplashTextLine(title, 34, color);
     drawSplashTextLine(line1, 44, colorData());
@@ -1641,6 +1663,30 @@ void drawBrandedStatusLines(const char *title, const char *line1, const char *li
         drawTextRight(line3, 124, 54, colorData(), 42);
     }
     presentFrame();
+}
+
+void drawProvisioningStatus()
+{
+    if (provisionPairingCode.isEmpty()) return;
+    idleLayoutActive = false;
+    liveLayoutActive = false;
+    clockLayoutActive = false;
+    provisioningDisplayActive = true;
+    if (provisioningDisplayStartedAt == 0) provisioningDisplayStartedAt = millis();
+
+    drawSplashImage();
+    drawSplashTextLine("PAIR SCREEN", 34, colorHeader());
+    drawSplashTextLine(provisionPairingCode, 44, colorData());
+    drawTickerTextBoxed("skyframe.danaksel.no/start", 3, 54, colorData(), 122, provisioningDisplayStartedAt, 14);
+    provisioningDisplayLastDrawAt = millis();
+    presentFrame();
+}
+
+void updateProvisioningStatusDisplay()
+{
+    if (!provisioningDisplayActive) return;
+    if (millis() - provisioningDisplayLastDrawAt < 120UL) return;
+    drawProvisioningStatus();
 }
 
 float easeInOut(float t)
@@ -1827,9 +1873,9 @@ bool fetchText(const char *url, String &body, int &httpCode, TickType_t lockWait
         return false;
     }
 
-    if (strlen(DeviceToken) > 0)
+    if (deviceAuthToken.length() > 0)
     {
-        http.addHeader("X-Flight-Device-Token", DeviceToken);
+        http.addHeader("X-Flight-Device-Token", deviceAuthToken);
     }
 
     httpCode = http.GET();
@@ -1875,9 +1921,9 @@ bool postJson(const char *url, const String &payload, String &body, int &httpCod
     }
 
     http.addHeader("Content-Type", "application/json");
-    if (strlen(DeviceToken) > 0)
+    if (deviceAuthToken.length() > 0)
     {
-        http.addHeader("X-Flight-Device-Token", DeviceToken);
+        http.addHeader("X-Flight-Device-Token", deviceAuthToken);
     }
 
     httpCode = http.POST(payload);
@@ -1906,6 +1952,86 @@ void handleRemoteSoundState(uint32_t remoteSoundTestNonce, uint8_t nextAudioVolu
         lastSoundTestNonce = remoteSoundTestNonce;
         queuePaSound("remote-test");
     }
+}
+
+void clearDeviceProvisioning()
+{
+    devicePreferences.begin("sky_device", false);
+    devicePreferences.remove("token");
+    devicePreferences.remove("screen");
+    devicePreferences.remove("device");
+    devicePreferences.end();
+    deviceAuthToken = "";
+    provisionPairingCode = "";
+    provisionScreenId = "";
+    provisionDeviceId = "";
+    realtimeConfigured = false;
+    realtimeStateSeen = false;
+    lastRealtimeConfigVersion = "";
+    lastRealtimeScreenVersion = "";
+    lastRealtimeSoundNonce = 0;
+}
+
+void executeDeviceCommand(const String &command, uint32_t nonce)
+{
+    if (nonce != 0 && nonce <= lastDeviceCommandNonce) return;
+    if (nonce != 0) lastDeviceCommandNonce = nonce;
+
+    Serial.print("Device command: ");
+    Serial.print(command);
+    Serial.print(" nonce=");
+    Serial.println(nonce);
+
+    if (command == "restart")
+    {
+        drawBrandedStatusLines("RESTART", "Restarting", "", "", colorHeader());
+        delay(700);
+        ESP.restart();
+    }
+    else if (command == "unpair")
+    {
+        clearDeviceProvisioning();
+        drawBrandedStatusLines("PAIRING", "Account removed", "Starting", "", colorHeader());
+        delay(900);
+        ESP.restart();
+    }
+    else if (command == "forget_wifi")
+    {
+        clearDeviceProvisioning();
+        wifiSetupManager.clearCredentials();
+        drawBrandedStatusLines("WIFI SETUP", "Network cleared", "Restarting", "", colorHeader());
+        delay(900);
+        ESP.restart();
+    }
+    else if (command == "factory_reset")
+    {
+        clearDeviceProvisioning();
+        wifiSetupManager.clearCredentials();
+        drawBrandedStatusLines("RESET", "All settings cleared", "Restarting", "", colorHeader());
+        delay(900);
+        ESP.restart();
+    }
+}
+
+void handleDeviceCommandPayload(JsonVariantConst value)
+{
+    if (value.isNull()) return;
+
+    String command;
+    uint32_t nonce = 0;
+    if (value.is<const char *>())
+    {
+        command = value.as<String>();
+    }
+    else if (value.is<JsonObjectConst>())
+    {
+        JsonObjectConst obj = value.as<JsonObjectConst>();
+        command = valueOr(obj["command"]);
+        nonce = obj["commandNonce"] | 0;
+    }
+    command.trim();
+    if (command.isEmpty()) return;
+    executeDeviceCommand(command, nonce);
 }
 
 void fetchSoundState()
@@ -1959,6 +2085,7 @@ void fetchRealtimeState()
     const String screenVersion = valueOr(doc["screenVersion"]);
     const uint32_t soundNonce = doc["soundTestNonce"] | 0;
     const uint8_t nextAudioVolumePercent = constrain(doc["volumePercent"] | AudioVolumePercentDefault, 0, 100);
+    handleDeviceCommandPayload(doc["deviceCommand"]);
 
     if (!realtimeStateSeen)
     {
@@ -1995,7 +2122,7 @@ void soundPollTask(void *)
 {
     for (;;)
     {
-        if (WiFi.status() == WL_CONNECTED)
+        if (WiFi.status() == WL_CONNECTED && hasDeviceToken())
         {
             fetchRealtimeState();
             postDeviceStatusIfDue();
@@ -2006,6 +2133,7 @@ void soundPollTask(void *)
 
 bool requestConfigFetch()
 {
+    if (!hasDeviceToken()) return false;
     if (!pendingPayloadMutex) return false;
     bool queued = false;
     xSemaphoreTake(pendingPayloadMutex, portMAX_DELAY);
@@ -2020,6 +2148,7 @@ bool requestConfigFetch()
 
 bool requestDisplayFetch()
 {
+    if (!hasDeviceToken()) return false;
     if (!pendingPayloadMutex) return false;
     bool queued = false;
     xSemaphoreTake(pendingPayloadMutex, portMAX_DELAY);
@@ -2065,6 +2194,10 @@ void handleRealtimeText(const uint8_t *payload, size_t length)
         const uint8_t nextAudioVolumePercent = constrain(doc["volumePercent"] | AudioVolumePercentDefault, 0, 100);
         const uint32_t remoteSoundTestNonce = doc["testNonce"] | 0;
         handleRemoteSoundState(remoteSoundTestNonce, nextAudioVolumePercent);
+    }
+    else if (type == "device_command")
+    {
+        executeDeviceCommand(valueOr(doc["command"]), doc["commandNonce"] | 0);
     }
 }
 
@@ -2115,7 +2248,7 @@ void postDeviceStatusIfDue()
 
 void sendDeviceStatus()
 {
-    if (!realtimeSocket.isConnected() || WiFi.status() != WL_CONNECTED) return;
+    if (!hasDeviceToken() || !realtimeSocket.isConnected() || WiFi.status() != WL_CONNECTED) return;
 
     String payload = buildDeviceStatusPayload();
     realtimeSocket.sendTXT(payload);
@@ -2146,12 +2279,13 @@ void realtimeSocketEvent(WStype_t type, uint8_t *payload, size_t length)
 
 void configureRealtimeSocket()
 {
+    if (!hasDeviceToken()) return;
     if (realtimeConfigured) return;
     realtimeConfigured = true;
 
-    if (strlen(DeviceToken) > 0)
+    if (deviceAuthToken.length() > 0)
     {
-        realtimeExtraHeaders = String("X-Flight-Device-Token: ") + DeviceToken + "\r\n";
+        realtimeExtraHeaders = String("X-Flight-Device-Token: ") + deviceAuthToken + "\r\n";
         realtimeSocket.setExtraHeaders(realtimeExtraHeaders.c_str());
     }
     realtimeSocket.beginSslWithCA(RealtimeHost, 443, RealtimePath, WorkerTlsRootCa, "");
@@ -2175,7 +2309,7 @@ void realtimeTask(void *)
             continue;
         }
 
-        if (WiFi.status() == WL_CONNECTED)
+        if (WiFi.status() == WL_CONNECTED && hasDeviceToken())
         {
             realtimeSocket.loop();
             const uint32_t now = millis();
@@ -2329,9 +2463,9 @@ bool fetchLogoRgb565(const String &url)
         return false;
     }
 
-    if (strlen(DeviceToken) > 0)
+    if (deviceAuthToken.length() > 0)
     {
-        http.addHeader("X-Flight-Device-Token", DeviceToken);
+        http.addHeader("X-Flight-Device-Token", deviceAuthToken);
     }
 
     const int httpCode = http.GET();
@@ -2971,6 +3105,161 @@ bool applyDisplayPayload(const String &body, int httpCode, bool httpOk)
     return true;
 }
 
+void loadDeviceProvisioning()
+{
+    devicePreferences.begin("sky_device", true);
+    deviceAuthToken = devicePreferences.getString("token", "");
+    provisionScreenId = devicePreferences.getString("screen", "");
+    provisionDeviceId = devicePreferences.getString("device", "");
+    devicePreferences.end();
+}
+
+bool hasDeviceToken()
+{
+    return !deviceAuthToken.isEmpty();
+}
+
+String hardwareId()
+{
+    char value[32] = {};
+    const uint64_t efuseMac = ESP.getEfuseMac();
+    snprintf(value, sizeof(value), "esp32-%012llx", static_cast<unsigned long long>(efuseMac));
+    return String(value);
+}
+
+void saveDeviceToken(const String &token, const String &screenId, const String &deviceId)
+{
+    if (token.isEmpty()) return;
+    devicePreferences.begin("sky_device", false);
+    devicePreferences.putString("token", token);
+    devicePreferences.putString("screen", screenId);
+    devicePreferences.putString("device", deviceId);
+    devicePreferences.end();
+    deviceAuthToken = token;
+    provisionScreenId = screenId;
+    provisionDeviceId = deviceId;
+    realtimeConfigured = false;
+}
+
+bool startProvisioning()
+{
+    JsonDocument doc;
+    doc["hardwareId"] = hardwareId();
+    doc["firmware"] = "firmware-hub75";
+
+    String payload;
+    serializeJson(doc, payload);
+
+    String body;
+    int httpCode = 0;
+    if (!postJson(ProvisionStartUrl, payload, body, httpCode))
+    {
+        Serial.print("Provision start failed, HTTP ");
+        Serial.println(httpCode);
+        drawBrandedStatusLines("PAIR FAIL", "Could not start", "Try restart", "", colorCanceled());
+        return false;
+    }
+
+    JsonDocument response;
+    const DeserializationError error = deserializeJson(response, body);
+    if (error)
+    {
+        Serial.print("Provision start JSON failed: ");
+        Serial.println(error.c_str());
+        return false;
+    }
+
+    provisionPairingCode = valueOr(response["code"]);
+    provisionScreenId = valueOr(response["screenId"]);
+    provisionDeviceId = valueOr(response["deviceId"]);
+    if (provisionPairingCode.isEmpty())
+    {
+        drawBrandedStatusLines("PAIR FAIL", "No pairing code", "Try restart", "", colorCanceled());
+        return false;
+    }
+
+    Serial.print("Pairing code: ");
+    Serial.println(provisionPairingCode);
+    provisioningDisplayStartedAt = millis();
+    drawProvisioningStatus();
+    return true;
+}
+
+bool pollProvisioningStatus(bool drawStatus)
+{
+    JsonDocument doc;
+    doc["hardwareId"] = hardwareId();
+    if (!provisionPairingCode.isEmpty())
+    {
+        doc["code"] = provisionPairingCode;
+    }
+
+    String payload;
+    serializeJson(doc, payload);
+
+    String body;
+    int httpCode = 0;
+    if (!postJson(ProvisionStatusUrl, payload, body, httpCode))
+    {
+        if (httpCode != -2)
+        {
+            Serial.print("Provision status failed, HTTP ");
+            Serial.println(httpCode);
+        }
+        return false;
+    }
+
+    JsonDocument response;
+    const DeserializationError error = deserializeJson(response, body);
+    if (error)
+    {
+        Serial.print("Provision status JSON failed: ");
+        Serial.println(error.c_str());
+        return false;
+    }
+
+    const String status = valueOr(response["status"]);
+    if (status == "claimed")
+    {
+        const String token = valueOr(response["deviceToken"]);
+        if (token.isEmpty())
+        {
+            Serial.println("Provision claimed without token");
+            return false;
+        }
+        saveDeviceToken(token, valueOr(response["screenId"]), valueOr(response["deviceId"]));
+        drawBrandedStatusLines("PAIR OK", "Screen linked", "Starting", "", colorSuccess());
+        delay(900);
+        return true;
+    }
+
+    if (drawStatus && !provisionPairingCode.isEmpty())
+    {
+        drawProvisioningStatus();
+    }
+    return false;
+}
+
+bool ensureProvisioned()
+{
+    if (hasDeviceToken()) return true;
+    if (!startProvisioning()) return false;
+
+    nextProvisionPollAt = 0;
+    while (WiFi.status() == WL_CONNECTED && !hasDeviceToken())
+    {
+        const uint32_t now = millis();
+        if (nextProvisionPollAt == 0 || now >= nextProvisionPollAt)
+        {
+            if (pollProvisioningStatus(true)) return true;
+            nextProvisionPollAt = now + 5000UL;
+        }
+        updateProvisioningStatusDisplay();
+        delay(100);
+    }
+    return hasDeviceToken();
+}
+
 bool connectWiFi()
 {
     String ssid;
@@ -3128,7 +3417,7 @@ void handleSetupManagerEvent(WifiSetupManager::Event event, const String &primar
     switch (event)
     {
         case WifiSetupManager::Event::SetupModeStarted:
-            drawBrandedStatusLines("SETUP MODE", "Connect to", primary.c_str(), "", colorHeader());
+            drawBrandedStatusLines("SETUP MODE", "CONNECT TO WIFI", primary.c_str(), "", colorHeader());
             break;
         case WifiSetupManager::Event::SetupConnectAttempt:
             drawBrandedStatusLines("CONNECTING", primary.c_str(), "Joining network", "", colorHeader());
@@ -3178,7 +3467,9 @@ void setup()
 
     display->clearScreen();
     Serial.println("HUB75 initialized");
-    drawStartupSplashStatus(BrandName, "Starting up", "");
+    loadDeviceProvisioning();
+    const String startupLine = provisionScreenId.isEmpty() ? "Starting up" : "Screen " + provisionScreenId;
+    drawStartupSplashStatus(BrandName, startupLine.c_str(), "");
     wifiSetupManager.begin(SetupAccessPointName, SetupButtonPin);
     wifiSetupManager.setEventCallback(handleSetupManagerEvent);
     ensureAudioReady();
@@ -3212,7 +3503,7 @@ void setup()
         Serial.println("BOOT held during startup, forcing setup mode");
         enterSetupMode("boot-button");
     }
-    else if (connectWiFi())
+    else if (connectWiFi() && ensureProvisioned())
     {
         resumeNetworkPollingAfterReconnect();
     }
@@ -3303,7 +3594,10 @@ void loop()
             if (connectWiFi())
             {
                 nextWifiReconnectAt = 0;
-                resumeNetworkPollingAfterReconnect();
+                if (ensureProvisioned())
+                {
+                    resumeNetworkPollingAfterReconnect();
+                }
             }
             else
             {
@@ -3312,6 +3606,23 @@ void loop()
                 return;
             }
         }
+    }
+
+    if (WiFi.status() == WL_CONNECTED && !hasDeviceToken())
+    {
+        if (provisionPairingCode.isEmpty())
+        {
+            startProvisioning();
+            nextProvisionPollAt = millis() + 5000UL;
+        }
+        else if (nextProvisionPollAt == 0 || now >= nextProvisionPollAt)
+        {
+            pollProvisioningStatus(true);
+            nextProvisionPollAt = millis() + 5000UL;
+        }
+        updateProvisioningStatusDisplay();
+        delay(MainLoopDelayMs);
+        return;
     }
 
     String pendingBody;

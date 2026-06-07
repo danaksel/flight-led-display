@@ -5,6 +5,12 @@ import { IconApi, IconClock, IconDisplay, IconMapPin, IconPlane, IconTimetable, 
 type AircraftCategoryCode = "P" | "C" | "M" | "J" | "T" | "H" | "B" | "G" | "D" | "V" | "O" | "N";
 
 type Config = {
+  screenId?: string;
+  account?: {
+    email?: string | null;
+    screens?: AccountScreen[];
+  };
+  fr24Key?: Fr24KeyStatus;
   lat: number;
   lon: number;
   radiusKm: number;
@@ -72,6 +78,22 @@ type Config = {
       brightness: number;
     };
   };
+};
+
+type Fr24KeyStatus = {
+  configured: boolean;
+  screenConfigured: boolean;
+  source: string;
+  screenId?: string;
+};
+
+type DeviceCommand = "restart" | "unpair" | "forget_wifi" | "factory_reset";
+
+type AccountScreen = {
+  screenId: string;
+  deviceId?: string;
+  label?: string;
+  pairedAt?: string;
 };
 
 type AirspaceColors = Config["device"]["lineColors"];
@@ -342,6 +364,9 @@ const defaultAirportBoardColors: AirportBoardColors = {
 };
 
 const defaultConfig: Config = {
+  screenId: "main",
+  account: { email: null, screens: [] },
+  fr24Key: { configured: false, screenConfigured: false, source: "missing" },
   lat: 59.9139,
   lon: 10.7522,
   radiusKm: 10,
@@ -540,6 +565,24 @@ function normalizeConfig(input: Partial<Config> & Record<string, unknown>): Conf
   const followUnits = (device.followUnits as Partial<Config["device"]["followUnits"]>) ?? {};
 
   return {
+    screenId: typeof input.screenId === "string" ? input.screenId : defaultConfig.screenId,
+    account: input.account && typeof input.account === "object"
+      ? {
+          email: typeof (input.account as { email?: unknown }).email === "string" ? (input.account as { email: string }).email : null,
+          screens: Array.isArray((input.account as { screens?: unknown }).screens)
+            ? ((input.account as { screens: unknown[] }).screens).map((screen) => {
+                const item = screen && typeof screen === "object" ? screen as Partial<AccountScreen> : {};
+                return {
+                  screenId: typeof item.screenId === "string" ? item.screenId : "",
+                  deviceId: typeof item.deviceId === "string" ? item.deviceId : undefined,
+                  label: typeof item.label === "string" ? item.label : undefined,
+                  pairedAt: typeof item.pairedAt === "string" ? item.pairedAt : undefined
+                };
+              }).filter((screen) => screen.screenId)
+            : []
+        }
+      : { email: null, screens: [] },
+    fr24Key: normalizeFr24KeyStatus(input.fr24Key),
     lat: Number(input.lat ?? defaultConfig.lat),
     lon: Number(input.lon ?? defaultConfig.lon),
     radiusKm: Number(input.radiusKm ?? defaultConfig.radiusKm),
@@ -594,6 +637,16 @@ function normalizeConfig(input: Partial<Config> & Record<string, unknown>): Conf
   };
 }
 
+function normalizeFr24KeyStatus(value: unknown): Fr24KeyStatus {
+  const v = value && typeof value === "object" ? value as Partial<Fr24KeyStatus> : {};
+  return {
+    configured: Boolean(v.configured),
+    screenConfigured: Boolean(v.screenConfigured),
+    source: typeof v.source === "string" ? v.source : "missing",
+    screenId: typeof v.screenId === "string" ? v.screenId : undefined
+  };
+}
+
 function normalizeDisplayBehaviorMode(value: unknown): DisplayBehaviorMode {
   if (value === "airspace" || value === "hybrid" || value === "airport_board" || value === "clock") return value;
   if (value === "flight") return "hybrid";
@@ -604,17 +657,33 @@ function airspaceMonitoringForMode(mode: DisplayBehaviorMode): boolean {
   return mode === "airspace" || mode === "hybrid";
 }
 
+function modeRequiresFr24(mode: DisplayBehaviorMode): boolean {
+  return mode === "airspace" || mode === "hybrid";
+}
+
+function selectedScreenIdFromLocation(): string {
+  return new URLSearchParams(window.location.search).get("screenId") || "";
+}
+
+function withScreenQuery(url: string): string {
+  const screenId = selectedScreenIdFromLocation();
+  if (!screenId || !url.startsWith("/api/") || url.startsWith("/api/screens/") || url.includes("screenId=")) return url;
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}screenId=${encodeURIComponent(screenId)}`;
+}
+
 async function apiFetch<T>(url: string, options?: RequestInit): Promise<T> {
   const nextOptions = { ...(options ?? {}) };
   nextOptions.headers = adminHeaders(options?.headers);
-  let response = await fetch(url, nextOptions);
+  const requestUrl = withScreenQuery(url);
+  let response = await fetch(requestUrl, nextOptions);
 
   if (response.status === 401) {
     const token = window.prompt("Admin-token kreves for API-kall:");
     if (token) {
       localStorage.setItem(adminTokenStorageKey, token.trim());
       nextOptions.headers = adminHeaders(options?.headers);
-      response = await fetch(url, nextOptions);
+      response = await fetch(requestUrl, nextOptions);
       if (response.status === 401) {
         localStorage.removeItem(adminTokenStorageKey);
       }
@@ -1599,6 +1668,62 @@ function ToggleRow(props: { label: string; hint?: string; checked: boolean; onCh
   );
 }
 
+function SwitchControl(props: { checked: boolean; disabled?: boolean; label: string; onChange: (value: boolean) => void }) {
+  return (
+    <label
+      title={props.label}
+      style={{
+        display: "inline-block",
+        flex: "0 0 52px",
+        position: "relative",
+        width: "52px",
+        minWidth: "52px",
+        height: "30px",
+        borderRadius: "999px",
+        background: props.checked ? "var(--primary)" : "#c8c8c8",
+        border: "1px solid rgba(60, 36, 21, 0.18)",
+        cursor: props.disabled ? "not-allowed" : "pointer",
+        opacity: props.disabled ? 0.62 : 1,
+        boxShadow: "inset 0 1px 2px rgba(34, 20, 12, 0.12)",
+        transition: "background 160ms ease, opacity 160ms ease, box-shadow 160ms ease"
+      }}
+    >
+      <input
+        type="checkbox"
+        checked={props.checked}
+        disabled={props.disabled}
+        aria-label={props.label}
+        onChange={(event) => props.onChange(event.target.checked)}
+        style={{ position: "absolute", inset: 0, opacity: 0, cursor: "inherit" }}
+      />
+      <span
+        style={{
+          position: "absolute",
+          top: "3px",
+          left: props.checked ? "25px" : "3px",
+          width: "24px",
+          height: "24px",
+          borderRadius: "999px",
+          background: "#fff",
+          boxShadow: "0 3px 10px rgba(34, 20, 12, 0.18)",
+          transition: "left 160ms ease"
+        }}
+      />
+      {!props.checked ? (
+        <span style={{ position: "absolute", right: "8px", top: "7px", width: "12px", height: "12px", borderRadius: "999px", border: "1.5px solid rgba(60, 36, 21, 0.56)", borderLeftColor: "transparent", transform: "rotate(-25deg)" }} />
+      ) : null}
+    </label>
+  );
+}
+
+function UserIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" style={{ width: "19px", height: "19px", display: "block" }}>
+      <path d="M12 12.2a4.1 4.1 0 1 0 0-8.2 4.1 4.1 0 0 0 0 8.2Zm0 2.1c-4.2 0-7.4 2.1-7.4 4.8 0 .6.5 1 1 1h12.8c.6 0 1-.4 1-1 0-2.7-3.2-4.8-7.4-4.8Z" fill="currentColor" />
+    </svg>
+  );
+}
+
 function SliderField(props: { label: string; value: number; min: number; max: number; step?: number; suffix?: string; formatValue?: (value: number) => string; onChange: (value: number) => void }) {
   const range = props.max - props.min;
   const progress = range > 0 ? clamp(((props.value - props.min) / range) * 100, 0, 100) : 0;
@@ -1766,7 +1891,7 @@ function StatusPill(props: { label: string; tone: "good" | "idle" | "warn" | "er
   );
 }
 
-function DisplayModePicker(props: { value: DisplayBehaviorMode; onChange: (value: DisplayBehaviorMode) => void }) {
+function DisplayModePicker(props: { value: DisplayBehaviorMode; fr24Enabled: boolean; onChange: (value: DisplayBehaviorMode) => void }) {
   return (
     <div style={{ display: "grid", gap: "10px" }}>
       <div>
@@ -1776,11 +1901,13 @@ function DisplayModePicker(props: { value: DisplayBehaviorMode; onChange: (value
       <div style={{ display: "grid", gap: "10px" }}>
         {displayModeOptions.map((option) => {
           const selected = props.value === option.value;
+          const locked = modeRequiresFr24(option.value) && !props.fr24Enabled;
           return (
             <button
               key={option.value}
               type="button"
-              onClick={() => props.onChange(option.value)}
+              disabled={locked}
+              onClick={() => locked ? undefined : props.onChange(option.value)}
               style={{
                 ...cardStyle("13px 14px"),
                 display: "grid",
@@ -1791,7 +1918,8 @@ function DisplayModePicker(props: { value: DisplayBehaviorMode; onChange: (value
                 border: selected ? "1px solid var(--primary)" : "1px solid var(--border-soft)",
                 background: selected ? "rgba(247, 181, 0, 0.12)" : "var(--card)",
                 color: "var(--foreground)",
-                cursor: "pointer"
+                cursor: locked ? "not-allowed" : "pointer",
+                opacity: locked ? 0.54 : 1
               }}
             >
               <span style={{ width: "18px", height: "18px", borderRadius: "999px", border: `2px solid ${selected ? "var(--primary)" : "rgba(60, 36, 21, 0.28)"}`, display: "grid", placeItems: "center", marginTop: "1px" }}>
@@ -1799,7 +1927,7 @@ function DisplayModePicker(props: { value: DisplayBehaviorMode; onChange: (value
               </span>
               <span>
                 <span style={{ display: "block", fontSize: "14px", fontWeight: 750 }}>{option.title}</span>
-                <span style={{ display: "block", marginTop: "4px", fontSize: "12px", lineHeight: 1.4, color: "var(--muted-foreground)" }}>{option.description}</span>
+                <span style={{ display: "block", marginTop: "4px", fontSize: "12px", lineHeight: 1.4, color: "var(--muted-foreground)" }}>{locked ? "Requires a personal FR24 key for this screen." : option.description}</span>
               </span>
             </button>
           );
@@ -2156,13 +2284,16 @@ export default function App() {
   const [preview, setPreview] = useState<PreviewState>({ meta: "", flights: [], idleScreens: [], avinorRows: [], mode: "idle", updatedAt: null, error: null, liveSourceStatus: null, deviceStatus: null });
   const [status, setStatus] = useState("Laster innstillinger...");
   const [statusTone, setStatusTone] = useState<"idle" | "dirty" | "error" | "success">("idle");
+  const [fr24Input, setFr24Input] = useState("");
   const [activeSection, setActiveSection] = useState(0);
   const [busy, setBusy] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
+  const [accountModalOpen, setAccountModalOpen] = useState(false);
   const slidesRef = useRef<HTMLDivElement | null>(null);
   const navRef = useRef<HTMLDivElement | null>(null);
   const navDragRef = useRef({ active: false, pointerId: -1, x: 0, left: 0, moved: false, pressedIndex: -1 });
   const isDirty = configSignature(config) !== savedConfigSignature;
+  const fr24Enabled = Boolean(config.fr24Key?.screenConfigured);
 
   useEffect(() => {
     let mounted = true;
@@ -2280,6 +2411,34 @@ export default function App() {
     }
   }
 
+  async function saveFr24Key(apiKey: string) {
+    const screenId = config.screenId || selectedScreenIdFromLocation();
+    if (!screenId || screenId === "main") {
+      setStatus("Open a paired screen before saving FR24");
+      setStatusTone("error");
+      return;
+    }
+    setBusy(true);
+    try {
+      const saved = await apiFetch<Fr24KeyStatus>(`/api/screens/${encodeURIComponent(screenId)}/fr24-key`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey })
+      });
+      setConfig((current) => ({
+        ...current,
+        fr24Key: { ...saved, configured: true, screenConfigured: true, source: "screen", screenId }
+      }));
+      setStatus("FR24 key saved");
+      setStatusTone("success");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not save FR24 key");
+      setStatusTone("error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function toggleScreen() {
     setBusy(true);
     try {
@@ -2318,6 +2477,25 @@ export default function App() {
     }
   }
 
+  async function sendDeviceCommand(command: DeviceCommand, message: string, confirmMessage?: string) {
+    if (confirmMessage && !window.confirm(confirmMessage)) return;
+    setBusy(true);
+    try {
+      await apiFetch<{ ok: boolean }>("/api/device-command", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command })
+      });
+      setStatus(message);
+      setStatusTone("success");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not send command");
+      setStatusTone("error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function updateConfig(recipe: (current: Config) => Config) {
     setConfig((current) => {
       const next = recipe(current);
@@ -2348,18 +2526,50 @@ export default function App() {
   const firmwareDotColor = preview.deviceStatus && firmwareFresh
     ? preview.deviceStatus.ok ? "#00f900" : "#ff2600"
     : preview.deviceStatus ? "#ff9300" : "rgba(60, 36, 21, 0.34)";
+  const displayScreenId = config.screenId || selectedScreenIdFromLocation() || "main";
+  const accountEmail = config.account?.email || "Signed in";
+  const logoutUrl = `/cdn-cgi/access/logout?returnTo=${encodeURIComponent(`${window.location.origin}/screen-setup`)}`;
+  const accountScreens = config.account?.screens ?? [];
+  const hasRealScreens = accountScreens.length > 0;
 
   return (
     <div style={appStyles.shell}>
       <header style={appStyles.header}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
-          <SkyframeLogo className="skyframe-logo" />
-          <div style={{ position: "relative", paddingLeft: "13px" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "16px" }}>
+          <div style={{ minWidth: 0, display: "grid", gap: "5px", flex: "1 1 auto" }}>
+            <SkyframeLogo className="skyframe-logo" />
+            {accountScreens.length > 1 ? (
+              <select
+                value={displayScreenId}
+                aria-label="Choose screen"
+                onChange={(event) => { window.location.href = `/?screenId=${encodeURIComponent(event.target.value)}`; }}
+                style={{ maxWidth: "100%", width: "fit-content", minWidth: "170px", border: 0, background: "transparent", color: "var(--muted-foreground)", fontSize: "11px", lineHeight: 1.35, padding: 0, outline: "none" }}
+              >
+                {accountScreens.map((screen) => (
+                  <option key={screen.screenId} value={screen.screenId}>{screen.label || "Unnamed location"} · Screen {screen.screenId}</option>
+                ))}
+              </select>
+            ) : (
+              <div style={{ fontSize: "11px", color: "var(--muted-foreground)", lineHeight: 1.35, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {hasRealScreens ? (config.label || "Unnamed location") : "No paired screen"} · Screen {hasRealScreens ? displayScreenId : "-"}
+              </div>
+            )}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "12px", flex: "0 0 auto" }}>
+            <button
+              type="button"
+              aria-label="Account"
+              onClick={() => setAccountModalOpen(true)}
+              style={{ width: "34px", height: "34px", borderRadius: "999px", border: "1px solid var(--border-mid)", background: "rgba(255,255,255,0.48)", color: "var(--primary)", display: "grid", placeItems: "center", padding: 0 }}
+            >
+              <UserIcon />
+            </button>
+            <div style={{ position: "relative" }}>
             <span
               title={preview.deviceStatus && firmwareFresh ? (preview.deviceStatus.ok ? "Screen connected" : "Screen error") : "Waiting for screen"}
               style={{
                 position: "absolute",
-                left: 0,
+                left: "-11px",
                 top: "50%",
                 width: "8px",
                 height: "8px",
@@ -2369,34 +2579,29 @@ export default function App() {
                 transform: "translateY(-50%)"
               }}
             />
-          <button
-            type="button"
-            onClick={() => void toggleScreen()}
-            disabled={busy}
-            aria-label={screenState.active ? "Turn screen off" : "Turn screen on"}
-            title={screenState.active ? "Screen is on" : "Screen is off"}
-            style={{
-              position: "relative",
-              width: "42px",
-              height: "42px",
-              borderRadius: "14px",
-              border: "1px solid var(--primary)",
-              background: screenState.active ? "var(--primary)" : "transparent",
-              color: screenState.active ? "#fff" : "var(--primary)",
-              boxShadow: screenState.active ? "0 10px 22px rgba(60, 36, 21, 0.18)" : "none",
-              opacity: busy ? 0.64 : 1,
-              transition: "background 160ms ease, box-shadow 160ms ease, opacity 160ms ease"
-            }}
-          >
-            <span style={{ fontSize: "18px", fontWeight: 800, lineHeight: 1 }}>⏻</span>
-          </button>
+            <SwitchControl checked={screenState.active} disabled={busy} label={screenState.active ? "Turn screen off" : "Turn screen on"} onChange={() => void toggleScreen()} />
+            </div>
           </div>
         </div>
       </header>
 
-      <EmulatorPreview config={config} preview={preview} screenState={screenState} />
+      {accountModalOpen ? (
+        <div style={{ position: "absolute", inset: 0, zIndex: 2000, display: "grid", placeItems: "center", padding: "20px", background: "rgba(34, 20, 12, 0.28)" }} onClick={() => setAccountModalOpen(false)}>
+          <div style={{ ...cardStyle("18px"), width: "min(340px, 100%)", display: "grid", gap: "14px", background: "var(--card)" }} onClick={(event) => event.stopPropagation()}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
+              <div style={{ fontSize: "16px", fontWeight: 750 }}>Account</div>
+              <button type="button" aria-label="Close account" onClick={() => setAccountModalOpen(false)} style={{ width: "32px", height: "32px", borderRadius: "999px", border: "1px solid var(--border-mid)", background: "transparent", color: "var(--primary)", padding: 0 }}>×</button>
+            </div>
+            <div style={{ fontSize: "12px", color: "var(--muted-foreground)" }}>Signed in as</div>
+            <div style={{ fontSize: "14px", fontWeight: 700, overflowWrap: "anywhere" }}>{accountEmail}</div>
+            <a href={logoutUrl} style={{ height: "44px", borderRadius: "8px", background: "var(--primary)", color: "#fff", display: "grid", placeItems: "center", textDecoration: "none", fontWeight: 750 }}>Log out</a>
+          </div>
+        </div>
+      ) : null}
 
-      <div
+      {!initialLoading && !hasRealScreens ? null : <EmulatorPreview config={config} preview={preview} screenState={screenState} />}
+
+      {!initialLoading && !hasRealScreens ? null : <div
         ref={navRef}
         style={{ ...appStyles.navScroller, cursor: "grab", userSelect: "none" }}
         onPointerDown={(event) => {
@@ -2449,10 +2654,22 @@ export default function App() {
             </button>
           ))}
         </div>
-      </div>
+      </div>}
 
       <main style={{ minHeight: 0, flex: 1, overflow: "hidden" }}>
-        {initialLoading ? (
+        {!initialLoading && !hasRealScreens ? (
+          <div style={{ padding: "24px 20px", display: "grid", gap: "14px" }}>
+            <div style={{ ...cardStyle("18px"), display: "grid", gap: "10px" }}>
+              <div style={{ fontSize: "18px", fontWeight: 750 }}>No paired screen</div>
+              <div style={{ fontSize: "13px", color: "var(--muted-foreground)", lineHeight: 1.5 }}>
+                Pair a SkyFrame before opening the control panel.
+              </div>
+              <a href="/start" style={{ height: "44px", borderRadius: "8px", background: "var(--primary)", color: "#fff", display: "grid", placeItems: "center", textDecoration: "none", fontWeight: 750 }}>
+                Start pairing
+              </a>
+            </div>
+          </div>
+        ) : initialLoading ? (
           <LoadingSkeleton />
         ) : (
         <div ref={slidesRef} style={appStyles.slides}>
@@ -2491,14 +2708,86 @@ export default function App() {
 
           <section style={slideStyle("display")}>
             <div style={{ display: "grid", gap: "14px" }}>
+              <Field label="Location name">
+                <TextInput value={config.label} placeholder="Kitchen, office, cabin" onChange={(event) => updateConfig((current) => ({ ...current, label: event.target.value }))} />
+              </Field>
               <DisplayModePicker
                 value={config.device.displayMode}
+                fr24Enabled={fr24Enabled}
                 onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, displayMode: value, airspaceMonitoringEnabled: airspaceMonitoringForMode(value) } }))}
               />
               <SliderField label="Day brightness" value={config.device.brightness} min={1} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, brightness: value } }))} />
               <SliderField label="Night brightness" value={config.device.nightMode.brightness} min={0} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, nightMode: { ...current.device.nightMode, brightness: value } } }))} />
               <SliderField label="Config refresh" value={config.device.configRefreshSeconds} min={60} max={3600} step={30} suffix=" s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, configRefreshSeconds: value } }))} />
               <DisplayStatusCard config={config} screenState={screenState} preview={preview} statusTone={statusTone} />
+              <div style={{ ...cardStyle(), display: "grid", gap: "12px" }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
+                  <div>
+                    <div style={{ fontSize: "14px", fontWeight: 750 }}>FR24 key</div>
+                    <div style={{ marginTop: "4px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>
+                      Unlocks AirSpace, Follow Flight and AirSpace + Airport Board for this screen.
+                    </div>
+                  </div>
+                  <StatusPill label={fr24Enabled ? "Connected" : "Missing"} tone={fr24Enabled ? "good" : "warn"} />
+                </div>
+                <Field label={fr24Enabled ? "Replace key" : "Personal FR24 API key"}>
+                  <TextInput value={fr24Input} placeholder="Paste personal FR24 key" onChange={(event) => setFr24Input(event.target.value)} />
+                </Field>
+                <button
+                  type="button"
+                  disabled={busy || !fr24Input.trim()}
+                  onClick={() => {
+                    const value = fr24Input.trim();
+                    setFr24Input("");
+                    void saveFr24Key(value);
+                  }}
+                  style={{ height: "42px", borderRadius: "8px", border: 0, background: "var(--primary)", color: "#fff", fontSize: "15px", fontWeight: 750, opacity: busy || !fr24Input.trim() ? 0.55 : 1 }}
+                >
+                  Save FR24 key
+                </button>
+              </div>
+              <div style={{ ...cardStyle(), display: "grid", gap: "12px" }}>
+                <div>
+                  <div style={{ fontSize: "14px", fontWeight: 750 }}>Screen maintenance</div>
+                  <div style={{ marginTop: "4px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>
+                    Commands are sent to the physical SkyFrame the next time it is online.
+                  </div>
+                </div>
+                <div style={{ display: "grid", gap: "10px", gridTemplateColumns: "1fr 1fr" }}>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void sendDeviceCommand("restart", "Restart command sent")}
+                    style={{ height: "42px", borderRadius: "8px", border: "1px solid var(--border-mid)", background: "var(--card)", color: "var(--foreground)", fontSize: "14px", fontWeight: 750, opacity: busy ? 0.55 : 1 }}
+                  >
+                    Restart
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void sendDeviceCommand("unpair", "Pairing mode command sent", "Send this screen back to pairing mode? It will stay on the same Wi-Fi network.")}
+                    style={{ height: "42px", borderRadius: "8px", border: "1px solid var(--border-mid)", background: "var(--card)", color: "var(--foreground)", fontSize: "14px", fontWeight: 750, opacity: busy ? 0.55 : 1 }}
+                  >
+                    Pair again
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void sendDeviceCommand("forget_wifi", "Wi-Fi reset command sent", "Forget Wi-Fi on this screen? It will open setup mode again.")}
+                    style={{ height: "42px", borderRadius: "8px", border: "1px solid rgba(180,35,24,0.24)", background: "rgba(180,35,24,0.08)", color: "#b42318", fontSize: "14px", fontWeight: 750, opacity: busy ? 0.55 : 1 }}
+                  >
+                    Change Wi-Fi
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void sendDeviceCommand("factory_reset", "Factory reset command sent", "Factory reset this screen? It will forget the account and Wi-Fi.")}
+                    style={{ height: "42px", borderRadius: "8px", border: "1px solid rgba(180,35,24,0.24)", background: "rgba(180,35,24,0.08)", color: "#b42318", fontSize: "14px", fontWeight: 750, opacity: busy ? 0.55 : 1 }}
+                  >
+                    Factory reset
+                  </button>
+                </div>
+              </div>
             </div>
           </section>
 
@@ -2531,17 +2820,17 @@ export default function App() {
                 <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", cursor: "pointer" }}>
                   <span style={{ minWidth: 0, flex: "1 1 auto" }}>
                     <span style={{ display: "block", fontSize: "14px" }}>Track flight numbers</span>
-                    <span style={{ display: "block", marginTop: "4px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.4 }}>Tracked flights can activate Airspace mode.</span>
+                    <span style={{ display: "block", marginTop: "4px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.4 }}>{fr24Enabled ? "Tracked flights can activate Airspace mode." : "Requires a personal FR24 key for this screen."}</span>
                   </span>
-                  <span style={{ position: "relative", width: "46px", minWidth: "46px", flex: "0 0 46px", height: "28px", borderRadius: "999px", background: config.follow.enabled ? "var(--primary)" : "var(--secondary)", transition: "background 160ms ease" }}>
-                    <input type="checkbox" checked={config.follow.enabled} onChange={(event) => updateConfig((current) => ({ ...current, follow: { ...current.follow, enabled: event.target.checked } }))} style={{ position: "absolute", inset: 0, opacity: 0 }} />
-                    <span style={{ position: "absolute", top: "3px", left: config.follow.enabled ? "21px" : "3px", width: "22px", height: "22px", borderRadius: "999px", background: "#fff", transition: "left 160ms ease" }} />
+                  <span style={{ position: "relative", width: "46px", minWidth: "46px", flex: "0 0 46px", height: "28px", borderRadius: "999px", background: config.follow.enabled && fr24Enabled ? "var(--primary)" : "var(--secondary)", transition: "background 160ms ease", opacity: fr24Enabled ? 1 : 0.55 }}>
+                    <input type="checkbox" disabled={!fr24Enabled} checked={fr24Enabled && config.follow.enabled} onChange={(event) => updateConfig((current) => ({ ...current, follow: { ...current.follow, enabled: event.target.checked } }))} style={{ position: "absolute", inset: 0, opacity: 0 }} />
+                    <span style={{ position: "absolute", top: "3px", left: config.follow.enabled && fr24Enabled ? "21px" : "3px", width: "22px", height: "22px", borderRadius: "999px", background: "#fff", transition: "left 160ms ease" }} />
                   </span>
                 </label>
                 <Field label="Flight numbers">
                   <TextInput
                     value={config.follow.flights.join(", ")}
-                    disabled={!config.follow.enabled}
+                    disabled={!fr24Enabled || !config.follow.enabled}
                     placeholder="SK4673, DY1304, DOC45"
                     onChange={(event) =>
                       updateConfig((current) => ({
@@ -2738,7 +3027,6 @@ export default function App() {
                     "/api/sound-test",
                     "/api/flights",
                     "/api/display",
-                    "/pixel-editor",
                     "/api/avinor-board"
                   ].map((href) => (
                     <a key={href} href={href} target="_blank" rel="noreferrer" style={{ ...cardStyle("10px 12px"), textDecoration: "none", fontSize: "12px" }}>
@@ -2768,7 +3056,7 @@ export default function App() {
         )}
       </main>
 
-      <div style={appStyles.saveDock}>
+      {!initialLoading && !hasRealScreens ? null : <div style={appStyles.saveDock}>
         <button
           type="button"
           onClick={() => void saveConfig()}
@@ -2805,7 +3093,7 @@ export default function App() {
         >
           {status}
         </div>
-      </div>
+      </div>}
     </div>
   );
 }

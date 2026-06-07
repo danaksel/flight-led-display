@@ -12,7 +12,10 @@ export interface Env {
   AVIATIONSTACK_API_KEY?: string;
   AVIATIONSTACK_API_BASE_URL?: string;
   ADMIN_API_TOKEN?: string;
+  ADMIN_EMAILS?: string;
   DEVICE_API_TOKEN?: string;
+  CREDENTIAL_ENCRYPTION_KEY?: string;
+  ACCESS_TEAM_DOMAIN?: string;
   HOME_AIRPORT_IATA?: string;
   DEFAULT_LAT?: string;
   DEFAULT_LON?: string;
@@ -37,6 +40,37 @@ type Config = {
   label?: string;
   device?: DeviceSettings;
   updatedAt?: string;
+};
+
+type RequestContext = {
+  screenId?: string;
+  deviceId?: string;
+  tokenHash?: string;
+  userEmail?: string;
+};
+
+type DeviceRecord = {
+  deviceId: string;
+  screenId: string;
+  tokenHash: string;
+  pairedAt: string;
+  ownerEmail?: string;
+  lastSeenAt?: string;
+  firmwareVersion?: string;
+  deletedAt?: string;
+};
+
+type ProvisionRecord = {
+  code: string;
+  hardwareId: string;
+  screenId: string;
+  deviceId: string;
+  status: "pending" | "claimed";
+  createdAt: string;
+  claimedAt?: string;
+  ownerEmail?: string;
+  token?: string;
+  tokenHash?: string;
 };
 
 type FollowSettings = {
@@ -152,14 +186,23 @@ type DeviceStatus = {
   source: string | null;
 };
 
+type DeviceCommand = {
+  command: "restart" | "unpair" | "forget_wifi" | "factory_reset";
+  commandNonce: number;
+  issuedAt: string;
+  source: string;
+};
+
 type AircraftCategoryCode = "P" | "C" | "M" | "J" | "T" | "H" | "B" | "G" | "D" | "V" | "O" | "N";
 
 type RealtimeEvent = {
-  type: "hello" | "config_changed" | "display_changed" | "sound_test" | "device_status";
+  type: "hello" | "config_changed" | "display_changed" | "sound_test" | "device_status" | "device_command";
   updatedAt: string;
   source?: string;
   testNonce?: number;
   volumePercent?: number;
+  command?: DeviceCommand["command"];
+  commandNonce?: number;
 };
 
 type DisplayFlight = {
@@ -381,6 +424,10 @@ const CONFIG_KEY = "config:v1";
 const SCREEN_STATE_KEY = "screen-state:v1";
 const SOUND_STATE_KEY = "sound-state:v1";
 const DEVICE_STATUS_KEY = "device-status:v1";
+const DEVICE_COMMAND_KEY = "device-command:v1";
+const DEFAULT_SCREEN_ID = "main";
+const PROVISION_TTL_SECONDS = 15 * 60;
+const DEVICE_TOKEN_BYTES = 32;
 const AIRPORT_CITY_OVERRIDES: Record<string, string> = {
   AAL: "Aalborg",
   AAR: "Aarhus",
@@ -568,47 +615,62 @@ export default {
     }
 
     try {
-      const authFailure = authorizeRequest(request, env, url.pathname);
+      const context = await resolveRequestContext(request, env, url.pathname);
+      const authFailure = authorizeRequest(request, env, url.pathname, context);
       if (authFailure) return authFailure;
 
       if (url.pathname === "/") return serveAppShell(request, env);
-      if (url.pathname === "/legacy-admin") return htmlResponse(renderIndexHtml());
-      if (url.pathname === "/pixel-editor") return htmlResponse(renderPixelEditorHtml());
-      if (url.pathname === "/public/realtime") return realtimeResponse(request, env);
-      if (url.pathname === "/public/realtime-state" && request.method === "GET") return realtimeStateResponse(env);
-      if (url.pathname === "/public/device-status" && request.method === "POST") return saveDeviceStatus(request, env);
-      if (url.pathname === "/public/device-config" && request.method === "GET") return deviceConfigResponse(env);
-      if (url.pathname === "/public/sound-state" && request.method === "GET") return soundStateResponse(env);
-      if (url.pathname === "/public/display" && request.method === "GET") return flightsResponse(env, true);
+      if (url.pathname === "/admin" || url.pathname === "/admin/") return adminPageResponse(request, env, context);
+      if (url.pathname === "/start") return htmlResponse(renderStartHtml());
+      if (url.pathname === "/screen-setup") return htmlResponse(context.userEmail ? renderScreenSetupHtml(context.userEmail) : renderLoginRequiredHtml());
+      if (url.pathname === "/public/provision/start" && request.method === "POST") return startProvisioning(request, env);
+      if (url.pathname === "/public/provision/status" && request.method === "POST") return provisioningStatus(request, env);
+      if (url.pathname === "/public/realtime") return realtimeResponse(request, env, context);
+      if (url.pathname === "/public/realtime-state" && request.method === "GET") return realtimeStateResponse(env, context);
+      if (url.pathname === "/public/device-status" && request.method === "POST") return saveDeviceStatus(request, env, context);
+      if (url.pathname === "/public/device-config" && request.method === "GET") return deviceConfigResponse(env, context);
+      if (url.pathname === "/public/sound-state" && request.method === "GET") return soundStateResponse(env, context);
+      if (url.pathname === "/public/display" && request.method === "GET") return flightsResponse(env, true, context);
       if (url.pathname.startsWith("/public/logos-rgb565/")) return logoRgb565Response(request, env);
       if (url.pathname.startsWith("/public/logos/")) return logoAssetResponse(request, env);
       if (url.pathname.startsWith("/logos-rgb565/")) return logoRgb565Response(request, env);
       if (url.pathname.startsWith("/logos/")) return logoAssetResponse(request, env);
-      if (url.pathname === "/api/config" && request.method === "GET") return configResponse(env);
-      if (url.pathname === "/api/config" && request.method === "POST") return saveConfig(request, env);
-      if (url.pathname === "/api/device-config" && request.method === "GET") return deviceConfigResponse(env);
-      if (url.pathname === "/api/realtime-state" && request.method === "GET") return realtimeStateResponse(env);
-      if (url.pathname === "/api/device-status" && request.method === "GET") return deviceStatusResponse(env);
-      if (url.pathname === "/api/sound-state" && request.method === "GET") return soundStateResponse(env);
+      if (url.pathname === "/api/provision/claim" && request.method === "POST") return claimProvisioning(request, env, context);
+      if (url.pathname.match(/^\/api\/screens\/[^/]+\/config$/) && request.method === "GET") return configResponse(env, context);
+      if (url.pathname.match(/^\/api\/screens\/[^/]+\/config$/) && request.method === "POST") return saveConfig(request, env, context);
+      if (url.pathname.match(/^\/api\/screens\/[^/]+\/fr24-key$/) && request.method === "GET") return fr24KeyStatusResponse(env, context);
+      if (url.pathname.match(/^\/api\/screens\/[^/]+\/fr24-key$/) && request.method === "POST") return saveFr24Key(request, env, context);
+      if (url.pathname.match(/^\/api\/screens\/[^/]+\/display$/) && request.method === "GET") return flightsResponse(env, true, context);
+      if (url.pathname.match(/^\/api\/screens\/[^/]+\/device-status$/) && request.method === "GET") return deviceStatusResponse(env, context);
+      if (url.pathname === "/api/config" && request.method === "GET") return configResponse(env, context);
+      if (url.pathname === "/api/config" && request.method === "POST") return saveConfig(request, env, context);
+      if (url.pathname === "/api/device-config" && request.method === "GET") return deviceConfigResponse(env, context);
+      if (url.pathname === "/api/realtime-state" && request.method === "GET") return realtimeStateResponse(env, context);
+      if (url.pathname === "/api/device-status" && request.method === "GET") return deviceStatusResponse(env, context);
+      if (url.pathname === "/api/sound-state" && request.method === "GET") return soundStateResponse(env, context);
       if (url.pathname === "/api/logo-status" && request.method === "GET") return logoStatusResponse(env);
-      if (url.pathname === "/api/admin/screen-state/toggle" && request.method === "POST") return toggleScreenState(env);
-      if (url.pathname === "/api/screen-state" && request.method === "GET") return screenStateResponse(env);
-      if (url.pathname === "/api/screen-state" && request.method === "POST") return saveScreenState(request, env);
-      if (url.pathname === "/api/screen-state/activate" && request.method === "POST") return writeScreenState(env, { active: true }, "homey-api");
-      if (url.pathname === "/api/screen-state/deactivate" && request.method === "POST") return writeScreenState(env, { active: false }, "homey-api");
-      if (url.pathname === "/api/display-mode" && request.method === "GET") return displayModeResponse(env);
-      if (url.pathname === "/api/display-mode" && request.method === "POST") return saveDisplayMode(request, env);
-      if (url.pathname === "/api/display-mode/flight" && request.method === "POST") return writeDisplayMode(env, "hybrid", "homey-api");
-      if (url.pathname === "/api/display-mode/clock" && request.method === "POST") return writeDisplayMode(env, "clock", "homey-api");
-      if (url.pathname === "/api/brightness-mode" && request.method === "GET") return brightnessModeResponse(env);
-      if (url.pathname === "/api/brightness-mode" && request.method === "POST") return saveBrightnessMode(request, env);
-      if (url.pathname === "/api/brightness-mode/day" && request.method === "POST") return writeScreenState(env, { brightnessMode: "day" }, "homey-api");
-      if (url.pathname === "/api/brightness-mode/night" && request.method === "POST") return writeScreenState(env, { brightnessMode: "night" }, "homey-api");
-      if (url.pathname === "/api/sound-test" && request.method === "POST") return triggerSoundTest(request, env);
-      if (url.pathname === "/api/flights" && request.method === "GET") return flightsResponse(env, false);
-      if (url.pathname === "/api/display" && request.method === "GET") return flightsResponse(env, true);
-      if (url.pathname === "/api/avinor-board" && request.method === "GET") return avinorBoardResponse(env);
-      if (url.pathname === "/api/aviationstack" && request.method === "GET") return aviationstackDebugResponse(request, env);
+      if (url.pathname === "/api/admin/screens" && request.method === "GET") return adminScreensResponse(request, env, context);
+      if (url.pathname.match(/^\/api\/admin\/screens\/[^/]+$/) && request.method === "DELETE") return deleteAdminScreen(request, env, context, url.pathname);
+      if (url.pathname.match(/^\/api\/admin\/screens\/[^/]+\/command$/) && request.method === "POST") return adminDeviceCommand(request, env, context, url.pathname);
+      if (url.pathname === "/api/admin/screen-state/toggle" && request.method === "POST") return toggleScreenState(env, context);
+      if (url.pathname === "/api/device-command" && request.method === "POST") return sendDeviceCommand(request, env, context);
+      if (url.pathname === "/api/screen-state" && request.method === "GET") return screenStateResponse(env, context);
+      if (url.pathname === "/api/screen-state" && request.method === "POST") return saveScreenState(request, env, context);
+      if (url.pathname === "/api/screen-state/activate" && request.method === "POST") return writeScreenState(env, { active: true }, "homey-api", context);
+      if (url.pathname === "/api/screen-state/deactivate" && request.method === "POST") return writeScreenState(env, { active: false }, "homey-api", context);
+      if (url.pathname === "/api/display-mode" && request.method === "GET") return displayModeResponse(env, context);
+      if (url.pathname === "/api/display-mode" && request.method === "POST") return saveDisplayMode(request, env, context);
+      if (url.pathname === "/api/display-mode/flight" && request.method === "POST") return writeDisplayMode(env, "hybrid", "homey-api", context);
+      if (url.pathname === "/api/display-mode/clock" && request.method === "POST") return writeDisplayMode(env, "clock", "homey-api", context);
+      if (url.pathname === "/api/brightness-mode" && request.method === "GET") return brightnessModeResponse(env, context);
+      if (url.pathname === "/api/brightness-mode" && request.method === "POST") return saveBrightnessMode(request, env, context);
+      if (url.pathname === "/api/brightness-mode/day" && request.method === "POST") return writeScreenState(env, { brightnessMode: "day" }, "homey-api", context);
+      if (url.pathname === "/api/brightness-mode/night" && request.method === "POST") return writeScreenState(env, { brightnessMode: "night" }, "homey-api", context);
+      if (url.pathname === "/api/sound-test" && request.method === "POST") return triggerSoundTest(request, env, context);
+      if (url.pathname === "/api/flights" && request.method === "GET") return flightsResponse(env, false, context);
+      if (url.pathname === "/api/display" && request.method === "GET") return flightsResponse(env, true, context);
+      if (url.pathname === "/api/avinor-board" && request.method === "GET") return avinorBoardResponse(env, context);
+      if (url.pathname === "/api/aviationstack" && request.method === "GET") return aviationstackDebugResponse(request, env, context);
       if (url.pathname === "/api/health") return jsonResponse({ ok: true });
 
       return jsonResponse({ error: "Not found" }, 404);
@@ -619,11 +681,51 @@ export default {
   }
 };
 
-function authorizeRequest(request: Request, env: Env, pathname: string): Response | undefined {
+async function resolveRequestContext(request: Request, env: Env, pathname: string): Promise<RequestContext> {
+  const screenId = screenIdFromApiPath(pathname) || screenIdFromQuery(request);
+  const userEmail = authenticatedUserEmail(request);
+  const deviceToken = requestDeviceToken(request);
+  if (!deviceToken) {
+    if (screenId) return { screenId, userEmail };
+    if (userEmail && !pathname.startsWith("/api/provision/")) {
+      const screens = await listUserScreens(env, userEmail);
+      const firstScreen = screens[0];
+      if (firstScreen) return { screenId: firstScreen.screenId, userEmail };
+    }
+    return { userEmail };
+  }
+
+  const tokenHash = await sha256Hex(deviceToken);
+  const device = await env.FLIGHT_DISPLAY_KV.get(deviceTokenKey(tokenHash), "json") as DeviceRecord | null;
+  if (device && isDeviceRecord(device)) {
+    return {
+      screenId: device.screenId,
+      deviceId: device.deviceId,
+      tokenHash,
+      userEmail
+    };
+  }
+
+  return screenId ? { screenId, tokenHash, userEmail } : { tokenHash, userEmail };
+}
+
+async function listUserScreens(env: Env, userEmail: string): Promise<DeviceRecord[]> {
+  const email = normalizeEmail(userEmail);
+  if (!email) return [];
+  const records = await listDeviceRecords(env);
+  return records
+    .filter((record) => normalizeEmail(record.ownerEmail) === email)
+    .sort((a, b) => String(a.pairedAt || "").localeCompare(String(b.pairedAt || "")))
+    .reverse();
+}
+
+function authorizeRequest(request: Request, env: Env, pathname: string, context: RequestContext): Response | undefined {
   const adminToken = normalizeSecretString(env.ADMIN_API_TOKEN);
   const deviceToken = normalizeSecretString(env.DEVICE_API_TOKEN);
 
   if (pathname === "/api/health") return undefined;
+  if (pathname.startsWith("/public/provision/")) return undefined;
+  if (pathname.startsWith("/public/logos-rgb565/") || pathname.startsWith("/public/logos/")) return undefined;
 
   if (adminToken && isAutomationApiPath(pathname) && !requestHasToken(request, adminToken, "X-Flight-Admin-Token")) {
     return jsonResponse({ error: "Unauthorized" }, 401, {
@@ -631,6 +733,8 @@ function authorizeRequest(request: Request, env: Env, pathname: string): Respons
       "WWW-Authenticate": "Bearer"
     });
   }
+
+  if (pathname.startsWith("/public/") && context.deviceId) return undefined;
 
   if (deviceToken && pathname.startsWith("/public/") && !requestHasToken(request, deviceToken, "X-Flight-Device-Token")) {
     return jsonResponse({ error: "Unauthorized" }, 401, {
@@ -642,23 +746,135 @@ function authorizeRequest(request: Request, env: Env, pathname: string): Respons
   return undefined;
 }
 
-function realtimeResponse(request: Request, env: Env): Response | Promise<Response> {
+function requestDeviceToken(request: Request): string | undefined {
+  return normalizeSecretString(request.headers.get("X-Flight-Device-Token") || undefined)
+    || normalizeSecretString(request.headers.get("Authorization")?.match(/^Bearer\s+(.+)$/i)?.[1]);
+}
+
+function authenticatedUserEmail(request: Request): string | undefined {
+  const direct = normalizeEmail(request.headers.get("CF-Access-Authenticated-User-Email"));
+  if (direct) return direct;
+  return normalizeEmail(request.headers.get("X-SkyFrame-User-Email"));
+}
+
+function normalizeEmail(value: unknown): string | undefined {
+  const raw = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw) ? raw : undefined;
+}
+
+function requireAuthenticatedUser(context?: RequestContext): Response | undefined {
+  if (context?.userEmail) return undefined;
+  return jsonResponse({ error: "Login required" }, 401, {
+    "Cache-Control": "no-store",
+    "WWW-Authenticate": "Bearer"
+  });
+}
+
+function requireAdminUser(request: Request, env: Env, context?: RequestContext): Response | undefined {
+  if (isLocalDevRequest(request)) return undefined;
+  const email = normalizeEmail(context?.userEmail);
+  const admins = (env.ADMIN_EMAILS || "dan.aksel@gmail.com")
+    .split(/[,\s]+/)
+    .map(normalizeEmail)
+    .filter((value): value is string => Boolean(value));
+  if (email && admins.includes(email)) return undefined;
+  const acceptsHtml = request.headers.get("Accept")?.includes("text/html");
+  if (acceptsHtml) {
+    return htmlResponse(renderAdminAccessDeniedHtml(request, email), email ? 403 : 401);
+  }
+  return jsonResponse({ error: "Admin access required", signedInAs: email || null }, email ? 403 : 401, { "Cache-Control": "no-store" });
+}
+
+function isLocalDevRequest(request: Request): boolean {
+  const hostname = new URL(request.url).hostname;
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+}
+
+function escapeHtml(value: unknown): string {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function screenIdFromQuery(request: Request): string | undefined {
+  const value = new URL(request.url).searchParams.get("screenId");
+  return normalizeId(value || undefined);
+}
+
+function screenIdFromApiPath(pathname: string): string | undefined {
+  const match = pathname.match(/^\/api\/screens\/([^/]+)/);
+  return normalizeId(match?.[1]);
+}
+
+function scopedKey(baseKey: string, context?: RequestContext): string {
+  const screenId = normalizeId(context?.screenId);
+  return screenId && screenId !== DEFAULT_SCREEN_ID ? `screen:${screenId}:${baseKey}` : baseKey;
+}
+
+function deviceScreenConfigKey(screenId: string): string {
+  return `screen:${screenId}:${CONFIG_KEY}`;
+}
+
+function provisionCodeKey(code: string): string {
+  return `provision:code:v1:${code.toUpperCase()}`;
+}
+
+function provisionDeviceKey(hardwareId: string): string {
+  return `provision:hardware:v1:${hardwareId}`;
+}
+
+function deviceTokenKey(tokenHash: string): string {
+  return `device-token:v1:${tokenHash}`;
+}
+
+function deviceRecordKey(deviceId: string): string {
+  return `device:v1:${deviceId}`;
+}
+
+function fr24ScreenSecretKey(screenId: string): string {
+  return `screen:${screenId}:secret:fr24-api-key:v1`;
+}
+
+function normalizeId(value: unknown): string | undefined {
+  const raw = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (!raw || !/^[a-z0-9][a-z0-9_-]{1,63}$/.test(raw)) return undefined;
+  return raw;
+}
+
+function isDeviceRecord(value: unknown): value is DeviceRecord {
+  const v = value && typeof value === "object" ? value as Partial<DeviceRecord> : {};
+  return Boolean(normalizeId(v.deviceId) && normalizeId(v.screenId) && typeof v.tokenHash === "string" && v.tokenHash.length === 64);
+}
+
+function normalizeDeviceCommand(value: unknown): DeviceCommand["command"] | undefined {
+  return value === "restart" || value === "unpair" || value === "forget_wifi" || value === "factory_reset" ? value : undefined;
+}
+
+function realtimeResponse(request: Request, env: Env, context?: RequestContext): Response | Promise<Response> {
   if (!env.REALTIME_HUB) {
     return jsonResponse({ error: "REALTIME_HUB is not configured" }, 500, { "Cache-Control": "no-store" });
   }
-  const id = env.REALTIME_HUB.idFromName("flight-display-main-v2");
+  const id = env.REALTIME_HUB.idFromName(realtimeRoomName(context));
   return env.REALTIME_HUB.get(id).fetch(request);
 }
 
-async function broadcastRealtime(env: Env, event: RealtimeEvent): Promise<void> {
+async function broadcastRealtime(env: Env, event: RealtimeEvent, context?: RequestContext): Promise<void> {
   if (!env.REALTIME_HUB) return;
-  const id = env.REALTIME_HUB.idFromName("flight-display-main-v2");
+  const id = env.REALTIME_HUB.idFromName(realtimeRoomName(context));
   const stub = env.REALTIME_HUB.get(id);
   await stub.fetch("https://realtime.internal/broadcast", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(event)
   });
+}
+
+function realtimeRoomName(context?: RequestContext): string {
+  const screenId = normalizeId(context?.screenId);
+  return screenId && screenId !== DEFAULT_SCREEN_ID ? `flight-display-screen-${screenId}` : "flight-display-main-v2";
 }
 
 function isAutomationApiPath(pathname: string): boolean {
@@ -689,8 +905,8 @@ function constantTimeEquals(a: string | undefined, b: string | undefined): boole
   return diff === 0;
 }
 
-async function getConfig(env: Env): Promise<Config> {
-  const stored = await env.FLIGHT_DISPLAY_KV.get(CONFIG_KEY, "json");
+async function getConfig(env: Env, context?: RequestContext): Promise<Config> {
+  const stored = await env.FLIGHT_DISPLAY_KV.get(scopedKey(CONFIG_KEY, context), "json");
   if (stored && isConfig(stored)) return withConfigDefaults(stored, env);
 
   return withConfigDefaults({
@@ -772,39 +988,77 @@ function normalizeDeviceStatus(value: unknown, fallbackUpdatedAt: string | null 
   };
 }
 
-async function getScreenState(env: Env): Promise<ScreenState> {
-  const stored = await env.FLIGHT_DISPLAY_KV.get(SCREEN_STATE_KEY, "json");
+async function getScreenState(env: Env, context?: RequestContext): Promise<ScreenState> {
+  const stored = await env.FLIGHT_DISPLAY_KV.get(scopedKey(SCREEN_STATE_KEY, context), "json");
   return normalizeScreenState(stored);
 }
 
-async function getSoundState(env: Env): Promise<SoundState> {
-  const stored = await env.FLIGHT_DISPLAY_KV.get(SOUND_STATE_KEY, "json");
+async function getSoundState(env: Env, context?: RequestContext): Promise<SoundState> {
+  const stored = await env.FLIGHT_DISPLAY_KV.get(scopedKey(SOUND_STATE_KEY, context), "json");
   if (!stored) return defaultSoundState();
   return normalizeSoundState(stored);
 }
 
-async function getDeviceStatus(env: Env): Promise<DeviceStatus | null> {
-  const stored = await env.FLIGHT_DISPLAY_KV.get(DEVICE_STATUS_KEY, "json");
+async function getDeviceStatus(env: Env, context?: RequestContext): Promise<DeviceStatus | null> {
+  const stored = await env.FLIGHT_DISPLAY_KV.get(scopedKey(DEVICE_STATUS_KEY, context), "json");
   return stored ? normalizeDeviceStatus(stored) : null;
 }
 
-async function triggerSoundTestState(env: Env, source = "api"): Promise<SoundState> {
-  const previous = await getSoundState(env);
+async function getDeviceCommand(env: Env, context?: RequestContext): Promise<DeviceCommand | null> {
+  const stored = await env.FLIGHT_DISPLAY_KV.get(scopedKey(DEVICE_COMMAND_KEY, context), "json") as Partial<DeviceCommand> | null;
+  const command = normalizeDeviceCommand(stored?.command);
+  if (!stored || !command) return null;
+  return {
+    command,
+    commandNonce: typeof stored.commandNonce === "number" && Number.isFinite(stored.commandNonce) ? Math.max(0, Math.floor(stored.commandNonce)) : 0,
+    issuedAt: typeof stored.issuedAt === "string" && stored.issuedAt ? stored.issuedAt : new Date().toISOString(),
+    source: typeof stored.source === "string" && stored.source ? stored.source.slice(0, 80) : "api"
+  };
+}
+
+async function writeDeviceCommand(
+  env: Env,
+  context: RequestContext,
+  command: DeviceCommand["command"],
+  source = "api"
+): Promise<DeviceCommand> {
+  const now = new Date().toISOString();
+  const previous = await getDeviceCommand(env, context);
+  const next: DeviceCommand = {
+    command,
+    commandNonce: (previous?.commandNonce || 0) + 1,
+    issuedAt: now,
+    source: source.slice(0, 80)
+  };
+  await env.FLIGHT_DISPLAY_KV.put(scopedKey(DEVICE_COMMAND_KEY, context), JSON.stringify(next), { expirationTtl: 60 * 60 });
+  await broadcastRealtime(env, {
+    type: "device_command",
+    updatedAt: now,
+    source: next.source,
+    command: next.command,
+    commandNonce: next.commandNonce
+  }, context);
+  return next;
+}
+
+async function triggerSoundTestState(env: Env, source = "api", context?: RequestContext): Promise<SoundState> {
+  const previous = await getSoundState(env, context);
   const next: SoundState = {
     testNonce: previous.testNonce + 1,
     lastTriggeredAt: new Date().toISOString(),
     source: source.slice(0, 80)
   };
-  await env.FLIGHT_DISPLAY_KV.put(SOUND_STATE_KEY, JSON.stringify(next));
+  await env.FLIGHT_DISPLAY_KV.put(scopedKey(SOUND_STATE_KEY, context), JSON.stringify(next));
   return next;
 }
 
 async function writeScreenState(
   env: Env,
   patch: Partial<Pick<ScreenState, "active" | "brightnessMode">>,
-  source = "api"
+  source = "api",
+  context?: RequestContext
 ): Promise<Response> {
-  const previous = await getScreenState(env);
+  const previous = await getScreenState(env, context);
   const now = new Date().toISOString();
   const active = typeof patch.active === "boolean" ? patch.active : previous.active;
   const brightnessMode = patch.brightnessMode === "night" ? "night" : patch.brightnessMode === "day" ? "day" : previous.brightnessMode;
@@ -817,31 +1071,51 @@ async function writeScreenState(
     updatedAt: now,
     source: source.slice(0, 80)
   };
-  await env.FLIGHT_DISPLAY_KV.put(SCREEN_STATE_KEY, JSON.stringify(next));
+  await env.FLIGHT_DISPLAY_KV.put(scopedKey(SCREEN_STATE_KEY, context), JSON.stringify(next));
   await broadcastRealtime(env, {
     type: "config_changed",
     updatedAt: now,
     source: next.source || source
-  });
+  }, context);
   return jsonResponse(next, 200, { "Cache-Control": "no-store" });
 }
 
-async function toggleScreenState(env: Env): Promise<Response> {
-  const previous = await getScreenState(env);
-  return writeScreenState(env, { active: !previous.active }, "web-admin");
+async function toggleScreenState(env: Env, context?: RequestContext): Promise<Response> {
+  const previous = await getScreenState(env, context);
+  return writeScreenState(env, { active: !previous.active }, "web-admin", context);
 }
 
-async function configResponse(env: Env): Promise<Response> {
-  const [config, aviationstackApiKey, screenState, soundState, deviceStatus] = await Promise.all([
-    getConfig(env),
+async function configResponse(env: Env, context?: RequestContext): Promise<Response> {
+  const screenId = normalizeId(context?.screenId);
+  const [config, aviationstackApiKey, screenState, soundState, deviceStatus, fr24Key, accountScreens] = await Promise.all([
+    getConfig(env, context),
     getAviationstackApiKey(env),
-    getScreenState(env),
-    getSoundState(env),
-    getDeviceStatus(env)
+    getScreenState(env, context),
+    getSoundState(env, context),
+    getDeviceStatus(env, context),
+    fr24KeyStatus(env, context),
+    context?.userEmail ? listUserScreens(env, context.userEmail) : Promise.resolve([])
   ]);
-  const normalizedDevice = normalizeDeviceSettings(config.device);
+  const normalizedDevice = enforceFr24DeviceSettings(normalizeDeviceSettings(config.device), fr24Key.screenConfigured);
+  const normalizedFollow = fr24Key.screenConfigured ? normalizeFollowSettings(config.follow) : { ...normalizeFollowSettings(config.follow), enabled: false };
   return jsonResponse({
     ...config,
+    follow: normalizedFollow,
+    device: normalizedDevice,
+    screenId: screenId || DEFAULT_SCREEN_ID,
+    account: {
+      email: context?.userEmail || null,
+      screens: await Promise.all(accountScreens.map(async (screen) => {
+        const screenConfig = await getConfig(env, { screenId: screen.screenId });
+        return {
+          screenId: screen.screenId,
+          deviceId: screen.deviceId,
+          label: screenConfig.label || "SkyFrame",
+          pairedAt: screen.pairedAt
+        };
+      }))
+    },
+    fr24Key,
     screenState,
     deviceStatus,
     soundState: {
@@ -852,7 +1126,123 @@ async function configResponse(env: Env): Promise<Response> {
   }, 200, { "Cache-Control": "no-store" });
 }
 
-async function saveConfig(request: Request, env: Env): Promise<Response> {
+async function adminPageResponse(request: Request, env: Env, context?: RequestContext): Promise<Response> {
+  const authFailure = requireAdminUser(request, env, context);
+  if (authFailure) return authFailure;
+  return htmlResponse(renderAdminHtml(request, context?.userEmail || ""));
+}
+
+async function adminScreensResponse(request: Request, env: Env, context?: RequestContext): Promise<Response> {
+  const authFailure = requireAdminUser(request, env, context);
+  if (authFailure) return authFailure;
+
+  const devices = await listDeviceRecords(env);
+  const screens = await Promise.all(devices.map(async (device) => {
+    const screenContext: RequestContext = { screenId: device.screenId };
+    const [config, screenState, soundState, deviceStatus, fr24] = await Promise.all([
+      getConfig(env, screenContext),
+      getScreenState(env, screenContext),
+      getSoundState(env, screenContext),
+      getDeviceStatus(env, screenContext),
+      fr24KeyStatus(env, screenContext)
+    ]);
+    return {
+      screenId: device.screenId,
+      deviceId: device.deviceId,
+      ownerEmail: device.ownerEmail || null,
+      pairedAt: device.pairedAt,
+      label: config.label || "SkyFrame",
+      displayMode: normalizeDeviceSettings(config.device).displayMode,
+      fr24,
+      screenState,
+      soundState,
+      deviceStatus
+    };
+  }));
+
+  return jsonResponse({
+    updatedAt: new Date().toISOString(),
+    count: screens.length,
+    screens: screens.sort((a, b) => String(a.pairedAt || "").localeCompare(String(b.pairedAt || ""))).reverse()
+  }, 200, { "Cache-Control": "no-store" });
+}
+
+async function sendDeviceCommand(request: Request, env: Env, context?: RequestContext): Promise<Response> {
+  const authFailure = requireAuthenticatedUser(context);
+  if (authFailure) return authFailure;
+  const screenId = normalizeId(context?.screenId);
+  if (!screenId) return jsonResponse({ error: "Screen ID required" }, 400, { "Cache-Control": "no-store" });
+
+  const body = await readJsonObject(request);
+  const command = normalizeDeviceCommand(firstString(body, ["command", "action"]));
+  if (!command) return jsonResponse({ error: "Expected restart, unpair, forget_wifi or factory_reset" }, 400, { "Cache-Control": "no-store" });
+
+  const written = await writeDeviceCommand(env, { ...context, screenId }, command, "control-panel");
+  return jsonResponse({ ok: true, deviceCommand: written }, 200, { "Cache-Control": "no-store" });
+}
+
+async function adminDeviceCommand(request: Request, env: Env, context: RequestContext | undefined, pathname: string): Promise<Response> {
+  const authFailure = requireAdminUser(request, env, context);
+  if (authFailure) return authFailure;
+  const match = pathname.match(/^\/api\/admin\/screens\/([^/]+)\/command$/);
+  const screenId = normalizeId(match?.[1]);
+  if (!screenId) return jsonResponse({ error: "Screen ID required" }, 400, { "Cache-Control": "no-store" });
+
+  const body = await readJsonObject(request);
+  const command = normalizeDeviceCommand(firstString(body, ["command", "action"]));
+  if (!command) return jsonResponse({ error: "Expected restart, unpair, forget_wifi or factory_reset" }, 400, { "Cache-Control": "no-store" });
+
+  const written = await writeDeviceCommand(env, { screenId }, command, "admin");
+  return jsonResponse({ ok: true, deviceCommand: written }, 200, { "Cache-Control": "no-store" });
+}
+
+async function deleteAdminScreen(request: Request, env: Env, context: RequestContext | undefined, pathname: string): Promise<Response> {
+  const authFailure = requireAdminUser(request, env, context);
+  if (authFailure) return authFailure;
+  const match = pathname.match(/^\/api\/admin\/screens\/([^/]+)$/);
+  const screenId = normalizeId(match?.[1]);
+  if (!screenId) return jsonResponse({ error: "Screen ID required" }, 400, { "Cache-Control": "no-store" });
+
+  const devices = await listDeviceRecords(env);
+  const device = devices.find((record) => record.screenId === screenId);
+  await writeDeviceCommand(env, { screenId }, "unpair", "admin-delete");
+
+  const now = new Date().toISOString();
+  const deleteKeys = [
+    scopedKey(CONFIG_KEY, { screenId }),
+    scopedKey(SCREEN_STATE_KEY, { screenId }),
+    scopedKey(SOUND_STATE_KEY, { screenId }),
+    scopedKey(DEVICE_STATUS_KEY, { screenId }),
+    fr24ScreenSecretKey(screenId)
+  ];
+  await Promise.all(deleteKeys.map((key) => env.FLIGHT_DISPLAY_KV.delete(key)));
+
+  if (device) {
+    const tombstone: DeviceRecord = { ...device, deletedAt: now };
+    await Promise.all([
+      env.FLIGHT_DISPLAY_KV.put(deviceRecordKey(device.deviceId), JSON.stringify(tombstone)),
+      env.FLIGHT_DISPLAY_KV.put(deviceTokenKey(device.tokenHash), JSON.stringify(tombstone), { expirationTtl: 60 * 60 })
+    ]);
+  }
+
+  return jsonResponse({ ok: true, screenId, deletedAt: now }, 200, { "Cache-Control": "no-store" });
+}
+
+async function listDeviceRecords(env: Env): Promise<DeviceRecord[]> {
+  const records: DeviceRecord[] = [];
+  let cursor: string | undefined;
+  do {
+    const listed = await env.FLIGHT_DISPLAY_KV.list({ prefix: "device:v1:", cursor });
+    await Promise.all(listed.keys.map(async (key) => {
+      const record = await env.FLIGHT_DISPLAY_KV.get(key.name, "json") as DeviceRecord | null;
+      if (record && isDeviceRecord(record) && !record.deletedAt) records.push(record);
+    }));
+    cursor = listed.list_complete ? undefined : listed.cursor;
+  } while (cursor);
+  return records;
+}
+
+async function saveConfig(request: Request, env: Env, context?: RequestContext): Promise<Response> {
   const body = await request.json();
   if (!isConfig(body)) {
     return jsonResponse({ error: "Expected lat, lon and radiusKm numbers" }, 400);
@@ -868,32 +1258,41 @@ async function saveConfig(request: Request, env: Env): Promise<Response> {
     device: normalizeDeviceSettings(body.device),
     updatedAt: new Date().toISOString()
   };
+  const fr24 = await fr24KeyStatus(env, context);
+  if (!fr24.screenConfigured && (modeRequiresFr24(config.device?.displayMode) || config.follow?.enabled)) {
+    config.follow = { ...(config.follow || { flights: [] }), enabled: false };
+    config.device = {
+      ...normalizeDeviceSettings(config.device),
+      displayMode: "airport_board",
+      airspaceMonitoringEnabled: false
+    };
+  }
 
   const configUpdatedAt = config.updatedAt || new Date().toISOString();
-  await env.FLIGHT_DISPLAY_KV.put(CONFIG_KEY, JSON.stringify(config));
+  await env.FLIGHT_DISPLAY_KV.put(scopedKey(CONFIG_KEY, context), JSON.stringify(config));
   await broadcastRealtime(env, {
     type: "config_changed",
     updatedAt: configUpdatedAt,
     source: "web-config"
-  });
+  }, context);
   await broadcastRealtime(env, {
     type: "display_changed",
     updatedAt: configUpdatedAt,
     source: "web-config"
-  });
-  return configResponse(env);
+  }, context);
+  return configResponse(env, context);
 }
 
-async function deviceConfigResponse(env: Env): Promise<Response> {
-  const [config, screenState, soundState] = await Promise.all([getConfig(env), getScreenState(env), getSoundState(env)]);
-  const normalizedDevice = normalizeDeviceSettings(config.device);
+async function deviceConfigResponse(env: Env, context?: RequestContext): Promise<Response> {
+  const [config, screenState, soundState, fr24] = await Promise.all([getConfig(env, context), getScreenState(env, context), getSoundState(env, context), fr24KeyStatus(env, context)]);
+  const normalizedDevice = enforceFr24DeviceSettings(normalizeDeviceSettings(config.device), fr24.screenConfigured);
   const effectiveBrightness = screenState.brightnessMode === "night"
     ? normalizedDevice.nightMode.brightness
     : normalizedDevice.brightness;
   return jsonResponse({
     updatedAt: config.updatedAt || null,
     homeAirportIata: config.homeAirportIata,
-    follow: config.follow,
+    follow: fr24.screenConfigured ? config.follow : { ...normalizeFollowSettings(config.follow), enabled: false },
     device: {
       ...normalizedDevice,
       effectiveBrightness,
@@ -911,8 +1310,8 @@ async function deviceConfigResponse(env: Env): Promise<Response> {
   });
 }
 
-async function soundStateResponse(env: Env): Promise<Response> {
-  const [soundState, config] = await Promise.all([getSoundState(env), getConfig(env)]);
+async function soundStateResponse(env: Env, context?: RequestContext): Promise<Response> {
+  const [soundState, config] = await Promise.all([getSoundState(env, context), getConfig(env, context)]);
   const normalizedDevice = normalizeDeviceSettings(config.device);
   return jsonResponse({
     ...soundState,
@@ -922,44 +1321,50 @@ async function soundStateResponse(env: Env): Promise<Response> {
   });
 }
 
-async function realtimeStateResponse(env: Env): Promise<Response> {
-  const [config, screenState, soundState] = await Promise.all([getConfig(env), getScreenState(env), getSoundState(env)]);
+async function realtimeStateResponse(env: Env, context?: RequestContext): Promise<Response> {
+  const [config, screenState, soundState, deviceCommand] = await Promise.all([
+    getConfig(env, context),
+    getScreenState(env, context),
+    getSoundState(env, context),
+    getDeviceCommand(env, context)
+  ]);
   const normalizedDevice = normalizeDeviceSettings(config.device);
   return jsonResponse({
     updatedAt: new Date().toISOString(),
     configVersion: config.updatedAt || "",
     screenVersion: screenState.updatedAt || "",
     soundTestNonce: soundState.testNonce,
-    volumePercent: normalizedDevice.audioVolumePercent
+    volumePercent: normalizedDevice.audioVolumePercent,
+    deviceCommand
   }, 200, {
     "Cache-Control": "no-store"
   });
 }
 
-async function deviceStatusResponse(env: Env): Promise<Response> {
-  return jsonResponse(await getDeviceStatus(env), 200, {
+async function deviceStatusResponse(env: Env, context?: RequestContext): Promise<Response> {
+  return jsonResponse(await getDeviceStatus(env, context), 200, {
     "Cache-Control": "no-store"
   });
 }
 
-async function saveDeviceStatus(request: Request, env: Env): Promise<Response> {
+async function saveDeviceStatus(request: Request, env: Env, context?: RequestContext): Promise<Response> {
   const body = await request.json();
   const status = normalizeDeviceStatus(body, new Date().toISOString());
-  await env.FLIGHT_DISPLAY_KV.put(DEVICE_STATUS_KEY, JSON.stringify(status));
+  await env.FLIGHT_DISPLAY_KV.put(scopedKey(DEVICE_STATUS_KEY, context), JSON.stringify(status));
   return jsonResponse(status, 200, {
     "Cache-Control": "no-store"
   });
 }
 
-async function screenStateResponse(env: Env): Promise<Response> {
-  const screenState = await getScreenState(env);
+async function screenStateResponse(env: Env, context?: RequestContext): Promise<Response> {
+  const screenState = await getScreenState(env, context);
   return jsonResponse(screenState, 200, {
     "Cache-Control": "no-store"
   });
 }
 
-async function brightnessModeResponse(env: Env): Promise<Response> {
-  const screenState = await getScreenState(env);
+async function brightnessModeResponse(env: Env, context?: RequestContext): Promise<Response> {
+  const screenState = await getScreenState(env, context);
   return jsonResponse({
     brightnessMode: screenState.brightnessMode,
     lastBrightnessModeChangedAt: screenState.lastBrightnessModeChangedAt,
@@ -970,8 +1375,8 @@ async function brightnessModeResponse(env: Env): Promise<Response> {
   });
 }
 
-async function displayModeResponse(env: Env): Promise<Response> {
-  const config = await getConfig(env);
+async function displayModeResponse(env: Env, context?: RequestContext): Promise<Response> {
+  const config = await getConfig(env, context);
   const device = normalizeDeviceSettings(config.device);
   return jsonResponse({
     displayMode: device.displayMode,
@@ -981,10 +1386,12 @@ async function displayModeResponse(env: Env): Promise<Response> {
   });
 }
 
-async function writeDisplayMode(env: Env, displayMode: DeviceSettings["displayMode"], source = "api"): Promise<Response> {
-  const config = await getConfig(env);
+async function writeDisplayMode(env: Env, displayMode: DeviceSettings["displayMode"], source = "api", context?: RequestContext): Promise<Response> {
+  const config = await getConfig(env, context);
   const normalizedDevice = normalizeDeviceSettings(config.device);
-  const normalizedDisplayMode = normalizeDisplayBehaviorMode(displayMode);
+  const requestedDisplayMode = normalizeDisplayBehaviorMode(displayMode);
+  const fr24 = await fr24KeyStatus(env, context);
+  const normalizedDisplayMode = !fr24.screenConfigured && modeRequiresFr24(requestedDisplayMode) ? "airport_board" : requestedDisplayMode;
   const updatedAt = new Date().toISOString();
   const next: Config = {
     ...config,
@@ -996,17 +1403,17 @@ async function writeDisplayMode(env: Env, displayMode: DeviceSettings["displayMo
     updatedAt
   };
 
-  await env.FLIGHT_DISPLAY_KV.put(CONFIG_KEY, JSON.stringify(next));
+  await env.FLIGHT_DISPLAY_KV.put(scopedKey(CONFIG_KEY, context), JSON.stringify(next));
   await broadcastRealtime(env, {
     type: "config_changed",
     updatedAt,
     source: source.slice(0, 80)
-  });
+  }, context);
   await broadcastRealtime(env, {
     type: "display_changed",
     updatedAt,
     source: source.slice(0, 80)
-  });
+  }, context);
   return jsonResponse({
     displayMode: normalizedDisplayMode,
     updatedAt,
@@ -1065,7 +1472,220 @@ function codeFromKey(key: string): string | undefined {
   return /^[A-Z0-9_-]+$/.test(code) ? code : undefined;
 }
 
-async function saveScreenState(request: Request, env: Env): Promise<Response> {
+async function startProvisioning(request: Request, env: Env): Promise<Response> {
+  const body = await readJsonObject(request);
+  const hardwareId = normalizeHardwareId(firstString(body, ["hardwareId", "deviceId", "chipId", "mac"]));
+  if (!hardwareId) {
+    return jsonResponse({ error: "Expected hardwareId" }, 400, { "Cache-Control": "no-store" });
+  }
+
+  const existing = await env.FLIGHT_DISPLAY_KV.get(provisionDeviceKey(hardwareId), "json") as ProvisionRecord | null;
+  if (existing && existing.status === "pending") {
+    return jsonResponse(publicProvisionRecord(existing), 200, { "Cache-Control": "no-store" });
+  }
+
+  let code = randomPairingCode();
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const collision = await env.FLIGHT_DISPLAY_KV.get(provisionCodeKey(code));
+    if (!collision) break;
+    code = randomPairingCode();
+  }
+
+  let screenId = randomScreenId();
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const collision = await env.FLIGHT_DISPLAY_KV.get(deviceScreenConfigKey(screenId));
+    if (!collision) break;
+    screenId = randomScreenId();
+  }
+
+  const record: ProvisionRecord = {
+    code,
+    hardwareId,
+    screenId,
+    deviceId: randomDeviceId(),
+    status: "pending",
+    createdAt: new Date().toISOString()
+  };
+
+  await Promise.all([
+    env.FLIGHT_DISPLAY_KV.put(provisionCodeKey(code), JSON.stringify(record), { expirationTtl: PROVISION_TTL_SECONDS }),
+    env.FLIGHT_DISPLAY_KV.put(provisionDeviceKey(hardwareId), JSON.stringify(record), { expirationTtl: PROVISION_TTL_SECONDS })
+  ]);
+
+  return jsonResponse(publicProvisionRecord(record), 200, { "Cache-Control": "no-store" });
+}
+
+async function claimProvisioning(request: Request, env: Env, context?: RequestContext): Promise<Response> {
+  const authFailure = requireAuthenticatedUser(context);
+  if (authFailure) return authFailure;
+
+  const body = await readJsonObject(request);
+  const code = normalizePairingCode(firstString(body, ["code", "pairingCode"]));
+  if (!code) {
+    return jsonResponse({ error: "Expected pairing code" }, 400, { "Cache-Control": "no-store" });
+  }
+
+  const record = await env.FLIGHT_DISPLAY_KV.get(provisionCodeKey(code), "json") as ProvisionRecord | null;
+  if (!record || record.status !== "pending") {
+    return jsonResponse({ error: "Pairing code was not found or has expired" }, 404, { "Cache-Control": "no-store" });
+  }
+
+  const token = randomToken();
+  const tokenHash = await sha256Hex(token);
+  const ownerEmail = context?.userEmail;
+  const claimed: ProvisionRecord = {
+    ...record,
+    status: "claimed",
+    claimedAt: new Date().toISOString(),
+    ownerEmail,
+    token,
+    tokenHash
+  };
+  const device: DeviceRecord = {
+    deviceId: record.deviceId,
+    screenId: record.screenId,
+    tokenHash,
+    pairedAt: claimed.claimedAt || new Date().toISOString(),
+    ownerEmail
+  };
+  const defaultConfig = await getConfig(env);
+
+  await Promise.all([
+    env.FLIGHT_DISPLAY_KV.put(provisionCodeKey(code), JSON.stringify(claimed), { expirationTtl: PROVISION_TTL_SECONDS }),
+    env.FLIGHT_DISPLAY_KV.delete(provisionDeviceKey(record.hardwareId)),
+    env.FLIGHT_DISPLAY_KV.put(deviceTokenKey(tokenHash), JSON.stringify(device)),
+    env.FLIGHT_DISPLAY_KV.put(deviceRecordKey(record.deviceId), JSON.stringify(device)),
+    env.FLIGHT_DISPLAY_KV.put(scopedKey(CONFIG_KEY, { screenId: record.screenId }), JSON.stringify({
+      ...defaultConfig,
+      label: firstString(body, ["label"]) || defaultConfig.label || "SkyFrame",
+      device: {
+        ...normalizeDeviceSettings(defaultConfig.device),
+        displayMode: "airport_board",
+        airspaceMonitoringEnabled: false
+      },
+      follow: {
+        ...normalizeFollowSettings(defaultConfig.follow),
+        enabled: false
+      },
+      updatedAt: new Date().toISOString()
+    }))
+  ]);
+
+  return jsonResponse({
+    ok: true,
+    screenId: record.screenId,
+    deviceId: record.deviceId,
+    deviceToken: token
+  }, 200, { "Cache-Control": "no-store" });
+}
+
+async function provisioningStatus(request: Request, env: Env): Promise<Response> {
+  const body = await readJsonObject(request);
+  const hardwareId = normalizeHardwareId(firstString(body, ["hardwareId", "deviceId", "chipId", "mac"]));
+  const code = normalizePairingCode(firstString(body, ["code", "pairingCode"]));
+  const record = code
+    ? await env.FLIGHT_DISPLAY_KV.get(provisionCodeKey(code), "json") as ProvisionRecord | null
+    : hardwareId
+      ? await env.FLIGHT_DISPLAY_KV.get(provisionDeviceKey(hardwareId), "json") as ProvisionRecord | null
+      : null;
+
+  if (!record) {
+    return jsonResponse({ status: "missing" }, 404, { "Cache-Control": "no-store" });
+  }
+
+  if (record.status !== "claimed") {
+    return jsonResponse(publicProvisionRecord(record), 200, { "Cache-Control": "no-store" });
+  }
+
+  return jsonResponse({
+    status: "claimed",
+    screenId: record.screenId,
+    deviceId: record.deviceId,
+    deviceToken: record.token
+  }, 200, { "Cache-Control": "no-store" });
+}
+
+async function fr24KeyStatusResponse(env: Env, context?: RequestContext): Promise<Response> {
+  return jsonResponse(await fr24KeyStatus(env, context), 200, { "Cache-Control": "no-store" });
+}
+
+async function fr24KeyStatus(env: Env, context?: RequestContext): Promise<{ configured: boolean; screenConfigured: boolean; source: string; screenId?: string }> {
+  const screenId = normalizeId(context?.screenId);
+  if (!screenId || screenId === DEFAULT_SCREEN_ID) {
+    const configured = Boolean(normalizeSecretString(env.FR24_API_KEY));
+    return {
+      configured,
+      screenConfigured: configured,
+      source: configured ? "worker-secret" : "missing"
+    };
+  }
+
+  const stored = await env.FLIGHT_DISPLAY_KV.get(fr24ScreenSecretKey(screenId));
+  return {
+    configured: Boolean(stored),
+    screenConfigured: Boolean(stored),
+    source: stored ? "screen" : "missing",
+    screenId
+  };
+}
+
+async function saveFr24Key(request: Request, env: Env, context?: RequestContext): Promise<Response> {
+  const authFailure = requireAuthenticatedUser(context);
+  if (authFailure) return authFailure;
+
+  const screenId = normalizeId(context?.screenId);
+  if (!screenId || screenId === DEFAULT_SCREEN_ID) {
+    return jsonResponse({ error: "Expected screen-specific URL" }, 400, { "Cache-Control": "no-store" });
+  }
+
+  const body = await readJsonObject(request);
+  const apiKey = normalizeSecretString(firstString(body, ["apiKey", "fr24ApiKey", "key"]));
+  if (!apiKey) {
+    return jsonResponse({ error: "Expected apiKey" }, 400, { "Cache-Control": "no-store" });
+  }
+
+  const encrypted = await encryptSecret(env, apiKey);
+  await env.FLIGHT_DISPLAY_KV.put(fr24ScreenSecretKey(screenId), encrypted);
+  return jsonResponse({
+    ok: true,
+    configured: true,
+    screenId
+  }, 200, { "Cache-Control": "no-store" });
+}
+
+function publicProvisionRecord(record: ProvisionRecord): Record<string, unknown> {
+  return {
+    status: record.status,
+    code: record.code,
+    screenId: record.screenId,
+    deviceId: record.deviceId,
+    createdAt: record.createdAt,
+    claimedAt: record.claimedAt
+  };
+}
+
+async function readJsonObject(request: Request): Promise<Record<string, unknown>> {
+  try {
+    const value = await request.json();
+    return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
+
+function normalizeHardwareId(value: unknown): string | undefined {
+  const raw = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (!raw || !/^[a-z0-9:._-]{4,80}$/.test(raw)) return undefined;
+  return raw.replace(/[^a-z0-9._-]/g, "");
+}
+
+function normalizePairingCode(value: unknown): string | undefined {
+  const raw = typeof value === "string" ? value.trim().toUpperCase().replace(/\s+/g, "") : "";
+  const normalized = raw.startsWith("SKY-") ? raw : raw.match(/^\d{6}$/) ? `SKY-${raw}` : raw;
+  return /^SKY-\d{6}$/.test(normalized) ? normalized : undefined;
+}
+
+async function saveScreenState(request: Request, env: Env, context?: RequestContext): Promise<Response> {
   let body: unknown = {};
   try {
     body = await request.json();
@@ -1079,10 +1699,10 @@ async function saveScreenState(request: Request, env: Env): Promise<Response> {
   }
 
   const source = firstString(body && typeof body === "object" ? body as Record<string, unknown> : {}, ["source"]) || "api";
-  return writeScreenState(env, { active }, source);
+  return writeScreenState(env, { active }, source, context);
 }
 
-async function saveBrightnessMode(request: Request, env: Env): Promise<Response> {
+async function saveBrightnessMode(request: Request, env: Env, context?: RequestContext): Promise<Response> {
   let body: unknown = {};
   try {
     body = await request.json();
@@ -1096,10 +1716,10 @@ async function saveBrightnessMode(request: Request, env: Env): Promise<Response>
   }
 
   const source = firstString(body && typeof body === "object" ? body as Record<string, unknown> : {}, ["source"]) || "api";
-  return writeScreenState(env, { brightnessMode: mode }, source);
+  return writeScreenState(env, { brightnessMode: mode }, source, context);
 }
 
-async function saveDisplayMode(request: Request, env: Env): Promise<Response> {
+async function saveDisplayMode(request: Request, env: Env, context?: RequestContext): Promise<Response> {
   let body: unknown = {};
   try {
     body = await request.json();
@@ -1114,10 +1734,10 @@ async function saveDisplayMode(request: Request, env: Env): Promise<Response> {
   }
 
   const source = firstString(body && typeof body === "object" ? body as Record<string, unknown> : {}, ["source"]) || "api";
-  return writeDisplayMode(env, normalizedMode, source);
+  return writeDisplayMode(env, normalizedMode, source, context);
 }
 
-async function triggerSoundTest(request: Request, env: Env): Promise<Response> {
+async function triggerSoundTest(request: Request, env: Env, context?: RequestContext): Promise<Response> {
   let body: unknown = {};
   try {
     body = await request.json();
@@ -1125,7 +1745,7 @@ async function triggerSoundTest(request: Request, env: Env): Promise<Response> {
     body = {};
   }
   const source = firstString(body && typeof body === "object" ? body as Record<string, unknown> : {}, ["source"]) || "api";
-  const [soundState, config] = await Promise.all([triggerSoundTestState(env, source), getConfig(env)]);
+  const [soundState, config] = await Promise.all([triggerSoundTestState(env, source, context), getConfig(env, context)]);
   const normalizedDevice = normalizeDeviceSettings(config.device);
   await broadcastRealtime(env, {
     type: "sound_test",
@@ -1133,15 +1753,15 @@ async function triggerSoundTest(request: Request, env: Env): Promise<Response> {
     source,
     testNonce: soundState.testNonce,
     volumePercent: normalizedDevice.audioVolumePercent
-  });
+  }, context);
   return jsonResponse({
     ...soundState,
     volumePercent: normalizedDevice.audioVolumePercent
   }, 200, { "Cache-Control": "no-store" });
 }
 
-async function avinorBoardResponse(env: Env): Promise<Response> {
-  const config = await getConfig(env);
+async function avinorBoardResponse(env: Env, context?: RequestContext): Promise<Response> {
+  const config = await getConfig(env, context);
   const airport = normalizeAirportCode(config.homeAirportIata, env.HOME_AIRPORT_IATA || "OSL");
   const timezone = config.device?.timezone || "Europe/Oslo";
   const [rawDepartures, rawArrivals] = await Promise.all([
@@ -1162,7 +1782,7 @@ async function avinorBoardResponse(env: Env): Promise<Response> {
   });
 }
 
-async function aviationstackDebugResponse(request: Request, env: Env): Promise<Response> {
+async function aviationstackDebugResponse(request: Request, env: Env, _context?: RequestContext): Promise<Response> {
   const apiKey = getAviationstackApiKey(env);
   if (!apiKey) return jsonResponse({ error: "AVIATIONSTACK_API_KEY secret is not configured" }, 500, { "Cache-Control": "no-store" });
 
@@ -1418,6 +2038,19 @@ function normalizeDisplayBehaviorMode(value: unknown): DisplayBehaviorMode {
 
 function airspaceMonitoringForMode(mode: DisplayBehaviorMode): boolean {
   return mode === "airspace" || mode === "hybrid";
+}
+
+function modeRequiresFr24(mode: unknown): boolean {
+  return mode === "airspace" || mode === "hybrid";
+}
+
+function enforceFr24DeviceSettings(device: DeviceSettings, hasScreenFr24Key: boolean): DeviceSettings {
+  if (hasScreenFr24Key || !modeRequiresFr24(device.displayMode)) return device;
+  return {
+    ...device,
+    displayMode: "airport_board",
+    airspaceMonitoringEnabled: false
+  };
 }
 
 function normalizeAircraftCategoryFilter(value: unknown): AircraftCategoryCode[] {
@@ -1987,29 +2620,34 @@ function localDateString(date: Date, timezone: string): string {
   return `${year}-${month}-${day}`;
 }
 
-async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
-  const [config, screenState] = await Promise.all([getConfig(env), getScreenState(env)]);
-  const normalizedDevice = normalizeDeviceSettings(config.device);
+async function flightsResponse(env: Env, compact: boolean, context?: RequestContext): Promise<Response> {
+  const [rawConfig, screenState, fr24] = await Promise.all([getConfig(env, context), getScreenState(env, context), fr24KeyStatus(env, context)]);
+  const normalizedDevice = enforceFr24DeviceSettings(normalizeDeviceSettings(rawConfig.device), fr24.screenConfigured);
+  const config: Config = {
+    ...rawConfig,
+    follow: fr24.screenConfigured ? rawConfig.follow : { ...normalizeFollowSettings(rawConfig.follow), enabled: false },
+    device: normalizedDevice
+  };
   const suspendedReason = displaySuspendedReason(config, screenState);
   const liveSourceStatus: LiveSourceStatus = {
     source: "fr24",
     ok: true
   };
   if (suspendedReason) {
-    return jsonResponse(await displayPayload(env, config, screenState, compact, suspendedReason, [], [], [], [], liveSourceStatus), 200, {
+    return jsonResponse(await displayPayload(env, config, screenState, compact, suspendedReason, [], [], [], [], liveSourceStatus, context), 200, {
       "Cache-Control": "no-store"
     });
   }
 
   if (normalizedDevice.displayMode === "clock") {
-    return jsonResponse(await displayPayload(env, config, screenState, compact, "clock", [], [], [], [], liveSourceStatus), 200, {
+    return jsonResponse(await displayPayload(env, config, screenState, compact, "clock", [], [], [], [], liveSourceStatus, context), 200, {
       "Cache-Control": "no-store"
     });
   }
 
   if (normalizedDevice.displayMode === "airport_board") {
     const idleScreens = await getIdleScreens(env, config);
-    return jsonResponse(await displayPayload(env, config, screenState, compact, "idle", [], [], [], idleScreens, liveSourceStatus), 200, {
+    return jsonResponse(await displayPayload(env, config, screenState, compact, "idle", [], [], [], idleScreens, liveSourceStatus, context), 200, {
       "Cache-Control": "public, max-age=15"
     });
   }
@@ -2023,9 +2661,9 @@ async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
   if (airspaceMonitoringEnabled) {
     try {
       if (follow.enabled && follow.flights.length) {
-        followFlights = await getFollowFlights(env, config);
+        followFlights = await getFollowFlights(env, config, [], context);
       } else {
-        nearbyFlights = await getFlights(env, config);
+        nearbyFlights = await getFlights(env, config, context);
       }
     } catch (error) {
       liveSourceStatus.ok = false;
@@ -2042,7 +2680,7 @@ async function flightsResponse(env: Env, compact: boolean): Promise<Response> {
   }
   const idleScreens = displayFlights.length || normalizedDevice.displayMode === "airspace" ? [] : await getIdleScreens(env, config);
   const payloadMode = normalizedDevice.displayMode === "airspace" && !displayFlights.length ? "airspace_waiting" : mode;
-  const payload = displayPayload(env, config, screenState, compact, payloadMode, followFlights, nearbyFlights, displayFlights, idleScreens, liveSourceStatus);
+  const payload = displayPayload(env, config, screenState, compact, payloadMode, followFlights, nearbyFlights, displayFlights, idleScreens, liveSourceStatus, context);
 
   return jsonResponse(await payload, 200, {
     "Cache-Control": "public, max-age=15"
@@ -2059,11 +2697,12 @@ async function displayPayload(
   nearbyFlights: DisplayFlight[],
   displayFlights: DisplayFlight[],
   idleScreens: IdleScreen[],
-  liveSourceStatus: LiveSourceStatus
+  liveSourceStatus: LiveSourceStatus,
+  context?: RequestContext
 ): Promise<Record<string, unknown>> {
   const normalizedDevice = normalizeDeviceSettings(config.device);
   const clock = buildClockPayload(normalizedDevice);
-  const deviceStatus = await getDeviceStatus(env);
+  const deviceStatus = await getDeviceStatus(env, context);
   return compact
     ? {
         updatedAt: new Date().toISOString(),
@@ -2388,9 +3027,9 @@ function normalizeLogoCode(airlineCode: string | undefined): string {
   return aliases[code] || code;
 }
 
-async function getFlights(env: Env, config: Config): Promise<DisplayFlight[]> {
+async function getFlights(env: Env, config: Config, context?: RequestContext): Promise<DisplayFlight[]> {
   const cacheTtl = Math.max(60, parseNumber(env.CACHE_TTL_SECONDS, 60));
-  const cacheKey = `flights:fr24:v1:${config.lat.toFixed(3)}:${config.lon.toFixed(3)}:${Math.round(config.radiusKm)}`;
+  const cacheKey = fr24ScopedCacheKey(`flights:fr24:v1:${config.lat.toFixed(3)}:${config.lon.toFixed(3)}:${Math.round(config.radiusKm)}`, context);
   const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
   if (Array.isArray(cached)) {
     const flights = cached as DisplayFlight[];
@@ -2399,7 +3038,7 @@ async function getFlights(env: Env, config: Config): Promise<DisplayFlight[]> {
   }
 
   const bounds = boundsFromRadius(config.lat, config.lon, config.radiusKm);
-  const records = await fetchFr24(env, bounds);
+  const records = await fetchFr24(env, bounds, {}, undefined, context);
   const flights = records
     .map((record) => normalizeFlight(record, config))
     .filter((flight): flight is DisplayFlight => Boolean(flight))
@@ -2414,7 +3053,7 @@ async function getFlights(env: Env, config: Config): Promise<DisplayFlight[]> {
   return flights;
 }
 
-async function getFollowFlights(env: Env, config: Config, liveFlights: DisplayFlight[] = []): Promise<DisplayFlight[]> {
+async function getFollowFlights(env: Env, config: Config, liveFlights: DisplayFlight[] = [], context?: RequestContext): Promise<DisplayFlight[]> {
   const follow = normalizeFollowSettings(config.follow);
   if (!follow.enabled || !follow.flights.length) return [];
 
@@ -2425,7 +3064,7 @@ async function getFollowFlights(env: Env, config: Config, liveFlights: DisplayFl
     getAvinorRawFlights(env, airport, "A", timezone)
   ]);
   const scheduled = [...departures, ...arrivals];
-  const targetedLiveFlights = await getTargetedFollowFlights(env, config, follow.flights);
+  const targetedLiveFlights = await getTargetedFollowFlights(env, config, follow.flights, context);
   const liveCandidates = mergeFlightsByIdentity([...targetedLiveFlights, ...liveFlights]);
 
   const flights = await Promise.all(follow.flights
@@ -2454,20 +3093,20 @@ async function getFollowFlights(env: Env, config: Config, liveFlights: DisplayFl
   return flights.filter((flight): flight is DisplayFlight => Boolean(flight));
 }
 
-async function getTargetedFollowFlights(env: Env, config: Config, tokens: string[]): Promise<DisplayFlight[]> {
+async function getTargetedFollowFlights(env: Env, config: Config, tokens: string[], context?: RequestContext): Promise<DisplayFlight[]> {
   const normalizedTokens = tokens
     .map(normalizeFollowToken)
     .filter((token): token is string => Boolean(token));
   if (!normalizedTokens.length) return [];
 
   const cacheTtl = Math.max(30, Math.min(300, parseNumber(env.CACHE_TTL_SECONDS, 60)));
-  const cacheKey = `follow:fr24:v4:${normalizedTokens.slice().sort().join(",")}`;
+  const cacheKey = fr24ScopedCacheKey(`follow:fr24:v4:${normalizedTokens.slice().sort().join(",")}`, context);
   const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
   if (Array.isArray(cached)) return cached as DisplayFlight[];
 
   const [records, staticFlights] = await Promise.all([
-    fetchFr24(env, undefined, { flights: normalizedTokens }, env.FR24_FOLLOW_ENDPOINT || "/live/flight-positions/light"),
-    getFr24FollowStaticFlights(env, config, normalizedTokens)
+    fetchFr24(env, undefined, { flights: normalizedTokens }, env.FR24_FOLLOW_ENDPOINT || "/live/flight-positions/light", context),
+    getFr24FollowStaticFlights(env, config, normalizedTokens, context)
   ]);
   const fallbackFlight = normalizedTokens.length === 1 ? normalizedTokens[0] : undefined;
   const liveFlights = records
@@ -2481,7 +3120,7 @@ async function getTargetedFollowFlights(env: Env, config: Config, tokens: string
   return flights;
 }
 
-async function getFr24FollowStaticFlights(env: Env, config: Config, tokens: string[]): Promise<DisplayFlight[]> {
+async function getFr24FollowStaticFlights(env: Env, config: Config, tokens: string[], context?: RequestContext): Promise<DisplayFlight[]> {
   const timezone = config.device?.timezone || "Europe/Oslo";
   const cacheDate = localDateString(new Date(), timezone);
   const cacheTtl = 18 * 60 * 60;
@@ -2489,7 +3128,7 @@ async function getFr24FollowStaticFlights(env: Env, config: Config, tokens: stri
   const missingTokens: string[] = [];
 
   await Promise.all(tokens.map(async (token) => {
-    const cacheKey = fr24FollowStaticCacheKey(cacheDate, token);
+    const cacheKey = fr24FollowStaticCacheKey(cacheDate, token, context);
     const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
     if (cached && typeof cached === "object" && !Array.isArray(cached)) {
       resultByToken.set(token, cached as DisplayFlight);
@@ -2500,7 +3139,7 @@ async function getFr24FollowStaticFlights(env: Env, config: Config, tokens: stri
 
   if (missingTokens.length) {
     try {
-      const records = await fetchFr24(env, undefined, { flights: missingTokens }, env.FR24_LIVE_ENDPOINT || "/live/flight-positions/full");
+      const records = await fetchFr24(env, undefined, { flights: missingTokens }, env.FR24_LIVE_ENDPOINT || "/live/flight-positions/full", context);
       const fullFlights = records
         .map((record) => normalizeFlight(record, config))
         .filter((flight): flight is DisplayFlight => Boolean(flight));
@@ -2509,7 +3148,7 @@ async function getFr24FollowStaticFlights(env: Env, config: Config, tokens: stri
         const fullFlight = fullFlights.find((flight) => flightMatchesFollowToken(flight, token));
         if (!fullFlight) return;
         resultByToken.set(token, fullFlight);
-        await env.FLIGHT_DISPLAY_KV.put(fr24FollowStaticCacheKey(cacheDate, token), JSON.stringify(fullFlight), { expirationTtl: cacheTtl });
+        await env.FLIGHT_DISPLAY_KV.put(fr24FollowStaticCacheKey(cacheDate, token, context), JSON.stringify(fullFlight), { expirationTtl: cacheTtl });
       }));
     } catch (error) {
       console.warn(error instanceof Error ? error.message : "FR24 follow static fetch failed");
@@ -2519,8 +3158,13 @@ async function getFr24FollowStaticFlights(env: Env, config: Config, tokens: stri
   return Array.from(resultByToken.values());
 }
 
-function fr24FollowStaticCacheKey(cacheDate: string, token: string): string {
-  return `follow:fr24:static:v2:${cacheDate}:${token}`;
+function fr24FollowStaticCacheKey(cacheDate: string, token: string, context?: RequestContext): string {
+  return fr24ScopedCacheKey(`follow:fr24:static:v2:${cacheDate}:${token}`, context);
+}
+
+function fr24ScopedCacheKey(key: string, context?: RequestContext): string {
+  const screenId = normalizeId(context?.screenId);
+  return screenId && screenId !== DEFAULT_SCREEN_ID ? `screen:${screenId}:${key}` : key;
 }
 
 function mergeFollowStaticFlights(liveFlights: DisplayFlight[], staticFlights: DisplayFlight[]): DisplayFlight[] {
@@ -2821,6 +3465,83 @@ function timeZoneOffsetMillis(date: Date, timezone: string): number {
 
 function normalizeSecretString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function randomToken(bytes = DEVICE_TOKEN_BYTES): string {
+  const values = new Uint8Array(bytes);
+  crypto.getRandomValues(values);
+  return base64Url(values);
+}
+
+function randomScreenId(): string {
+  const values = new Uint8Array(3);
+  crypto.getRandomValues(values);
+  const number = ((values[0] << 16) | (values[1] << 8) | values[2]) % 100000;
+  return String(number).padStart(5, "0");
+}
+
+function randomDeviceId(): string {
+  return `dev_${randomToken(12).toLowerCase()}`;
+}
+
+function randomPairingCode(): string {
+  const values = new Uint8Array(4);
+  crypto.getRandomValues(values);
+  const number = ((values[0] << 24) | (values[1] << 16) | (values[2] << 8) | values[3]) >>> 0;
+  return `SKY-${String(number % 1000000).padStart(6, "0")}`;
+}
+
+function base64Url(values: Uint8Array): string {
+  let binary = "";
+  for (const value of values) binary += String.fromCharCode(value);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function base64UrlToBytes(value: string): Uint8Array {
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+async function secretCryptoKey(env: Env): Promise<CryptoKey> {
+  const secret = normalizeSecretString(env.CREDENTIAL_ENCRYPTION_KEY);
+  if (!secret) throw new Error("CREDENTIAL_ENCRYPTION_KEY secret is not configured");
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(secret));
+  return crypto.subtle.importKey("raw", digest, "AES-GCM", false, ["encrypt", "decrypt"]);
+}
+
+async function encryptSecret(env: Env, value: string): Promise<string> {
+  const iv = new Uint8Array(12);
+  crypto.getRandomValues(iv);
+  const key = await secretCryptoKey(env);
+  const cipher = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(value));
+  return JSON.stringify({
+    v: 1,
+    alg: "AES-GCM",
+    iv: base64Url(iv),
+    data: base64Url(new Uint8Array(cipher))
+  });
+}
+
+async function decryptSecret(env: Env, stored: string): Promise<string | undefined> {
+  const trimmed = stored.trim();
+  if (!trimmed.startsWith("{")) return trimmed;
+  const parsed = JSON.parse(trimmed) as { v?: number; iv?: string; data?: string };
+  if (parsed.v !== 1 || !parsed.iv || !parsed.data) return undefined;
+  const key = await secretCryptoKey(env);
+  const plain = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: base64UrlToBytes(parsed.iv) },
+    key,
+    base64UrlToBytes(parsed.data)
+  );
+  return new TextDecoder().decode(plain);
 }
 
 async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit, timeoutMs: number): Promise<Response> {
@@ -3140,8 +3861,9 @@ function aircraftCategoryAllowed(flight: DisplayFlight, allowedCategories: Aircr
   return allowed.includes(flight.category);
 }
 
-async function fetchFr24(env: Env, bounds?: string, filters: { flights?: string[]; callsigns?: string[] } = {}, endpointOverride?: string): Promise<unknown[]> {
-  if (!env.FR24_API_KEY) throw new Error("FR24_API_KEY secret is not configured");
+async function fetchFr24(env: Env, bounds?: string, filters: { flights?: string[]; callsigns?: string[] } = {}, endpointOverride?: string, context?: RequestContext): Promise<unknown[]> {
+  const apiKey = await getFr24ApiKey(env, context);
+  if (!apiKey) throw new Error("FR24 API key is not configured for this screen");
 
   const baseUrl = env.FR24_API_BASE_URL || "https://fr24api.flightradar24.com/api";
   const endpoint = endpointOverride || env.FR24_LIVE_ENDPOINT || "/live/flight-positions/full";
@@ -3155,7 +3877,7 @@ async function fetchFr24(env: Env, bounds?: string, filters: { flights?: string[
     headers: {
       Accept: "application/json",
       "Accept-Version": "v1",
-      Authorization: `Bearer ${env.FR24_API_KEY}`
+      Authorization: `Bearer ${apiKey}`
     }
   });
 
@@ -3170,6 +3892,16 @@ async function fetchFr24(env: Env, bounds?: string, filters: { flights?: string[
     return (json as { data: unknown[] }).data;
   }
   return [];
+}
+
+async function getFr24ApiKey(env: Env, context?: RequestContext): Promise<string | undefined> {
+  const screenId = normalizeId(context?.screenId);
+  if (screenId && screenId !== DEFAULT_SCREEN_ID) {
+    const stored = await env.FLIGHT_DISPLAY_KV.get(fr24ScreenSecretKey(screenId));
+    if (stored) return decryptSecret(env, stored);
+    return undefined;
+  }
+  return normalizeSecretString(env.FR24_API_KEY);
 }
 
 function normalizeFlight(record: unknown, config: Config, fallbackFlight?: string): DisplayFlight | null {
@@ -3562,2750 +4294,231 @@ function normalizeDisplayText(value: string): string {
     .replace(/[ñÑ]/g, "n");
 }
 
-function renderPixelEditorHtml(): string {
+function renderAdminHtml(request: Request, userEmail: string): string {
+  const logoutUrl = accessLogoutUrl(request, "/admin");
   return `<!doctype html>
-<html lang="no">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Pixel Editor 128 x 64</title>
+  <title>SkyFrame admin</title>
   <style>
-    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; --ink:#f4f7ff; --muted:#9aa7b8; --line:#2c3849; --panel:#101720; --field:#070b10; --accent:#f6b800; }
-    * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; background: #05080d; color: var(--ink); }
-    main { min-height: 100vh; }
-    aside { padding: 14px 18px; border-bottom: 1px solid var(--line); background: #0b1118; display: grid; grid-template-columns: minmax(230px, 340px) minmax(420px, 1fr) minmax(300px, 420px); gap: 14px; align-items: start; }
-    h1 { margin: 0; font-size: 24px; line-height: 1.1; letter-spacing: 0; }
-    p { margin: 8px 0 0; color: var(--muted); font-size: 13px; line-height: 1.4; }
-    label { display: block; margin: 13px 0 5px; color: #dce4ee; font-size: 12px; font-weight: 800; }
-    input, select, textarea { width: 100%; border: 1px solid #344257; border-radius: 7px; background: var(--field); color: var(--ink); font: inherit; }
-    input, select { padding: 9px 10px; }
-    textarea { min-height: 132px; padding: 10px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 11px; line-height: 1.35; }
-    button { width: 100%; margin-top: 9px; border: 1px solid #3b4859; border-radius: 7px; padding: 10px 12px; background: #182232; color: var(--ink); font: inherit; font-weight: 850; cursor: pointer; }
-    button.primary, button.active { background: var(--accent); color: #111; border-color: var(--accent); }
-    button.danger { background: #321923; color: #ffd8d1; border-color: #6c3141; }
-    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
-    .meta { margin-top: 9px; color: var(--muted); font-size: 12px; }
-    .tools { display: grid; grid-template-columns: 1fr 1fr 150px; gap: 9px; align-items: end; }
-    .output-panel { min-width: 0; }
-    .stage { padding: 12px 18px 18px; overflow: auto; background: #070a0e; }
-    .editor-grid { display: grid; grid-template-columns: 44px minmax(0, 1fr); grid-template-rows: 28px auto; gap: 6px; width: 100%; }
-    .coord-box { display: grid; place-items: center; border: 1px solid #263345; border-radius: 6px; background: #0b1118; color: #f4f7ff; font: 11px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
-    #topAxis, #leftAxis { display: block; width: 100%; height: 100%; background: #090d13; border: 1px solid #263345; border-radius: 6px; }
-    .canvas-wrap { width: 100%; aspect-ratio: 2 / 1; background: #000; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
-    #pixelCanvas { width: 100%; height: 100%; display: block; background: #000; image-rendering: pixelated; cursor: crosshair; touch-action: none; }
-    .mini { margin-top: 12px; margin-left: 50px; width: min(100%, 512px); aspect-ratio: 2 / 1; border: 1px solid var(--line); background: #000; }
-    #miniCanvas { width: 100%; height: 100%; display: block; image-rendering: pixelated; }
-    a { color: #6aa7ff; text-decoration: none; }
-    @media (max-width: 860px) {
-      aside { display: block; }
-      .tools { display: block; }
-      .stage { padding: 12px; }
-      .editor-grid { grid-template-columns: 34px minmax(0, 1fr); grid-template-rows: 24px auto; gap: 4px; }
-      .mini { margin-left: 38px; }
-    }
+    :root{color-scheme:light;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--bg:#f2ece8;--ink:#3c2415;--muted:#6b5d52;--line:rgba(60,36,21,.16);--panel:#fffaf5;--accent:#3478f6;--ok:#008f5a;--warn:#b36b00;--danger:#b42318}
+    *{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#f8f4ef,#ddd7d2);color:var(--ink)}main{width:min(1180px,100%);margin:0 auto;padding:28px 20px 48px}.top{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:22px}.skyframe-logo{width:245px;max-width:70vw;height:auto}h1{margin:10px 0 0;font-size:42px;line-height:1}.lead{margin:8px 0 0;color:var(--muted);font-size:15px}.user{display:grid;justify-items:end;gap:4px;border:1px solid var(--line);border-radius:8px;padding:9px 12px;background:rgba(255,255,255,.6);color:var(--muted);font-size:13px}.user a{font-size:12px}.toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:18px 0}.status{color:var(--muted);font-size:13px}button{border:0;border-radius:8px;background:var(--ink);color:white;font:inherit;font-weight:800;padding:10px 14px;cursor:pointer}.danger{background:rgba(180,35,24,.1);color:var(--danger);border:1px solid rgba(180,35,24,.22)}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:8px;background:rgba(255,250,245,.86);box-shadow:0 24px 64px rgba(34,20,12,.12)}table{width:100%;border-collapse:collapse;min-width:1040px}th,td{padding:12px 14px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;font-size:13px}th{background:#c1b4ac;color:var(--ink);font-size:12px;text-transform:uppercase;letter-spacing:.06em}tr:last-child td{border-bottom:0}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;overflow-wrap:anywhere}.muted{color:var(--muted)}.pill{display:inline-flex;align-items:center;border-radius:999px;padding:3px 8px;font-weight:800;font-size:11px;background:#eee;color:var(--muted)}.pill.ok{background:rgba(0,143,90,.12);color:var(--ok)}.pill.warn{background:rgba(179,107,0,.12);color:var(--warn)}.pill.danger{background:rgba(180,35,24,.1);color:var(--danger);border:0}a{color:var(--accent);font-weight:800;text-decoration:none}.vitals{display:grid;gap:4px;color:var(--muted)}@media(max-width:700px){.top{display:grid}.skyframe-logo{width:210px}h1{font-size:32px}}
   </style>
 </head>
 <body>
   <main>
-    <aside>
-      <h1>Pixel editor</h1>
-      <p>128 x 64 LED-grid med samme pitch og runde prikker som emulatoren. Ruler og peker viser x 1-128 og y 1-64; outputen er fortsatt kodeklar 0-basert.</p>
-      <div id="meta" class="meta">128 x 64 · ruler x 1-128 · y 1-64 · 0 pixels tent · x:- y:-</div>
-      <p><a href="/">Tilbake til kontrollpanel</a></p>
-      <div class="tools">
-        <div>
-          <label for="format">Output</label>
-          <select id="format">
-            <option value="json">JSON coordinates</option>
-            <option value="cpp">C++ points</option>
-            <option value="bitmap">64 row bitmap</option>
-          </select>
-        </div>
-        <div class="row">
-          <button id="copy" class="primary" type="button">Kopier output</button>
-          <button id="clear" class="danger" type="button">Tøm grid</button>
-        </div>
-        <button id="invert" type="button">Inverter pixels</button>
-      </div>
-      <div class="output-panel">
-        <label for="output">Kode</label>
-        <textarea id="output" spellcheck="false"></textarea>
-        <button id="load" type="button">Last JSON fra feltet</button>
-      </div>
-    </aside>
-    <section class="stage">
-      <div class="editor-grid">
-        <div id="coordBox" class="coord-box">x:-<br>y:-</div>
-        <canvas id="topAxis" width="1024" height="28"></canvas>
-        <canvas id="leftAxis" width="44" height="512"></canvas>
-        <div class="canvas-wrap">
-          <canvas id="pixelCanvas" width="1024" height="512"></canvas>
-        </div>
-      </div>
-      <div class="mini">
-        <canvas id="miniCanvas" width="128" height="64"></canvas>
-      </div>
-    </section>
+    <div class="top"><div>${skyFrameLogoMarkup()}<h1>Admin</h1><p class="lead">Screens, owners, FR24 status and device vitals.</p></div><div class="user"><span>${escapeHtml(userEmail)}</span><a href="${logoutUrl}">Log out</a></div></div>
+    <div class="toolbar"><div id="status" class="status">Loading screens...</div><button id="refresh" type="button">Refresh</button></div>
+    <div class="table-wrap"><table><thead><tr><th>Screen</th><th>Owner</th><th>Mode</th><th>FR24</th><th>Screen state</th><th>Vitals</th><th>Actions</th></tr></thead><tbody id="rows"></tbody></table></div>
   </main>
   <script>
-    const cols = 128;
-    const rows = 64;
-    const canvas = document.querySelector("#pixelCanvas");
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    const topAxis = document.querySelector("#topAxis");
-    const topAxisCtx = topAxis.getContext("2d", { willReadFrequently: true });
-    const leftAxis = document.querySelector("#leftAxis");
-    const leftAxisCtx = leftAxis.getContext("2d", { willReadFrequently: true });
-    const coordBox = document.querySelector("#coordBox");
-    const miniCanvas = document.querySelector("#miniCanvas");
-    const miniCtx = miniCanvas.getContext("2d", { willReadFrequently: true });
-    const output = document.querySelector("#output");
-    const meta = document.querySelector("#meta");
-    const format = document.querySelector("#format");
-    const pixels = new Set();
-    let strokeMode = "draw";
-    let pointerDown = false;
-    let activePointerId = null;
-    let hoverPoint = null;
-
-    function key(x, y) { return x + "," + y; }
-    function parseKey(value) {
-      const parts = value.split(",");
-      return { x: Number(parts[0]), y: Number(parts[1]) };
-    }
-    function pixelFromEvent(event) {
-      const rect = canvas.getBoundingClientRect();
-      const x = Math.floor(((event.clientX - rect.left) / rect.width) * cols);
-      const y = Math.floor(((event.clientY - rect.top) / rect.height) * rows);
-      if (x < 0 || y < 0 || x >= cols || y >= rows) return null;
-      return { x, y };
-    }
-    function setPixelState(point, nextOn) {
-      if (!point) return;
-      if (nextOn) {
-        pixels.add(key(point.x, point.y));
-      } else {
-        pixels.delete(key(point.x, point.y));
-      }
-    }
-    function applyPixel(event) {
-      const point = pixelFromEvent(event);
-      if (!point) return;
-      setPixelState(point, strokeMode === "draw");
-      render();
-    }
-    function render() {
-      drawLedPanel();
-      drawAxes();
-      drawMini();
-      updateOutput();
-    }
-    function drawLedPanel() {
-      const panelW = canvas.width;
-      const panelH = canvas.height;
-      const pitchX = panelW / cols;
-      const pitchY = panelH / rows;
-      const radius = Math.min(pitchX, pitchY) * 0.27;
-      ctx.fillStyle = "#000";
-      ctx.fillRect(0, 0, panelW, panelH);
-      for (let y = 0; y < rows; y += 1) {
-        for (let x = 0; x < cols; x += 1) {
-          const cx = x * pitchX + pitchX / 2;
-          const cy = y * pitchY + pitchY / 2;
-          ctx.fillStyle = "#242a33";
-          ctx.beginPath();
-          ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-          ctx.fill();
-          if (pixels.has(key(x, y))) {
-            ctx.fillStyle = "#ffffff";
-            ctx.beginPath();
-            ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-            ctx.fill();
-          }
-        }
-      }
-      drawBoardCrosshair();
-    }
-    function drawBoardCrosshair() {
-      if (!hoverPoint) return;
-      const pitchX = canvas.width / cols;
-      const pitchY = canvas.height / rows;
-      const x = hoverPoint.x * pitchX + pitchX / 2;
-      const y = hoverPoint.y * pitchY + pitchY / 2;
-      ctx.save();
-      ctx.strokeStyle = "rgba(246,184,0,.95)";
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, canvas.height);
-      ctx.moveTo(0, y);
-      ctx.lineTo(canvas.width, y);
-      ctx.stroke();
-      ctx.fillStyle = "rgba(246,184,0,.95)";
-      ctx.beginPath();
-      ctx.arc(x, y, Math.min(pitchX, pitchY) * 0.33, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
-    }
-    function drawAxes() {
-      const pitchX = topAxis.width / cols;
-      const pitchY = leftAxis.height / rows;
-      topAxisCtx.fillStyle = "#090d13";
-      topAxisCtx.fillRect(0, 0, topAxis.width, topAxis.height);
-      leftAxisCtx.fillStyle = "#090d13";
-      leftAxisCtx.fillRect(0, 0, leftAxis.width, leftAxis.height);
-      topAxisCtx.font = "10px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
-      topAxisCtx.textAlign = "center";
-      topAxisCtx.textBaseline = "top";
-      leftAxisCtx.font = "10px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
-      leftAxisCtx.textAlign = "right";
-      leftAxisCtx.textBaseline = "middle";
-      for (let x = 0; x < cols; x += 1) {
-        const px = x * pitchX + pitchX / 2;
-        const major = x % 16 === 0;
-        const minor = x % 8 === 0;
-        if (!major && !minor) continue;
-        topAxisCtx.strokeStyle = major ? "#6f7f92" : "#394657";
-        topAxisCtx.beginPath();
-        topAxisCtx.moveTo(px, topAxis.height);
-        topAxisCtx.lineTo(px, major ? 12 : 19);
-        topAxisCtx.stroke();
-        if (major) {
-          topAxisCtx.fillStyle = "#dce4ee";
-          topAxisCtx.fillText(String(x + 1), px, 2);
-        }
-      }
-      topAxisCtx.fillStyle = "#dce4ee";
-      topAxisCtx.fillText("128", topAxis.width - pitchX / 2, 2);
-      for (let y = 0; y < rows; y += 1) {
-        const py = y * pitchY + pitchY / 2;
-        const major = y % 8 === 0;
-        const minor = y % 4 === 0;
-        if (!major && !minor) continue;
-        leftAxisCtx.strokeStyle = major ? "#6f7f92" : "#394657";
-        leftAxisCtx.beginPath();
-        leftAxisCtx.moveTo(leftAxis.width, py);
-        leftAxisCtx.lineTo(major ? 20 : 31, py);
-        leftAxisCtx.stroke();
-        if (major) {
-          leftAxisCtx.fillStyle = "#dce4ee";
-          leftAxisCtx.fillText(String(y + 1), 18, py);
-        }
-      }
-      leftAxisCtx.fillStyle = "#dce4ee";
-      leftAxisCtx.fillText("64", 18, leftAxis.height - pitchY / 2);
-      if (hoverPoint) {
-        const hx = hoverPoint.x * pitchX + pitchX / 2;
-        const hy = hoverPoint.y * pitchY + pitchY / 2;
-        topAxisCtx.fillStyle = "#f6b800";
-        topAxisCtx.fillRect(Math.max(0, hx - 1), 0, 2, topAxis.height);
-        topAxisCtx.fillStyle = "#111";
-        topAxisCtx.fillRect(Math.max(0, hx - 14), 2, 28, 12);
-        topAxisCtx.fillStyle = "#f6b800";
-        topAxisCtx.fillText(String(hoverPoint.x + 1), hx, 3);
-        leftAxisCtx.fillStyle = "#f6b800";
-        leftAxisCtx.fillRect(0, Math.max(0, hy - 1), leftAxis.width, 2);
-        leftAxisCtx.fillStyle = "#111";
-        leftAxisCtx.fillRect(2, Math.max(0, hy - 7), 24, 14);
-        leftAxisCtx.fillStyle = "#f6b800";
-        leftAxisCtx.fillText(String(hoverPoint.y + 1), 22, hy);
-        coordBox.innerHTML = "x:" + (hoverPoint.x + 1) + "<br>y:" + (hoverPoint.y + 1);
-      } else {
-        coordBox.innerHTML = "x:-<br>y:-";
-      }
-    }
-    function drawMini() {
-      miniCtx.fillStyle = "#000";
-      miniCtx.fillRect(0, 0, cols, rows);
-      miniCtx.fillStyle = "#ffffff";
-      pixels.forEach((value) => {
-        const point = parseKey(value);
-        miniCtx.fillRect(point.x, point.y, 1, 1);
-      });
-    }
-    function sortedPixels() {
-      return Array.from(pixels)
-        .map(parseKey)
-        .sort((a, b) => a.y - b.y || a.x - b.x);
-    }
-    function updateOutput() {
-      const list = sortedPixels();
-      if (format.value === "cpp") {
-        const lines = list.map((point) => "  {" + point.x + ", " + point.y + "}");
-        output.value = "const uint8_t CLOCK_TEMPLATE[][2] = {\\n" + lines.join(",\\n") + "\\n};\\nconst size_t CLOCK_TEMPLATE_COUNT = " + list.length + ";";
-      } else if (format.value === "bitmap") {
-        output.value = JSON.stringify({
-          width: cols,
-          height: rows,
-          rows: Array.from({ length: rows }, (_, y) => {
-            let line = "";
-            for (let x = 0; x < cols; x += 1) line += pixels.has(key(x, y)) ? "1" : "0";
-            return line;
-          })
-        }, null, 2);
-      } else {
-        output.value = JSON.stringify({
-          width: cols,
-          height: rows,
-          pixels: list.map((point) => [point.x, point.y])
-        }, null, 2);
-      }
-      const cursor = hoverPoint ? " · x:" + (hoverPoint.x + 1) + " y:" + (hoverPoint.y + 1) : " · x:- y:-";
-      meta.textContent = "128 x 64 · ruler x 1-128 · y 1-64 · " + list.length + " pixels tent" + cursor;
-    }
-    function loadJson() {
-      const parsed = JSON.parse(output.value);
-      pixels.clear();
-      if (Array.isArray(parsed.pixels)) {
-        parsed.pixels.forEach((point) => {
-          const x = Number(point[0]);
-          const y = Number(point[1]);
-          if (Number.isInteger(x) && Number.isInteger(y) && x >= 0 && y >= 0 && x < cols && y < rows) pixels.add(key(x, y));
-        });
-      } else if (Array.isArray(parsed.rows)) {
-        parsed.rows.slice(0, rows).forEach((line, y) => {
-          String(line).slice(0, cols).split("").forEach((char, x) => {
-            if (char === "1") pixels.add(key(x, y));
-          });
-        });
-      }
-      render();
-    }
-
-    format.addEventListener("change", updateOutput);
-    document.querySelector("#clear").addEventListener("click", () => {
-      pixels.clear();
-      render();
+    const rows = document.querySelector("#rows");
+    const status = document.querySelector("#status");
+    document.querySelector("#refresh").addEventListener("click", load);
+    function esc(value){return String(value ?? "").replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));}
+    function date(value){if(!value)return "never";const d=new Date(value);return Number.isNaN(d.getTime())?"never":d.toLocaleString();}
+    function mode(value){return ({airspace:"AirSpace",hybrid:"AirSpace + Airport Board",airport_board:"Airport Board",clock:"Clock"}[value]||"Not set");}
+    function stateLabel(value){return value===false?"Screen off":"Screen on";}
+    function source(value){return ({screen:"Personal key",missing:"No key",["worker-secret"]:"Shared Worker key"}[value]||value||"No key");}
+    function freshness(value){if(!value)return ["No heartbeat","warn"];const t=Date.parse(value);if(!Number.isFinite(t))return ["Unknown","warn"];const mins=Math.round((Date.now()-t)/60000);if(mins<=4)return ["Online","ok"];return ["Last seen "+mins+" min ago","warn"];}
+    function vitalLine(label,value){return "<span><strong>"+esc(label)+":</strong> "+esc(value ?? "-")+"</span>";}
+    rows.addEventListener("click", async (event)=>{
+      const button=event.target.closest("[data-delete-screen]");
+      if(!button)return;
+      const screenId=button.getAttribute("data-delete-screen");
+      const label=button.getAttribute("data-label")||screenId;
+      if(!confirm("Delete "+label+"? The screen will be sent back to pairing mode."))return;
+      button.disabled=true;
+      const res=await fetch("/api/admin/screens/"+encodeURIComponent(screenId),{method:"DELETE"});
+      const data=await res.json().catch(()=>({}));
+      if(!res.ok){alert(data.error||"Could not delete screen");button.disabled=false;return;}
+      await load();
     });
-    document.querySelector("#invert").addEventListener("click", () => {
-      const next = new Set();
-      for (let y = 0; y < rows; y += 1) for (let x = 0; x < cols; x += 1) {
-        if (!pixels.has(key(x, y))) next.add(key(x, y));
-      }
-      pixels.clear();
-      next.forEach((value) => pixels.add(value));
-      render();
-    });
-    document.querySelector("#copy").addEventListener("click", async () => {
-      await navigator.clipboard.writeText(output.value);
-      meta.textContent = sortedPixels().length + " pixels tent · kopiert";
-    });
-    document.querySelector("#load").addEventListener("click", () => {
-      try {
-        loadJson();
-      } catch (error) {
-        meta.textContent = "Kunne ikke lese JSON";
-      }
-    });
-    canvas.addEventListener("pointerdown", (event) => {
-      pointerDown = true;
-      activePointerId = event.pointerId;
-      canvas.setPointerCapture(event.pointerId);
-      hoverPoint = pixelFromEvent(event);
-      strokeMode = hoverPoint && pixels.has(key(hoverPoint.x, hoverPoint.y)) ? "erase" : "draw";
-      setPixelState(hoverPoint, strokeMode === "draw");
-      render();
-    });
-    canvas.addEventListener("pointermove", (event) => {
-      hoverPoint = pixelFromEvent(event);
-      if (!pointerDown || event.pointerId !== activePointerId) {
-        render();
-        return;
-      }
-      applyPixel(event);
-    });
-    canvas.addEventListener("pointerup", (event) => {
-      pointerDown = false;
-      activePointerId = null;
-      canvas.releasePointerCapture(event.pointerId);
-      hoverPoint = pixelFromEvent(event);
-      render();
-    });
-    canvas.addEventListener("pointercancel", () => {
-      pointerDown = false;
-      activePointerId = null;
-      hoverPoint = null;
-      render();
-    });
-    canvas.addEventListener("pointerleave", () => {
-      if (pointerDown) return;
-      hoverPoint = null;
-      render();
-    });
-    render();
+    async function load(){
+      status.textContent="Loading screens...";
+      const res=await fetch("/api/admin/screens");
+      const data=await res.json().catch(()=>({}));
+      if(!res.ok){status.textContent=data.error||"Could not load";return;}
+      status.textContent=data.count+" screens · updated "+date(data.updatedAt);
+      rows.innerHTML=(data.screens||[]).map((screen)=>{
+        const state=screen.screenState||{};
+        const vitals=screen.deviceStatus||{};
+        const fr24=screen.fr24&&screen.fr24.screenConfigured;
+        const fresh=freshness(vitals.updatedAt);
+        return "<tr>"
+          +"<td><div class='mono'>"+esc(screen.screenId)+"</div><div>"+esc(screen.label)+"</div><div class='mono'>"+esc(screen.deviceId)+"</div></td>"
+          +"<td>"+esc(screen.ownerEmail||"-")+"<div class='mono'>paired "+esc(date(screen.pairedAt))+"</div></td>"
+          +"<td>"+esc(mode(screen.displayMode))+"</td>"
+          +"<td><span class='pill "+(fr24?"ok":"warn")+"'>"+esc(source(screen.fr24&&screen.fr24.source))+"</span></td>"
+          +"<td>"+esc(stateLabel(state.active))+" · "+esc(state.brightnessMode==="night"?"Night brightness":"Day brightness")+"<div class='mono'>"+esc(date(state.updatedAt))+"</div></td>"
+          +"<td><div class='vitals'><span class='pill "+fresh[1]+"'>"+esc(fresh[0])+"</span>"+vitalLine("IP address",vitals.wifi&&vitals.wifi.ip)+vitalLine("Wi-Fi",vitals.wifi&&vitals.wifi.ssid)+vitalLine("Signal",vitals.wifi&&typeof vitals.wifi.rssi==="number"?vitals.wifi.rssi+" dBm":null)+vitalLine("Uptime",vitals.uptimeMs?Math.round(vitals.uptimeMs/1000)+" s":null)+vitalLine("Firmware mode",mode(vitals.displayMode))+"</div></td>"
+          +"<td><button class='danger' type='button' data-delete-screen='"+esc(screen.screenId)+"' data-label='"+esc(screen.label)+"'>Delete</button></td>"
+          +"</tr>";
+      }).join("")||"<tr><td colspan='7'>No paired screens yet.</td></tr>";
+    }
+    load();
   </script>
 </body>
 </html>`;
 }
 
-function renderIndexHtml(): string {
+function accessLogoutUrl(request: Request, path = "/screen-setup"): string {
+  const url = new URL(request.url);
+  const returnTo = `${url.origin}${path}`;
+  return `/cdn-cgi/access/logout?returnTo=${encodeURIComponent(returnTo)}`;
+}
+
+function renderAdminAccessDeniedHtml(request: Request, email?: string): string {
+  const logoutUrl = accessLogoutUrl(request, "/admin");
   return `<!doctype html>
-<html lang="no">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Flight Display Server</title>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-  <style>
-    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; --ink:#f5f0df; --muted:#9fa8b8; --line:#273345; --panel:#101720; --panel2:#151f2b; --field:#0b1118; --amber:#f6b800; --amber2:#ffd761; --blue:#2f7fdd; --blue2:#172942; --danger:#ff6d4a; --ok:#78d98f; --soft:#101720; }
-    body { margin: 0; min-height: 100vh; background: #05080d; color: var(--ink); }
-    .shell { min-height: 100vh; display: grid; grid-template-columns: minmax(410px, 470px) minmax(0, 1fr); align-items: stretch; background: linear-gradient(135deg, #05080d 0%, #0d141e 54%, #161205 100%); }
-    aside { padding: 18px; background: linear-gradient(180deg, rgba(9,14,20,.98), rgba(13,19,28,.96)); border-right: 1px solid #2c3542; box-shadow: 12px 0 30px rgba(0,0,0,.24); box-sizing: border-box; display: flex; flex-direction: column; }
-    .brand { margin: 0 0 14px; padding: 16px; background: #05070a; border: 1px solid #293241; border-left: 5px solid var(--amber); border-radius: 8px; }
-    .eyebrow { margin: 0 0 7px; color: var(--amber2); font-size: 11px; font-weight: 850; letter-spacing: .14em; text-transform: uppercase; }
-    h1 { margin: 0; font-size: 28px; line-height: 1.05; letter-spacing: 0; }
-    p { margin: 7px 0 0; color: var(--muted); line-height: 1.45; font-size: 13px; }
-    .card { margin-top: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: rgba(16,23,32,.88); box-shadow: 0 14px 36px rgba(0,0,0,.22); }
-    .brand { order: 0; }
-    .savebar { order: 1; }
-    .place-card { order: 2; }
-    .screen-card { order: 3; }
-    .flight-card { order: 4; }
-    .timetable-card { order: 5; }
-    .links-wrap { order: 6; }
-    .preview { order: 7; }
-    .card h2 { margin: 0; color: var(--amber2); font-size: 13px; letter-spacing: .12em; text-transform: uppercase; }
-    .section-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 0 12px; }
-    .section-note { margin: -4px 0 10px; color: var(--muted); font-size: 12px; line-height: 1.4; }
-    .hint { position: relative; display: inline-grid; place-items: center; flex: 0 0 auto; width: 21px; height: 21px; border: 1px solid #405066; border-radius: 50%; color: #f8fafc; background: #182232; font-size: 12px; font-weight: 900; cursor: help; }
-    .hint::after { content: attr(data-tip); position: absolute; right: 0; top: 27px; z-index: 20; width: min(280px, 74vw); padding: 9px 10px; border: 1px solid #405066; border-radius: 8px; background: #05080d; color: #edf2f8; box-shadow: 0 10px 30px rgba(0,0,0,.35); font-size: 12px; font-weight: 650; line-height: 1.35; letter-spacing: 0; text-transform: none; opacity: 0; pointer-events: none; transform: translateY(-4px); transition: opacity .12s ease, transform .12s ease; }
-    .hint:hover::after, .hint:focus::after { opacity: 1; transform: translateY(0); }
-    .subhead { margin: 14px 0 8px; color: #f4f7ff; font-size: 12px; font-weight: 850; letter-spacing: .06em; text-transform: uppercase; }
-    label { display: block; margin: 11px 0 5px; color: #d7deea; font-weight: 750; font-size: 12px; }
-    .field-help { margin: 4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.35; }
-    input, select { width: 100%; box-sizing: border-box; border: 1px solid #334154; border-radius: 8px; padding: 9px 10px; font: inherit; background: var(--field); color: var(--ink); }
-    input[type="checkbox"] { width: auto; }
-    input:focus, select:focus { outline: 2px solid rgba(246,184,0,.35); border-color: var(--amber); }
-    input[type="color"] { height: 38px; padding: 3px; cursor: pointer; background: var(--field); }
-    input[type="range"] { padding: 0; height: 28px; border: 0; background: transparent; accent-color: var(--amber); }
-    .range-field { margin-top: 10px; }
-    .range-label { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 2px; }
-    .range-value { min-width: 58px; padding: 4px 8px; border-radius: 999px; background: #182232; color: var(--amber2); text-align: center; font-size: 12px; font-weight: 850; }
-    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    .color-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
-    .color-grid label { margin-top: 10px; }
-    .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 8px 0 4px; }
-    .toggle-row label { margin: 0; }
-    .category-grid { display: grid; grid-template-columns: 1fr; gap: 6px; margin: 7px 0 10px; }
-    .category-option { display: grid; grid-template-columns: auto 1fr; align-items: start; gap: 8px; padding: 7px 8px; border: 1px solid #263345; border-radius: 8px; background: rgba(5,8,13,.32); }
-    .category-option input { margin-top: 2px; }
-    .category-option label { margin: 0; color: #eef3fb; font-size: 12px; line-height: 1.25; }
-    .category-option span { display: block; color: var(--muted); font-size: 11px; line-height: 1.25; }
-    button { margin-top: 14px; width: 100%; border: 0; border-radius: 8px; padding: 10px 13px; background: var(--amber); color: #111; font: inherit; font-weight: 850; cursor: pointer; }
-    button.secondary { background: #1d2938; color: #f3f6fb; border: 1px solid #354457; margin-top: 9px; }
-    button.danger { background: #321923; color: #ffd8d1; border: 1px solid #6c3141; }
-    button:hover { filter: brightness(1.03); transform: translateY(-1px); }
-    .savebar { position: sticky; top: 0; z-index: 12; margin-top: 12px; padding: 12px; border: 1px solid #3c4a5e; border-radius: 8px; background: linear-gradient(180deg, rgba(24,34,48,.98), rgba(9,14,20,.98)); box-shadow: 0 10px 22px rgba(0,0,0,.34); }
-    .savebar button { margin: 0; }
-    .status { min-height: 18px; margin-top: 9px; font-size: 12px; color: var(--ok); }
-    .status.dirty { color: var(--amber2); }
-    .error { color: var(--danger); }
-    .links { margin-top: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 12px; }
-    .links a { padding: 7px 8px; background: #0b1118; border: 1px solid #263345; border-radius: 7px; }
-    details.links-wrap { margin-top: 12px; border: 1px solid #263345; border-radius: 8px; background: #0b1118; }
-    details.links-wrap summary { cursor: pointer; padding: 9px 10px; color: var(--muted); font-size: 12px; font-weight: 800; }
-    details.links-wrap .links { margin: 0; padding: 0 10px 10px; }
-    details.settings-group { margin-top: 12px; border: 1px solid #263345; border-radius: 8px; background: rgba(11,17,24,.76); }
-    details.settings-group summary { cursor: pointer; padding: 9px 10px; color: #f4f7ff; font-size: 12px; font-weight: 850; letter-spacing: .06em; text-transform: uppercase; }
-    details.settings-group .settings-body { padding: 0 10px 10px; border-top: 1px solid #263345; }
-    .preview { margin-top: 16px; }
-    .preview-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-    .preview-head h2 { margin: 0; font-size: 13px; }
-    .preview-actions { display: flex; gap: 8px; }
-    .preview-head button { width: auto; margin: 0; padding: 8px 10px; font-size: 12px; background: #1d2938; color: #f3f6fb; border: 1px solid #354457; }
-    .meta { margin: 8px 0 10px; color: var(--muted); font-size: 12px; }
-    .flight-list { display: grid; gap: 8px; }
-    .flight { border: 1px solid #2e3a4c; border-radius: 8px; padding: 9px 10px; background: #0b1118; }
-    .flight-row { display: grid; grid-template-columns: 42px 1fr; gap: 10px; align-items: center; }
-    .flight-logo { width: 42px; height: 42px; object-fit: contain; background: #000; border-radius: 4px; }
-    .flight-logo.missing { display: grid; place-items: center; color: #7b8797; font-size: 10px; border: 1px solid #2e3a4c; background: #111923; }
-    .flight strong { display: block; font-size: 15px; }
-    .flight span { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; line-height: 1.35; }
-    .empty { color: var(--muted); font-size: 13px; line-height: 1.4; }
-    .raw-board { margin-top: 10px; border-top: 1px solid #263345; padding-top: 10px; }
-    .raw-board h3 { margin: 12px 0 8px; color: var(--amber2); font-size: 12px; letter-spacing: .1em; text-transform: uppercase; }
-    .raw-card { margin-top: 8px; border: 1px solid #2e3a4c; border-radius: 6px; background: #070d13; overflow: hidden; }
-    .raw-card summary { cursor: pointer; padding: 9px 10px; color: #f4f7ff; font-weight: 800; }
-    .raw-card summary span { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; font-weight: 600; }
-    .field-grid { display: grid; grid-template-columns: 138px minmax(0, 1fr); gap: 1px; padding: 0 10px 10px; font-size: 11px; }
-    .field-grid dt, .field-grid dd { margin: 0; padding: 5px 6px; background: #0b1118; min-width: 0; overflow-wrap: anywhere; }
-    .field-grid dt { color: var(--amber2); font-weight: 800; }
-    .field-grid dd { color: #dce4ee; }
-    .workbench { min-height: 100vh; align-self: stretch; }
-    .emulator { padding: 18px 22px 22px; background: #0c121a; color: #e8edf4; border-top: 1px solid #263242; }
-    .emulator h2 { margin: 0 0 6px; font-size: 18px; }
-    .emulator p { color: #aeb8c5; margin-bottom: 14px; }
-    .emu-controls { display: grid; grid-template-columns: 170px minmax(220px, 420px) 150px; gap: 12px; align-items: end; margin-bottom: 14px; }
-    .emu-controls label { color: #dce4ee; margin-top: 0; }
-    .emu-controls input, .emu-controls select { width: 100%; box-sizing: border-box; border: 1px solid #3b4859; border-radius: 6px; padding: 9px 10px; background: #182232; color: #f8fafc; font: inherit; }
-    .emu-controls button { width: 100%; margin: 0; padding: 10px; font-size: 12px; background: #1d2938; color: #f3f6fb; border: 1px solid #354457; }
-    .emu-controls button.active { background: var(--amber); color: #111; border-color: var(--amber); }
-    .emu-stage { overflow: auto; padding: 12px; background: #070a0e; border: 1px solid #2c3849; border-radius: 8px; }
-    .emu-wrap { position: relative; width: min(100%, 1024px); aspect-ratio: 2 / 1; background: #000; }
-    #ledCanvas { width: 100%; height: 100%; display: block; background: #000; }
-    .emu-meta { margin-top: 10px; color: #aeb8c5; font-size: 12px; }
-    a { color: #6aa7ff; text-decoration: none; }
-    details.card { padding: 0; overflow: hidden; }
-    details.card > summary.section-head { margin: 0; padding: 14px; list-style: none; cursor: pointer; }
-    details.card > summary.section-head::-webkit-details-marker { display: none; }
-    details.card > summary.section-head::after { content: "›"; color: var(--muted); font-size: 24px; line-height: 1; transform: rotate(90deg); transition: transform .14s ease; }
-    details.card:not([open]) > summary.section-head::after { transform: rotate(0deg); }
-    details.card > .section-content { padding: 0 14px 14px; }
-    a:hover { text-decoration: underline; }
-    #map { height: 330px; min-height: 330px; margin-top: 12px; border: 1px solid #2c3849; border-radius: 8px; overflow: hidden; filter: saturate(.78) contrast(1.05); }
-    @media (max-width: 820px) {
-      .shell { display: block; min-height: 100vh; }
-      aside { max-height: none; overflow: visible; border-right: 0; border-bottom: 1px solid #273345; box-shadow: none; }
-      .workbench { min-height: 0; }
-      #map { height: 340px; min-height: 340px; }
-      .emulator { padding: 16px 12px 18px; }
-      .emu-controls { grid-template-columns: 1fr; }
-      .color-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .row { grid-template-columns: 1fr; }
-    }
-  </style>
+  <title>SkyFrame admin access</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  ${skyFrameSetupStyles()}
 </head>
 <body>
-  <main class="shell">
-    <aside>
-      <header class="brand">
-        <div class="eyebrow">Display control</div>
-        <h1>Flight Display</h1>
-        <p>Velg område, lysstyrke og hvordan skjermen skal oppføre seg. Live-data hentes bare når du trykker på en hent-knapp eller starter display-test.</p>
-      </header>
-      <div class="savebar">
-        <button id="save">Lagre alle innstillinger</button>
-        <div id="status" class="status"></div>
-      </div>
-      <details class="card place-card" open>
-        <summary class="section-head">
-          <h2>Sted og flyplass</h2>
-        </summary>
-        <div class="section-content">
-        <p class="section-note">Sett nålen på kartet, velg radius rundt hjemmet ditt og hvilken flyplass tidstabellen skal vise.</p>
-        <label for="label">Navn på stedet</label>
-        <input id="label" autocomplete="off" placeholder="Home">
-        <div class="row">
-          <div>
-            <label for="homeAirport">Flyplass for tavle</label>
-            <input id="homeAirport" maxlength="4" placeholder="OSL">
-            <div class="field-help">Bruk IATA-kode, for eksempel OSL.</div>
-          </div>
-          <div>
-            <label for="timezone">Lokal tid</label>
-            <input id="timezone" placeholder="Europe/Oslo">
-            <div class="field-help">Brukes til klokke, nattmodus og rutetider.</div>
-          </div>
-        </div>
-        <div class="row">
-          <div>
-            <label for="lat">Breddegrad</label>
-            <input id="lat" inputmode="decimal">
-          </div>
-          <div>
-            <label for="lon">Lengdegrad</label>
-            <input id="lon" inputmode="decimal">
-          </div>
-        </div>
-        <div class="range-field">
-          <div class="range-label">
-            <label for="radius">Søkeområde</label>
-            <span class="range-value"><span id="radiusValue">10</span> km</span>
-          </div>
-          <input id="radius" type="range" min="1" max="250" step="1">
-        </div>
-        <button id="locate" class="secondary">Bruk min posisjon</button>
-        <section id="map" aria-label="Kart"></section>
-        </div>
-      </details>
-      <details class="card screen-card">
-        <summary class="section-head">
-          <h2>Skjerm</h2>
-        </summary>
-        <div class="section-content">
-        <p class="section-note">De viktigste displayvalgene. Sjeldnere tidsvalg ligger under avansert.</p>
-        <div class="field-help">Skjermen styres eksternt fra Homey. Her ser du bare status og lagrer nivåene for dag og natt.</div>
-        <div class="field-help" id="screenStateSummary">Skjermstatus: aktiv · lysmodus: dag</div>
-        <div class="field-help" id="screenStateTimestamps">Sist aktivert: aldri · sist deaktivert: aldri · sist byttet lysmodus: aldri</div>
-        <div class="row">
-          <div>
-            <label for="displayMode">Displaymodus</label>
-            <select id="displayMode">
-              <option value="flight">Flight display</option>
-              <option value="clock">Klokke</option>
-            </select>
-            <div class="field-help">Kan også styres eksternt fra Homey med eget POST-endepunkt.</div>
-          </div>
-        </div>
-        <button id="screenToggle" class="secondary" type="button">Slå av skjerm</button>
-        <div class="field-help" id="soundTestStatus">Lydtest: aldri</div>
-        <button id="soundTest" class="secondary" type="button">Test lyd nå</button>
-        <div class="range-label">
-          <label for="audioVolumePercent">Lydvolum</label>
-          <span class="range-value"><span id="audioVolumeValue">35</span>%</span>
-        </div>
-        <input id="audioVolumePercent" type="range" min="0" max="100" step="1">
-        <div class="field-help">Gjelder testlyd og PA-varsel.</div>
-        <div class="range-field">
-          <div class="range-label">
-            <label for="deviceBrightness">Lysstyrke dag</label>
-            <span class="range-value"><span id="deviceBrightnessValue">80</span>%</span>
-          </div>
-          <input id="deviceBrightness" type="range" min="1" max="100" step="1">
-        </div>
-        <div class="range-field">
-          <div class="range-label">
-            <label for="pollSeconds">Hent nye flydata</label>
-            <span class="range-value"><span id="pollSecondsValue">90</span> s</span>
-          </div>
-          <input id="pollSeconds" type="range" min="30" max="900" step="5">
-          <div class="field-help">Sekunder mellom hver henting når skjermen er aktiv.</div>
-        </div>
-        <details class="settings-group">
-          <summary>Avansert skjerm</summary>
-          <div class="settings-body">
-            <div class="row">
-              <div>
-                <div class="range-label">
-                  <label for="configRefreshSeconds">Sjekk innstillinger</label>
-                  <span class="range-value"><span id="configRefreshSecondsValue">300</span> s</span>
-                </div>
-                <input id="configRefreshSeconds" type="range" min="60" max="3600" step="30">
-                <div class="field-help">Hvor ofte skjermen spør Worker om nye innstillinger.</div>
-              </div>
-              <div>
-                <div class="range-label">
-                  <label for="nightBrightness">Lysstyrke natt</label>
-                  <span class="range-value"><span id="nightBrightnessValue">0</span>%</span>
-                </div>
-                <input id="nightBrightness" type="range" min="0" max="100" step="1">
-                <div class="field-help">Brukes når Homey setter lysmodus til natt.</div>
-              </div>
-            </div>
-          </div>
-        </details>
-        </div>
-      </details>
-      <details class="card clock-card">
-        <summary class="section-head">
-          <h2>Klokke</h2>
-        </summary>
-        <div class="section-content">
-        <p class="section-note">Alle valg for klokkemodus samlet på ett sted.</p>
-        <div class="row">
-          <div>
-            <label for="clockTopColor">Gradienttopp</label>
-            <input id="clockTopColor" type="color">
-            <div class="field-help">Telleraden og nye linjer starter i denne fargen.</div>
-          </div>
-          <div>
-            <label for="clockColor">Gradientbunn</label>
-            <input id="clockColor" type="color">
-            <div class="field-help">Eldre linjer og nederste del av klokkefeltet går mot denne fargen.</div>
-          </div>
-        </div>
-        </div>
-      </details>
-      <details class="card flight-card">
-        <summary class="section-head">
-          <h2>Fly</h2>
-        </summary>
-        <div class="section-content">
-        <p class="section-note">Live flyvisning alternerer mellom målinger i 10 sekunder og Flying over i 5 sekunder. Follow-flight viser i tillegg status før avgang og Landed når flyet har landet.</p>
-        <div class="toggle-row">
-          <div>
-            <label for="airspaceMonitoringEnabled">Overvåk luftrommet</label>
-            <div class="field-help">Når denne er av, henter Worker ikke live flydata. Tidstabell fra Avinor vises fortsatt.</div>
-          </div>
-          <input id="airspaceMonitoringEnabled" type="checkbox">
-        </div>
-        <details class="settings-group">
-          <summary>Flytyper i overvåkning</summary>
-          <div class="settings-body">
-            <div class="field-help">Gjelder bare automatisk fly-i-radius. Follow-flight viser fortsatt flighten du eksplisitt følger.</div>
-            <div class="category-grid" id="aircraftCategoryGrid">
-              <div class="category-option">
-                <input id="catP" type="checkbox" data-aircraft-category="P">
-                <label for="catP">P Passenger<span>Kommersielle passasjerfly</span></label>
-              </div>
-              <div class="category-option">
-                <input id="catC" type="checkbox" data-aircraft-category="C">
-                <label for="catC">C Cargo<span>Rene fraktfly</span></label>
-              </div>
-              <div class="category-option">
-                <input id="catM" type="checkbox" data-aircraft-category="M">
-                <label for="catM">M Military and government<span>Militaer eller offentlig operator</span></label>
-              </div>
-              <div class="category-option">
-                <input id="catJ" type="checkbox" data-aircraft-category="J">
-                <label for="catJ">J Business jets<span>Store private jetfly</span></label>
-              </div>
-              <div class="category-option">
-                <input id="catT" type="checkbox" data-aircraft-category="T">
-                <label for="catT">T General aviation<span>Privat, ambulanse, skole, survey og kalibrering</span></label>
-              </div>
-              <div class="category-option">
-                <input id="catH" type="checkbox" data-aircraft-category="H">
-                <label for="catH">H Helicopters<span>Helikoptre</span></label>
-              </div>
-              <div class="category-option">
-                <input id="catB" type="checkbox" data-aircraft-category="B">
-                <label for="catB">B Lighter than air<span>Luftskip og lignende</span></label>
-              </div>
-              <div class="category-option">
-                <input id="catG" type="checkbox" data-aircraft-category="G">
-                <label for="catG">G Gliders<span>Seilfly</span></label>
-              </div>
-              <div class="category-option">
-                <input id="catD" type="checkbox" data-aircraft-category="D">
-                <label for="catD">D Drones<span>UAV og droner</span></label>
-              </div>
-              <div class="category-option">
-                <input id="catV" type="checkbox" data-aircraft-category="V">
-                <label for="catV">V Ground vehicles<span>Kjoeretoy med transponder</span></label>
-              </div>
-              <div class="category-option">
-                <input id="catO" type="checkbox" data-aircraft-category="O">
-                <label for="catO">O Other<span>Alt som ikke passer andre steder</span></label>
-              </div>
-              <div class="category-option">
-                <input id="catN" type="checkbox" data-aircraft-category="N">
-                <label for="catN">N Non categorized<span>Ikke kategorisert i FR24-databasen</span></label>
-              </div>
-            </div>
-          </div>
-        </details>
-        <div class="toggle-row">
-          <label for="followEnabled">Følg flightnummer</label>
-          <input id="followEnabled" type="checkbox">
-        </div>
-        <label for="followFlights" id="followFlightsLabel">Flightnummer</label>
-        <input id="followFlights" autocomplete="off" placeholder="SK4673, DY1304, DOC45">
-        <div class="field-help" id="followFlightsHelp">La stå av for å vise fly i området. Skru på for å følge bestemte fly.</div>
-        <details class="settings-group">
-          <summary>Avansert flyvisning</summary>
-          <div class="settings-body">
-            <div class="subhead">Integrasjoner</div>
-            <div class="field-help" id="aviationstackStatus">Aviationstack: sjekker secret...</div>
-            <div class="subhead">Live-målinger</div>
-            <div class="row">
-              <div>
-                <label for="altitudeUnit">Høyde vises som</label>
-                <select id="altitudeUnit">
-                  <option value="ft">ft</option>
-                  <option value="fl">FL</option>
-                  <option value="m">m</option>
-                  <option value="km">km</option>
-                  <option value="nmi">nmi</option>
-                </select>
-              </div>
-              <div>
-                <label for="speedUnit">Fart vises som</label>
-                <select id="speedUnit">
-                  <option value="kn">kn</option>
-                  <option value="mph">mph</option>
-                  <option value="kmh">km/h</option>
-                  <option value="ms">m/s</option>
-                  <option value="mach">mach</option>
-                </select>
-              </div>
-            </div>
-            <div class="row">
-              <div>
-                <label for="trackUnit">Retning vises som</label>
-                <select id="trackUnit">
-                  <option value="deg">degrees</option>
-                  <option value="cardinal">cardinal</option>
-                </select>
-              </div>
-              <div>
-                <label for="verticalRateUnit">Stigning/synk vises som</label>
-                <select id="verticalRateUnit">
-                  <option value="fpm">fpm</option>
-                  <option value="fts">ft/s</option>
-                  <option value="ms">m/s</option>
-                  <option value="mph">mph</option>
-                  <option value="kmh">km/h</option>
-                </select>
-              </div>
-            </div>
-            <div class="subhead">Oppførsel</div>
-            <div class="row">
-              <div>
-                <div class="range-label">
-                  <label for="cycleSeconds">Bytt fly</label>
-                  <span class="range-value"><span id="cycleSecondsValue">5</span> s</span>
-                </div>
-                <input id="cycleSeconds" type="range" min="2" max="30" step="1">
-                <div class="field-help">Gjelder når flere fly vises samtidig.</div>
-              </div>
-              <div>
-                <div class="range-label">
-                  <label for="scrollSpeed">Scrollhastighet</label>
-                  <span class="range-value"><span id="scrollSpeedValue">9</span> px/s</span>
-                </div>
-                <input id="scrollSpeed" type="range" min="2" max="30" step="1">
-                <div class="field-help">Hvor fort lang tekst beveger seg.</div>
-              </div>
-            </div>
-            <div class="subhead">Farger for flyvisning</div>
-            <div class="color-grid">
-              <div>
-                <label for="airlineColor">Flyselskap</label>
-                <input id="airlineColor" type="color">
-              </div>
-              <div>
-                <label for="routeColor">Rute</label>
-                <input id="routeColor" type="color">
-              </div>
-              <div>
-                <label for="aircraftColor">Flytype</label>
-                <input id="aircraftColor" type="color">
-              </div>
-              <div>
-                <label for="contextColor">Tekstscroll</label>
-                <input id="contextColor" type="color">
-              </div>
-              <div>
-                <label for="progressColor">Bytte-linje</label>
-                <input id="progressColor" type="color">
-              </div>
-              <div>
-                <label for="routeProgressColor">Flyprogress</label>
-                <input id="routeProgressColor" type="color">
-              </div>
-            </div>
-          </div>
-        </details>
-        </div>
-      </details>
-      <details class="card timetable-card">
-        <summary class="section-head">
-          <h2>Tidstabell</h2>
-        </summary>
-        <div class="section-content">
-        <p class="section-note">Viser avganger og ankomster fra valgt flyplass. Tavlen ruller automatisk hvis det er mer enn fire rader.</p>
-        <div class="row">
-          <div>
-            <div class="range-label">
-              <label for="timetableCycleSeconds">Hold hver tavleside</label>
-              <span class="range-value"><span id="timetableCycleSecondsValue">7</span> s</span>
-            </div>
-            <input id="timetableCycleSeconds" type="range" min="2" max="60" step="1">
-          </div>
-          <div>
-            <div class="range-label">
-              <label for="timetableScrollSpeed">Rullehastighet</label>
-              <span class="range-value"><span id="timetableScrollSpeedValue">18</span> px/s</span>
-            </div>
-            <input id="timetableScrollSpeed" type="range" min="4" max="40" step="1">
-          </div>
-        </div>
-        <div class="row">
-          <div>
-            <div class="range-label">
-              <label for="departureTimetableItemCount">Avganger antall</label>
-              <span class="range-value"><span id="departureTimetableItemCountValue">8</span></span>
-            </div>
-            <input id="departureTimetableItemCount" type="range" min="4" max="40" step="4">
-            <div class="field-help">Skjermen viser fire rader om gangen.</div>
-          </div>
-          <div>
-            <div class="range-label">
-              <label for="arrivalTimetableItemCount">Ankomster antall</label>
-              <span class="range-value"><span id="arrivalTimetableItemCountValue">8</span></span>
-            </div>
-            <input id="arrivalTimetableItemCount" type="range" min="4" max="40" step="4">
-          </div>
-        </div>
-        <div class="row">
-          <div>
-            <div class="range-label">
-              <label for="departureAvinorWindowHours">Avganger fremover</label>
-              <span class="range-value"><span id="departureAvinorWindowHoursValue">4</span> t</span>
-            </div>
-            <input id="departureAvinorWindowHours" type="range" min="1" max="24" step="1">
-          </div>
-          <div>
-            <div class="range-label">
-              <label for="arrivalAvinorWindowHours">Ankomster fremover</label>
-              <span class="range-value"><span id="arrivalAvinorWindowHoursValue">4</span> t</span>
-            </div>
-            <input id="arrivalAvinorWindowHours" type="range" min="1" max="24" step="1">
-          </div>
-        </div>
-        <div class="subhead">Farger for tidstabell</div>
-        <div class="color-grid">
-          <div>
-            <label for="timetableHeaderColor">Overskrift</label>
-            <input id="timetableHeaderColor" type="color">
-          </div>
-          <div>
-            <label for="timetableDataColor">Vanlig tekst</label>
-            <input id="timetableDataColor" type="color">
-          </div>
-          <div>
-            <label for="timetableTimeColor">Klokkeslett</label>
-            <input id="timetableTimeColor" type="color">
-          </div>
-          <div>
-            <label for="timetableNewTimeColor">Ny tid</label>
-            <input id="timetableNewTimeColor" type="color">
-          </div>
-          <div>
-            <label for="timetableCanceledColor">Kansellert</label>
-            <input id="timetableCanceledColor" type="color">
-          </div>
-          <div>
-            <label for="timetableGateGoToGateColor">Go to gate</label>
-            <input id="timetableGateGoToGateColor" type="color">
-          </div>
-          <div>
-            <label for="timetableGateBoardingColor">Boarding</label>
-            <input id="timetableGateBoardingColor" type="color">
-          </div>
-          <div>
-            <label for="timetableGateClosingColor">Gate closing</label>
-            <input id="timetableGateClosingColor" type="color">
-          </div>
-          <div>
-            <label for="timetableGateClosedColor">Gate closed</label>
-            <input id="timetableGateClosedColor" type="color">
-          </div>
-          <div>
-            <label for="timetableLandedColor">Landed</label>
-            <input id="timetableLandedColor" type="color">
-          </div>
-        </div>
-        </div>
-      </details>
-      <details class="links-wrap">
-        <summary>Avansert: API-lenker</summary>
-        <div class="links">
-          <a href="/api/config" target="_blank">Config</a>
-          <a href="/api/device-config" target="_blank">Device config</a>
-          <a href="/api/logo-status" target="_blank">Logo status</a>
-          <a href="/api/screen-state" target="_blank">Screen state</a>
-          <a href="/api/display-mode" target="_blank">Display mode</a>
-          <a href="/api/brightness-mode" target="_blank">Brightness mode</a>
-          <a href="/api/sound-test" target="_blank">Sound test</a>
-          <a href="/api/flights" target="_blank">Flights</a>
-          <a href="/api/display" target="_blank">Display</a>
-          <a href="/pixel-editor" target="_blank">Pixel editor</a>
-          <a href="/api/avinor-board" target="_blank">Avinor board</a>
-          <a href="/api/aviationstack?flight=TP764" target="_blank">Aviationstack raw</a>
-        </div>
-      </details>
-      <details class="preview card" aria-label="Display preview">
-        <summary class="preview-head section-head">
-          <h2>Display-data</h2>
-          <div class="preview-actions">
-            <button id="refreshAvinor" type="button">Hent Avinor</button>
-            <button id="refresh" type="button">Hent data</button>
-          </div>
-        </summary>
-        <div class="section-content">
-          <div id="previewMeta" class="meta"></div>
-          <div id="flightList" class="flight-list"></div>
-          <div id="avinorRaw" class="raw-board"></div>
-        </div>
-      </details>
-    </aside>
-    <div class="workbench">
-      <section class="emulator" aria-label="LED matrix emulator">
-        <h2>128 x 64 emulator</h2>
-        <p>Forhåndsvis nøyaktig 128 x 64 LED-layout. Lysstyrke, farger, rotasjon og scroll styres fra innstillingene til venstre.</p>
-        <div class="emu-controls">
-          <div>
-            <label for="emuSource">Preview-kilde</label>
-            <select id="emuSource">
-              <option value="live">Live data</option>
-              <option value="upload">Logo test</option>
-            </select>
-          </div>
-          <div>
-            <label for="imageUpload">Logo 42 x 42 PNG</label>
-            <input id="imageUpload" type="file" accept="image/*">
-          </div>
-          <div>
-            <label for="emuPolling">Display-test</label>
-            <button id="emuPolling" type="button">Start test</button>
-          </div>
-        </div>
-        <div class="emu-stage">
-          <div class="emu-wrap">
-            <canvas id="ledCanvas" width="1024" height="512"></canvas>
-          </div>
-        </div>
-        <div id="emuMeta" class="emu-meta">Ingen bilde lastet opp.</div>
-      </section>
-    </div>
+  <main class="page start-page setup-page">
+    <section class="hero">
+      ${skyFrameLogoMarkup()}
+      <div><h1>Admin access required.</h1><p class="lead">This Google account is signed in, but it is not allowed to open the SkyFrame admin area.</p></div>
+      <div class="panel"><div class="panel-header"><div><p class="panel-title">Wrong account?</p><p class="panel-subtitle">${email ? `Signed in as ${escapeHtml(email)}.` : "No admin session was found."}</p></div></div><div class="panel-body">
+        <div class="step"><div class="step-number">1</div><div><h2>Use another Google account</h2><p>Sign out of Cloudflare Access, then choose the admin account when you return.</p></div></div>
+        <div class="actions"><a class="button secondary" href="${logoutUrl}">Sign in with another account</a><a class="button" href="/">Open control panel</a></div>
+      </div></div>
+    </section>
   </main>
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+</body>
+</html>`;
+}
+
+function renderStartHtml(): string {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Start SkyFrame</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  ${skyFrameSetupStyles()}
+</head>
+<body>
+  <main class="page start-page setup-page">
+    <section class="hero">
+      ${skyFrameLogoMarkup()}
+      <div><h1>Pair your SkyFrame.</h1><p class="lead">Sign in with Google and enter the code shown on your display. FR24 can be added later from the control panel.</p></div>
+      <div class="panel"><div class="panel-header"><div><p class="panel-title">Connect this display</p><p class="panel-subtitle">The screen is already online and waiting for a pairing code.</p></div></div><div class="panel-body">
+        <div class="step"><div class="step-number">1</div><div><h2>Sign in and pair the code</h2><p>Use Google to create your SkyFrame account, then enter the code shown on the display to attach it to your account.</p></div></div>
+        <div class="actions single"><a class="button secondary" href="/screen-setup">Continue with Google</a></div>
+      </div></div>
+    </section>
+  </main>
+</body>
+</html>`;
+}
+
+function renderLoginRequiredHtml(): string {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in to SkyFrame</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  ${skyFrameSetupStyles()}
+</head>
+<body>
+  <main class="page start-page setup-page">
+    <section class="hero">
+      ${skyFrameLogoMarkup()}
+      <div><h1>Sign in first.</h1><p class="lead">Screen pairing is tied to your Google account, so the setup form only opens after Cloudflare Access has verified you.</p></div>
+      <div class="panel"><div class="panel-header"><div><p class="panel-title">Google login required</p><p class="panel-subtitle">If this page still appears after login, the Access policy for /screen-setup is not active yet.</p></div></div><div class="panel-body">
+        <div class="step"><div class="step-number">1</div><div><h2>Create or use your Google account</h2><p>SkyFrame uses Google for account creation and password recovery.</p></div></div>
+        <div class="step"><div class="step-number">2</div><div><h2>Return to screen setup</h2><p>After login, you can enter the code shown on your display.</p></div></div>
+        <div class="actions"><a class="button secondary" href="/screen-setup">Continue with Google</a><a class="button" href="/start">Back to start</a></div>
+      </div></div>
+    </section>
+  </main>
+</body>
+</html>`;
+}
+
+function renderScreenSetupHtml(userEmail: string): string {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SkyFrame screen setup</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  ${skyFrameSetupStyles()}
+</head>
+<body>
+  <main class="page setup-page">
+    <section class="hero">
+      <div class="brand">${skyFrameLogoMarkup()}<div class="status-pill"><span class="status-dot"></span><span id="connectionLabel">Signed in as ${escapeHtml(userEmail)}</span></div></div>
+      <div><h1>Pair your screen.</h1><p class="lead">Enter the code shown on the display. After pairing you can go straight to the control panel, or add a personal FR24 key as an optional second step.</p></div>
+      <div class="panel"><div class="panel-header"><div><p class="panel-title">Screen setup</p><p class="panel-subtitle">Use the code currently shown on the LED panel.</p></div></div><div class="panel-body">
+        <div class="step"><div class="step-number">1</div><div><h2>Pair the display</h2><p>The screen waits here until this code is claimed.</p></div></div>
+        <div class="form"><label>Pairing code<input id="pairingCode" class="pair-code" placeholder="SKY-123456" autocomplete="one-time-code" inputmode="numeric"></label><label>Screen name<input id="screenLabel" placeholder="Kitchen, office, cabin"></label><button id="claimButton">Pair screen</button></div>
+        <div id="afterPairing" class="after-pairing" hidden>
+          <div class="success-card"><strong>Screen paired</strong><span id="pairedScreenId">Ready for the control panel</span></div>
+          <div class="actions"><button id="openConfigButton" type="button">Open control panel</button><button id="skipFr24Button" class="secondary" type="button">Skip FR24 for now</button></div>
+          <div class="step"><div class="step-number">2</div><div><h2>Optional FR24</h2><p>Add a personal FR24 key to unlock AirSpace and Follow Flight modes. You can also do this later in the control panel.</p></div></div>
+          <div class="form"><label>FR24 API key<input id="fr24Key" placeholder="Paste personal FR24 key" autocomplete="off"></label><div class="actions"><button id="saveFr24Button" class="secondary">Save FR24 key</button><button id="openConfigWithFr24Button" type="button">Open control</button></div></div>
+        </div>
+        <pre id="output" class="result">Ready.</pre>
+      </div></div>
+    </section>
+  </main>
   <script>
-    const els = {
-      label: document.querySelector("#label"),
-      lat: document.querySelector("#lat"),
-      lon: document.querySelector("#lon"),
-      radius: document.querySelector("#radius"),
-	      radiusValue: document.querySelector("#radiusValue"),
-	      homeAirport: document.querySelector("#homeAirport"),
-	      airspaceMonitoringEnabled: document.querySelector("#airspaceMonitoringEnabled"),
-	      aircraftCategoryInputs: Array.from(document.querySelectorAll("[data-aircraft-category]")),
-	      followEnabled: document.querySelector("#followEnabled"),
-      followFlights: document.querySelector("#followFlights"),
-      followFlightsLabel: document.querySelector("#followFlightsLabel"),
-      followFlightsHelp: document.querySelector("#followFlightsHelp"),
-      aviationstackStatus: document.querySelector("#aviationstackStatus"),
-      altitudeUnit: document.querySelector("#altitudeUnit"),
-      speedUnit: document.querySelector("#speedUnit"),
-      trackUnit: document.querySelector("#trackUnit"),
-      verticalRateUnit: document.querySelector("#verticalRateUnit"),
-      screenStateSummary: document.querySelector("#screenStateSummary"),
-      screenStateTimestamps: document.querySelector("#screenStateTimestamps"),
-      screenToggle: document.querySelector("#screenToggle"),
-      displayMode: document.querySelector("#displayMode"),
-      clockTopColor: document.querySelector("#clockTopColor"),
-      clockColor: document.querySelector("#clockColor"),
-      soundTestStatus: document.querySelector("#soundTestStatus"),
-      soundTest: document.querySelector("#soundTest"),
-      audioVolumePercent: document.querySelector("#audioVolumePercent"),
-      audioVolumeValue: document.querySelector("#audioVolumeValue"),
-      deviceBrightness: document.querySelector("#deviceBrightness"),
-      deviceBrightnessValue: document.querySelector("#deviceBrightnessValue"),
-      nightBrightness: document.querySelector("#nightBrightness"),
-      nightBrightnessValue: document.querySelector("#nightBrightnessValue"),
-      pollSeconds: document.querySelector("#pollSeconds"),
-      pollSecondsValue: document.querySelector("#pollSecondsValue"),
-      cycleSeconds: document.querySelector("#cycleSeconds"),
-      cycleSecondsValue: document.querySelector("#cycleSecondsValue"),
-      timetableCycleSeconds: document.querySelector("#timetableCycleSeconds"),
-      timetableCycleSecondsValue: document.querySelector("#timetableCycleSecondsValue"),
-      departureTimetableItemCount: document.querySelector("#departureTimetableItemCount"),
-      departureTimetableItemCountValue: document.querySelector("#departureTimetableItemCountValue"),
-      arrivalTimetableItemCount: document.querySelector("#arrivalTimetableItemCount"),
-      arrivalTimetableItemCountValue: document.querySelector("#arrivalTimetableItemCountValue"),
-      departureAvinorWindowHours: document.querySelector("#departureAvinorWindowHours"),
-      departureAvinorWindowHoursValue: document.querySelector("#departureAvinorWindowHoursValue"),
-      arrivalAvinorWindowHours: document.querySelector("#arrivalAvinorWindowHours"),
-      arrivalAvinorWindowHoursValue: document.querySelector("#arrivalAvinorWindowHoursValue"),
-      timetableScrollSpeed: document.querySelector("#timetableScrollSpeed"),
-      timetableScrollSpeedValue: document.querySelector("#timetableScrollSpeedValue"),
-      scrollSpeed: document.querySelector("#scrollSpeed"),
-      scrollSpeedValue: document.querySelector("#scrollSpeedValue"),
-      configRefreshSeconds: document.querySelector("#configRefreshSeconds"),
-      configRefreshSecondsValue: document.querySelector("#configRefreshSecondsValue"),
-      airlineColor: document.querySelector("#airlineColor"),
-      routeColor: document.querySelector("#routeColor"),
-      aircraftColor: document.querySelector("#aircraftColor"),
-      contextColor: document.querySelector("#contextColor"),
-      progressColor: document.querySelector("#progressColor"),
-      routeProgressColor: document.querySelector("#routeProgressColor"),
-      timetableHeaderColor: document.querySelector("#timetableHeaderColor"),
-      timetableDataColor: document.querySelector("#timetableDataColor"),
-      timetableTimeColor: document.querySelector("#timetableTimeColor"),
-      timetableNewTimeColor: document.querySelector("#timetableNewTimeColor"),
-      timetableCanceledColor: document.querySelector("#timetableCanceledColor"),
-      timetableGateGoToGateColor: document.querySelector("#timetableGateGoToGateColor"),
-      timetableGateBoardingColor: document.querySelector("#timetableGateBoardingColor"),
-      timetableGateClosingColor: document.querySelector("#timetableGateClosingColor"),
-      timetableGateClosedColor: document.querySelector("#timetableGateClosedColor"),
-      timetableLandedColor: document.querySelector("#timetableLandedColor"),
-      timezone: document.querySelector("#timezone"),
-      save: document.querySelector("#save"),
-      locate: document.querySelector("#locate"),
-      status: document.querySelector("#status"),
-      refresh: document.querySelector("#refresh"),
-      refreshAvinor: document.querySelector("#refreshAvinor"),
-      previewMeta: document.querySelector("#previewMeta"),
-      flightList: document.querySelector("#flightList"),
-      avinorRaw: document.querySelector("#avinorRaw"),
-      emuSource: document.querySelector("#emuSource"),
-      emuPolling: document.querySelector("#emuPolling"),
-      imageUpload: document.querySelector("#imageUpload"),
-      ledCanvas: document.querySelector("#ledCanvas"),
-      emuMeta: document.querySelector("#emuMeta")
-    };
-
-    let map;
-    let marker;
-    let circle;
-    let uploadedImage = null;
-    let displayFlights = [];
-    let displayMode = "idle";
-    let idleScreens = [];
-    let currentFlightIndex = 0;
-    let currentIdleScreenIndex = 0;
-    let flightCycleTimer = null;
-    let flightCycleStartedAt = performance.now();
-    let tickerAnimationFrame = null;
-    let tickerStartedAt = performance.now();
-    let clockAnimationTimer = null;
-    let clockLastMinute = null;
-    let clockFallingMinuteIndex = null;
-    let clockFallingStartedAt = 0;
-    let emulatorPollTimer = null;
-    let emulatorPolling = false;
-    let emulatorPollInFlight = false;
-    let formIsDirty = false;
-	    let screenState = { active: true, brightnessMode: "day", lastActivatedAt: null, lastDeactivatedAt: null, lastBrightnessModeChangedAt: null, updatedAt: null, source: null };
-	    let soundState = { testNonce: 0, lastTriggeredAt: null, source: null };
-	    const logoCache = new Map();
-	    const adminTokenStorageKey = "flightDisplayAdminToken";
-	    const defaultAircraftCategories = ["P", "C", "M", "J", "H", "B", "G", "D", "V", "O", "N"];
-
-    init();
-
-    function adminToken() {
-      return localStorage.getItem(adminTokenStorageKey) || "";
-    }
-
-    function adminHeaders(headers) {
-      const merged = Object.assign({}, headers || {});
-      const token = adminToken();
-      if (token) merged["X-Flight-Admin-Token"] = token;
-      return merged;
-    }
-
-    async function apiFetch(url, options) {
-      const nextOptions = Object.assign({}, options || {});
-      nextOptions.headers = adminHeaders(nextOptions.headers);
-      let res = await fetch(url, nextOptions);
-      if (res.status !== 401) return res;
-
-      const token = prompt("Admin-token kreves for API-kall:");
-      if (!token) return res;
-      localStorage.setItem(adminTokenStorageKey, token.trim());
-      nextOptions.headers = adminHeaders(options && options.headers);
-      res = await fetch(url, nextOptions);
-      if (res.status === 401) localStorage.removeItem(adminTokenStorageKey);
-      return res;
-    }
-
-    async function init() {
-      const res = await apiFetch("/api/config");
-      const config = await res.json();
-      setForm(config);
-      map = L.map("map").setView([config.lat, config.lon], 11);
-      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        maxZoom: 19,
-        attribution: "&copy; OpenStreetMap contributors"
-      }).addTo(map);
-      marker = L.marker([config.lat, config.lon], { draggable: true }).addTo(map);
-      circle = L.circle([config.lat, config.lon], { radius: config.radiusKm * 1000 }).addTo(map);
-      setTimeout(() => map.invalidateSize(), 0);
-      marker.on("dragend", () => {
-        const pos = marker.getLatLng();
-        els.lat.value = pos.lat.toFixed(6);
-        els.lon.value = pos.lng.toFixed(6);
-        markDirty();
-        redraw();
-      });
-      map.on("click", (event) => {
-        els.lat.value = event.latlng.lat.toFixed(6);
-        els.lon.value = event.latlng.lng.toFixed(6);
-        markDirty();
-        redraw();
-      });
-      ["lat", "lon", "radius"].forEach((id) => els[id].addEventListener("input", redraw));
-      document.querySelectorAll("aside input, aside select").forEach((input) => {
-        input.addEventListener("input", markDirty);
-        input.addEventListener("change", markDirty);
-      });
-      els.audioVolumePercent.addEventListener("input", updateAudioVolumeUi);
-      bindRangeValues();
-      renderEmulator();
-    }
-
-    function markDirty() {
-      formIsDirty = true;
-      els.status.className = "status dirty";
-      els.status.textContent = "Endringer ikke lagret";
-    }
-
-    function setForm(config) {
-      const device = config.device || {};
-      const night = device.nightMode || {};
-      screenState = config.screenState || screenState;
-      soundState = config.soundState || soundState;
-      els.label.value = config.label || "";
-      els.lat.value = Number(config.lat).toFixed(6);
-      els.lon.value = Number(config.lon).toFixed(6);
-      els.radius.value = config.radiusKm || 10;
-      els.homeAirport.value = config.homeAirportIata || "OSL";
-	      const follow = config.follow || {};
-	      els.airspaceMonitoringEnabled.checked = device.airspaceMonitoringEnabled !== false;
-	      const allowedCategories = Array.isArray(device.allowedAircraftCategories) ? device.allowedAircraftCategories : defaultAircraftCategories;
-	      els.aircraftCategoryInputs.forEach((input) => {
-	        input.checked = allowedCategories.includes(input.dataset.aircraftCategory);
-	      });
-	      els.followEnabled.checked = follow.enabled === true;
-      els.followFlights.value = Array.isArray(follow.flights) ? follow.flights.join(", ") : "";
-      updateFollowInputUi();
-      els.aviationstackStatus.textContent = config.aviationstackApiKeyConfigured
-        ? "Aviationstack: Worker secret AVIATIONSTACK_API_KEY er satt"
-        : "Aviationstack: legg inn AVIATIONSTACK_API_KEY under Cloudflare Worker Secrets";
-      const followUnits = device.followUnits || {};
-      els.altitudeUnit.value = followUnits.altitude || "ft";
-      els.speedUnit.value = followUnits.speed || "kn";
-      els.trackUnit.value = followUnits.track || "deg";
-      els.verticalRateUnit.value = followUnits.verticalRate || "fpm";
-      els.deviceBrightness.value = device.brightness ?? 80;
-      els.displayMode.value = device.displayMode || "flight";
-      displayMode = device.displayMode || displayMode;
-      els.clockTopColor.value = device.clockTopColor || "#ffffff";
-      els.clockColor.value = device.clockColor || "#081b6b";
-      els.audioVolumePercent.value = device.audioVolumePercent ?? 35;
-      updateAudioVolumeUi();
-      els.nightBrightness.value = night.brightness ?? 0;
-      els.pollSeconds.value = device.pollSeconds ?? 90;
-      els.cycleSeconds.value = device.displayCycleSeconds ?? 5;
-      els.timetableCycleSeconds.value = device.timetableCycleSeconds ?? 7;
-      els.departureTimetableItemCount.value = device.departureTimetableItemCount ?? device.timetableItemCount ?? 8;
-      els.arrivalTimetableItemCount.value = device.arrivalTimetableItemCount ?? device.timetableItemCount ?? 8;
-      els.departureAvinorWindowHours.value = device.departureAvinorWindowHours ?? device.avinorWindowHours ?? 4;
-      els.arrivalAvinorWindowHours.value = device.arrivalAvinorWindowHours ?? device.avinorWindowHours ?? 4;
-      els.timetableScrollSpeed.value = device.timetableScrollPixelsPerSecond ?? 18;
-      els.scrollSpeed.value = device.scrollPixelsPerSecond ?? 9;
-      els.configRefreshSeconds.value = device.configRefreshSeconds ?? 300;
-      const colors = device.lineColors || {};
-      els.airlineColor.value = colors.airline || "#f4f7ff";
-      els.routeColor.value = colors.route || "#f4f7ff";
-      els.aircraftColor.value = colors.aircraft || "#f4f7ff";
-      els.contextColor.value = colors.context || "#f4f7ff";
-      els.progressColor.value = colors.progress || "#f7b500";
-      els.routeProgressColor.value = colors.routeProgress || "#00d46a";
-      const timetableColors = device.timetableColors || {};
-      els.timetableHeaderColor.value = timetableColors.header || "#f7b500";
-      els.timetableDataColor.value = timetableColors.data || "#f4f7ff";
-      els.timetableTimeColor.value = timetableColors.time || "#f4f7ff";
-      els.timetableNewTimeColor.value = timetableColors.newTime || "#f7b500";
-      els.timetableCanceledColor.value = timetableColors.canceled || "#ff3b30";
-      els.timetableGateGoToGateColor.value = timetableColors.gateGoToGate || "#00f900";
-      els.timetableGateBoardingColor.value = timetableColors.gateBoarding || "#00f900";
-      els.timetableGateClosingColor.value = timetableColors.gateClosing || "#ff9300";
-      els.timetableGateClosedColor.value = timetableColors.gateClosed || "#ff2600";
-      els.timetableLandedColor.value = timetableColors.landed || "#00f900";
-      els.timezone.value = device.timezone || "Europe/Oslo";
-      syncRangeValues();
-      updateScreenStateUi();
-      updateSoundTestUi();
-    }
-
-    function readForm() {
-      return {
-        label: els.label.value.trim(),
-        lat: Number(els.lat.value),
-        lon: Number(els.lon.value),
-        radiusKm: Number(els.radius.value),
-        homeAirportIata: els.homeAirport.value.trim().toUpperCase(),
-        follow: {
-          enabled: els.followEnabled.checked,
-          flights: els.followFlights.value
-            .split(/[,\s]+/)
-            .map((value) => value.trim().toUpperCase())
-            .filter(Boolean)
-            .slice(0, 3)
-        },
-	        device: {
-	          enabled: true,
-          displayMode: els.displayMode.value,
-	          airspaceMonitoringEnabled: els.airspaceMonitoringEnabled.checked,
-          allowedAircraftCategories: els.aircraftCategoryInputs
-            .filter((input) => input.checked)
-            .map((input) => input.dataset.aircraftCategory),
-          brightness: Number(els.deviceBrightness.value),
-          audioVolumePercent: Number(els.audioVolumePercent.value),
-          pollSeconds: Number(els.pollSeconds.value),
-          displayCycleSeconds: Number(els.cycleSeconds.value),
-          timetableCycleSeconds: Number(els.timetableCycleSeconds.value),
-          timetableItemCount: Number(els.departureTimetableItemCount.value),
-          departureTimetableItemCount: Number(els.departureTimetableItemCount.value),
-          arrivalTimetableItemCount: Number(els.arrivalTimetableItemCount.value),
-          avinorWindowHours: Number(els.departureAvinorWindowHours.value),
-          departureAvinorWindowHours: Number(els.departureAvinorWindowHours.value),
-          arrivalAvinorWindowHours: Number(els.arrivalAvinorWindowHours.value),
-          timetableScrollPixelsPerSecond: Number(els.timetableScrollSpeed.value),
-          scrollPixelsPerSecond: Number(els.scrollSpeed.value),
-          configRefreshSeconds: Number(els.configRefreshSeconds.value),
-          timezone: els.timezone.value.trim(),
-          followUnits: {
-            altitude: els.altitudeUnit.value,
-            speed: els.speedUnit.value,
-            track: els.trackUnit.value,
-            verticalRate: els.verticalRateUnit.value
-          },
-          lineColors: {
-            airline: els.airlineColor.value,
-            route: els.routeColor.value,
-            aircraft: els.aircraftColor.value,
-            context: els.contextColor.value,
-            progress: els.progressColor.value,
-            routeProgress: els.routeProgressColor.value
-          },
-          clockTopColor: els.clockTopColor.value,
-          clockColor: els.clockColor.value,
-          timetableColors: {
-            header: els.timetableHeaderColor.value,
-            data: els.timetableDataColor.value,
-            time: els.timetableTimeColor.value,
-            newTime: els.timetableNewTimeColor.value,
-            canceled: els.timetableCanceledColor.value,
-            gateGoToGate: els.timetableGateGoToGateColor.value,
-            gateBoarding: els.timetableGateBoardingColor.value,
-            gateClosing: els.timetableGateClosingColor.value,
-            gateClosed: els.timetableGateClosedColor.value,
-            landed: els.timetableLandedColor.value
-          },
-          nightMode: {
-            enabled: true,
-            start: "23:00",
-            end: "07:00",
-            brightness: Number(els.nightBrightness.value)
-          }
-        }
-      };
-    }
-
-    function redraw() {
-      const config = readForm();
-      if (!Number.isFinite(config.lat) || !Number.isFinite(config.lon) || !Number.isFinite(config.radiusKm)) return;
-      const latlng = [config.lat, config.lon];
-      marker.setLatLng(latlng);
-      circle.setLatLng(latlng);
-      circle.setRadius(config.radiusKm * 1000);
-    }
-
-    els.save.addEventListener("click", async () => {
-      els.status.className = "status";
-      els.status.textContent = "Lagrer...";
-      const headers = { "Content-Type": "application/json" };
-      const res = await apiFetch("/api/config", {
-        method: "POST",
-        headers,
-        body: JSON.stringify(readForm())
-      });
-      const json = await res.json();
-      if (!res.ok) {
-        els.status.className = "status error";
-        els.status.textContent = json.error || "Kunne ikke lagre";
-        return;
-      }
-      setForm(json);
-      redraw();
-      formIsDirty = false;
-      els.status.className = "status";
-      els.status.textContent = "Lagret " + new Date().toLocaleTimeString();
-      renderEmulator();
-    });
-
-    els.soundTest.addEventListener("click", async () => {
-      els.soundTest.disabled = true;
-      els.soundTestStatus.textContent = "Lydtest: sender...";
-      try {
-        const res = await apiFetch("/api/sound-test", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ source: "web" })
-        });
-        const json = await res.json();
-        if (!res.ok) {
-          throw new Error(json && json.error ? json.error : "Kunne ikke trigge lydtest");
-        }
-        soundState = json;
-        updateSoundTestUi();
-      } catch (error) {
-        els.soundTestStatus.textContent = "Lydtest feilet";
-      } finally {
-        els.soundTest.disabled = false;
-      }
-    });
-
-    els.screenToggle.addEventListener("click", async () => {
-      const nextActive = !(screenState && screenState.active !== false);
-      els.screenToggle.disabled = true;
-      els.screenToggle.textContent = nextActive ? "Slår på..." : "Slår av...";
-      try {
-        const res = await apiFetch("/api/admin/screen-state/toggle", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" }
-        });
-        const json = await res.json();
-        if (!res.ok) {
-          throw new Error(json && json.error ? json.error : "Kunne ikke endre skjermstatus");
-        }
-        screenState = json;
-        updateScreenStateUi();
-        renderEmulator();
-      } catch (error) {
-        els.screenStateSummary.textContent = "Skjermstatus kunne ikke endres";
-      } finally {
-        els.screenToggle.disabled = false;
-      }
-    });
-
-    els.locate.addEventListener("click", () => {
-      if (!navigator.geolocation) return;
-      navigator.geolocation.getCurrentPosition((position) => {
-        els.lat.value = position.coords.latitude.toFixed(6);
-        els.lon.value = position.coords.longitude.toFixed(6);
-        markDirty();
-        redraw();
-        map.setView([Number(els.lat.value), Number(els.lon.value)], 12);
-      });
-    });
-
-    els.refresh.addEventListener("click", (event) => {
-      event.stopPropagation();
-      loadPreview();
-    });
-    els.refreshAvinor.addEventListener("click", (event) => {
-      event.stopPropagation();
-      loadAvinorRawOnly();
-    });
-    els.emuPolling.addEventListener("click", () => setEmulatorPolling(!emulatorPolling));
-    els.emuSource.addEventListener("change", () => {
-      resetFlightCycle();
-      renderEmulator();
-    });
-    els.displayMode.addEventListener("change", () => {
-      updateScreenStateUi();
-      resetFlightCycle();
-      renderEmulator();
-    });
-    els.imageUpload.addEventListener("change", handleImageUpload);
-    [
-      els.deviceBrightness,
-      els.clockTopColor,
-      els.clockColor,
-      els.scrollSpeed,
-      els.timetableScrollSpeed,
-      els.altitudeUnit,
-      els.speedUnit,
-      els.trackUnit,
-      els.verticalRateUnit,
-      els.airlineColor,
-      els.routeColor,
-      els.aircraftColor,
-      els.contextColor,
-      els.progressColor,
-      els.routeProgressColor,
-      els.displayMode,
-      els.timetableHeaderColor,
-      els.timetableDataColor,
-      els.timetableTimeColor,
-      els.timetableNewTimeColor,
-      els.timetableCanceledColor,
-      els.timetableGateGoToGateColor,
-      els.timetableGateBoardingColor,
-      els.timetableGateClosingColor,
-      els.timetableGateClosedColor,
-      els.timetableLandedColor
-    ].forEach((input) => input.addEventListener("input", () => {
-      renderEmulator();
-    }));
-    els.cycleSeconds.addEventListener("input", () => {
-      resetFlightCycle();
-      renderEmulator();
-    });
-    els.timetableCycleSeconds.addEventListener("input", () => {
-      resetFlightCycle();
-      renderEmulator();
-    });
-
-    function setEmulatorPolling(enabled) {
-      emulatorPolling = enabled;
-      if (emulatorPollTimer) {
-        clearTimeout(emulatorPollTimer);
-        emulatorPollTimer = null;
-      }
-      els.emuPolling.classList.toggle("active", enabled);
-      els.emuPolling.textContent = enabled ? "Stopp test" : "Start test";
-      if (enabled) {
-        els.emuSource.value = "live";
-        runEmulatorPoll();
-      }
-    }
-
-    async function runEmulatorPoll() {
-      if (!emulatorPolling || emulatorPollInFlight) return;
-      emulatorPollInFlight = true;
-      els.emuPolling.textContent = "Henter...";
-      try {
-        await loadPreview();
-      } finally {
-        emulatorPollInFlight = false;
-        if (!emulatorPolling) return;
-        els.emuPolling.textContent = "Stopp test";
-        const seconds = Math.max(30, Number(els.pollSeconds.value || 90));
-        emulatorPollTimer = setTimeout(runEmulatorPoll, seconds * 1000);
-      }
-    }
-
-    async function loadPreview() {
-      els.previewMeta.textContent = "Henter...";
-      els.flightList.innerHTML = "";
-      els.avinorRaw.innerHTML = "";
-      try {
-        const res = await apiFetch("/api/display?ts=" + Date.now());
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || "Kunne ikke hente display-data");
-        const flights = Array.isArray(data.flights) ? data.flights : [];
-        displayMode = data.mode || (flights.length ? "nearby" : "idle");
-        screenState = data.screenState || screenState;
-        updateScreenStateUi();
-        idleScreens = Array.isArray(data.idleScreens) ? data.idleScreens : [];
-        displayFlights = flights;
-        currentFlightIndex = 0;
-        currentIdleScreenIndex = 0;
-        resetFlightCycle();
-        renderEmulator();
-        const liveSource = "FR24";
-        const sourceError = data.liveSourceStatus && data.liveSourceStatus.ok === false ? data.liveSourceStatus.error : "";
-        const liveState = data.airspaceMonitoring === false
-          ? "live av"
-          : sourceError
-            ? liveSource + " feilet"
-            : liveSource + " på";
-        els.previewMeta.textContent = "Oppdatert " + new Date(data.updatedAt).toLocaleTimeString() + " · " + flights.length + " treff · " + displayMode + " · " + liveState;
-        if (sourceError) {
-          els.previewMeta.textContent += " · " + sourceError;
-        }
-        if (displayMode === "clock") {
-          const timezone = data.clock && data.clock.timezone ? data.clock.timezone : (els.timezone.value || "Europe/Oslo");
-          els.flightList.innerHTML = '<div class="empty">Klokkemodus aktiv. Emulatoren viser valgt gradienttopp i telleraden, valgt gradientbunn nederst og tredelt klokke ved kolonne 70 i tidssone ' + escapeHtml(timezone) + '.</div>';
-          return;
-        }
-        if (!flights.length) {
-          if (idleScreens.length) {
-            els.flightList.innerHTML = idleScreens.map((screen) => {
-              const rows = Array.isArray(screen.rows) ? screen.rows : [];
-              return '<article class="flight"><strong>' + escapeHtml(screen.title || "Airport") + '</strong><span>' + rows.map(formatIdleRow).map(escapeHtml).join("<br>") + '</span></article>';
-            }).join("");
-          } else {
-            els.flightList.innerHTML = '<div class="empty">Ingen fly i valgt radius akkurat nå, eller live-kilde/Avinor svarte uten matchende data.</div>';
-          }
-          return;
-        }
-        els.flightList.innerHTML = flights.map((flight) => {
-          const title = escapeHtml(flight.flt || flight.cs || flight.reg || "Flight");
-          const route = [flight.from, flight.to].filter(Boolean).join(" → ");
-          const line = [
-            flight.air,
-            flight.ac,
-            route,
-            [flight.ctxLabel, flight.ctxValue].filter(Boolean).join(" "),
-            flight.gate ? "Gate " + flight.gate : "",
-            flight.gateMessage || "",
-            flight.status && flight.status !== "scheduled" ? flight.status : "",
-            flight.source || "",
-            flight.alt ? flight.alt + " ft" : ""
-          ].filter(Boolean).join(" · ");
-        const logo = flight.logoUrl
-            ? '<img class="flight-logo" src="' + escapeHtml(flight.logoUrl) + '" alt="" onerror="this.onerror=null;this.src=\\'/logos/UNKNOWN.png\\'">'
-            : '<div class="flight-logo missing"></div>';
-          return '<article class="flight"><div class="flight-row">' + logo + '<div><strong>' + title + '</strong><span>' + escapeHtml(line) + '</span></div></div></article>';
-        }).join("");
-        void loadAvinorPreview();
-      } catch (error) {
-        els.previewMeta.textContent = "";
-        els.flightList.innerHTML = '<div class="empty error">' + escapeHtml(error.message || "Ukjent feil") + '</div>';
-      }
-    }
-
-    async function loadAvinorPreview() {
-      try {
-        const avinorRes = await apiFetch("/api/avinor-board?ts=" + Date.now());
-        const avinorData = await avinorRes.json();
-        if (avinorRes.ok) {
-          renderAvinorRaw(avinorData);
-        }
-      } catch {
-        els.avinorRaw.innerHTML = "";
-      }
-    }
-
-    async function loadAvinorRawOnly() {
-      els.previewMeta.textContent = "Henter Avinor...";
-      els.flightList.innerHTML = "";
-      els.avinorRaw.innerHTML = "";
-      try {
-        const avinorRes = await apiFetch("/api/avinor-board?ts=" + Date.now());
-        const avinorData = await avinorRes.json();
-        if (!avinorRes.ok) throw new Error(avinorData.error || "Kunne ikke hente Avinor-data");
-        renderAvinorRaw(avinorData);
-        const count = (Array.isArray(avinorData.departures) ? avinorData.departures.length : 0) + (Array.isArray(avinorData.arrivals) ? avinorData.arrivals.length : 0);
-        els.previewMeta.textContent = "Avinor oppdatert " + new Date(avinorData.updatedAt).toLocaleTimeString() + " · " + count + " rader";
-        els.flightList.innerHTML = '<div class="empty">Kun Avinor-data hentet. Dette bruker ikke FR24.</div>';
-      } catch (error) {
-        els.previewMeta.textContent = "";
-        els.flightList.innerHTML = '<div class="empty error">' + escapeHtml(error.message || "Ukjent feil") + '</div>';
-      }
-    }
-
-    function renderAvinorRaw(data) {
-      const departures = Array.isArray(data.departures) ? data.departures : [];
-      const arrivals = Array.isArray(data.arrivals) ? data.arrivals : [];
-      const parts = [
-        renderRawGroup("Avinor departures raw", departures),
-        renderRawGroup("Avinor arrivals raw", arrivals)
-      ].filter(Boolean);
-      els.avinorRaw.innerHTML = parts.join("");
-    }
-
-    function renderRawGroup(title, rows) {
-      if (!rows.length) return "";
-      return '<h3>' + escapeHtml(title) + '</h3>' + rows.slice(0, 8).map(renderRawFlight).join("");
-    }
-
-    function renderRawFlight(row, index) {
-      const resolved = row && row.resolved ? row.resolved : {};
-      const fields = row && row.fields ? row.fields : {};
-      const status = row && row.status ? row.status : {};
-      const title = [
-        resolved.flightId || fields.flight_id || "Flight " + (index + 1),
-        resolved.airportName || fields.airport,
-        resolved.displayTime || fields.schedule_time
-      ].filter(Boolean).join(" · ");
-      const subtitle = [
-        resolved.airlineName || resolved.airlineCode,
-        resolved.status,
-        resolved.gate ? "Gate " + resolved.gate : "",
-        resolved.gateMessage || ""
-      ].filter(Boolean).join(" · ");
-      const values = {
-        direction: row.direction || "",
-        ...prefixObject("resolved.", resolved),
-        ...prefixObject("status.", status),
-        ...prefixObject("xml.", fields)
-      };
-      const fieldsHtml = Object.entries(values)
-        .filter((entry) => entry[1] !== undefined && entry[1] !== null && entry[1] !== "")
-        .map(([key, value]) => '<dt>' + escapeHtml(key) + '</dt><dd>' + escapeHtml(value) + '</dd>')
-        .join("");
-      return '<details class="raw-card"><summary>' + escapeHtml(title) + '<span>' + escapeHtml(subtitle || "Raw Avinor fields") + '</span></summary><dl class="field-grid">' + fieldsHtml + '</dl></details>';
-    }
-
-    function prefixObject(prefix, value) {
-      const output = {};
-      if (!value || typeof value !== "object") return output;
-      Object.entries(value).forEach(([key, val]) => {
-        output[prefix + key] = val;
-      });
-      return output;
-    }
-
-    function formatIdleRow(row) {
-      if (!row || typeof row !== "object") return "";
-      if (row.status === "empty" || row.message) return String(row.message || "").replace("|", " / ");
-      const gate = row.gate ? "Gate " + row.gate : "";
-      const status = row.gateMessage || (row.status && row.status !== "scheduled" ? row.status : "");
-      return [row.flightId, row.airport, gate, row.time, status].filter(Boolean).join(" · ");
-    }
-
-    function escapeHtml(value) {
-      return String(value).replace(/[&<>"']/g, (char) => ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#039;"
-      }[char]));
-    }
-
-    function handleImageUpload(event) {
-      const file = event.target.files && event.target.files[0];
-      if (!file) return;
-      const url = URL.createObjectURL(file);
-      const image = new Image();
-      image.onload = () => {
-        URL.revokeObjectURL(url);
-        uploadedImage = image;
-        els.emuSource.value = "upload";
-        resetFlightCycle();
-        renderEmulator();
-      };
-      image.src = url;
-    }
-
-    function renderEmulator() {
-      const canvas = els.ledCanvas;
-      const ctx = canvas.getContext("2d", { willReadFrequently: true });
-      const source = document.createElement("canvas");
-      source.width = 128;
-      source.height = 64;
-      const sourceCtx = source.getContext("2d", { willReadFrequently: true });
-      sourceCtx.imageSmoothingEnabled = false;
-      sourceCtx.fillStyle = "#000";
-      sourceCtx.fillRect(0, 0, source.width, source.height);
-      ctx.fillStyle = "#000";
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-      if (screenState && screenState.active === false) {
-        resetClockEmulatorState();
-        applyDisplayBrightness(sourceCtx);
-        drawLedPanel(ctx, source);
-        els.emuMeta.textContent = "Skjermen er deaktivert eksternt og skal være svart.";
-        return;
-      }
-
-      if (els.emuSource.value === "live") {
-        if (els.displayMode.value === "clock" || displayMode === "clock") {
-          drawClockLayout(sourceCtx);
-          applyDisplayBrightness(sourceCtx);
-          drawLedPanel(ctx, source);
-          return;
-        }
-        resetClockEmulatorState();
-        const flight = displayFlights[currentFlightIndex] || displayFlights[0];
-        if (flight) {
-          drawLiveFlightLayout(sourceCtx, flight);
-          drawFlightProgress(sourceCtx, flight);
-        } else {
-          drawIdleLayout(sourceCtx, idleScreens[currentIdleScreenIndex] || idleScreens[0]);
-        }
-        applyDisplayBrightness(sourceCtx);
-        drawLedPanel(ctx, source);
-        if (flight && flight.logoUrl) loadLogoForFlight(flight);
-        return;
-      }
-
-      if (!uploadedImage) {
-        resetClockEmulatorState();
-        drawPlaceholder(sourceCtx);
-        applyDisplayBrightness(sourceCtx);
-        drawLedPanel(ctx, source);
-        return;
-      }
-
-      const logoCanvas = document.createElement("canvas");
-      logoCanvas.width = 42;
-      logoCanvas.height = 42;
-      const logoCtx = logoCanvas.getContext("2d", { willReadFrequently: true });
-      logoCtx.imageSmoothingEnabled = false;
-      logoCtx.fillStyle = "#000";
-      logoCtx.fillRect(0, 0, logoCanvas.width, logoCanvas.height);
-      logoCtx.drawImage(uploadedImage, 0, 0, uploadedImage.naturalWidth, uploadedImage.naturalHeight, 0, 0, 42, 42);
-      sourceCtx.fillStyle = "#000";
-      sourceCtx.fillRect(0, 0, 128, 64);
-      sourceCtx.drawImage(logoCanvas, 3, 3);
-      drawDisplayText(sourceCtx, {
-        airline: "Alaska",
-        route: "PDX-LAX",
-        aircraft: "737 MAX 9",
-        context: "Arriving from Portland Intl"
-      });
-      applyDisplayBrightness(sourceCtx);
-      drawLedPanel(ctx, source);
-      els.emuMeta.textContent = uploadedImage.naturalWidth + " x " + uploadedImage.naturalHeight + " px → 42 x 42 logo field · 128 x 64 LEDs · brightness " + Math.round(getDisplayBrightnessFactor() * 100) + "%";
-    }
-
-    function getDisplayBrightnessFactor() {
-      return Math.max(0, Math.min(1, Number(els.deviceBrightness.value || 80) / 100));
-    }
-
-    function applyDisplayBrightness(ctx) {
-      const brightness = getDisplayBrightnessFactor();
-      const imageData = ctx.getImageData(0, 0, 128, 64);
-      const data = imageData.data;
-      for (let i = 0; i < data.length; i += 4) {
-        data[i] = Math.round(data[i] * brightness);
-        data[i + 1] = Math.round(data[i + 1] * brightness);
-        data[i + 2] = Math.round(data[i + 2] * brightness);
-      }
-      ctx.putImageData(imageData, 0, 0);
-    }
-
-    function resetFlightCycle() {
-      if (flightCycleTimer) {
-        clearInterval(flightCycleTimer);
-        flightCycleTimer = null;
-      }
-      tickerStartedAt = performance.now();
-      flightCycleStartedAt = performance.now();
-      if (els.emuSource.value !== "live") return;
-      const flightCycleMs = Math.max(2000, Number(els.cycleSeconds.value || 5) * 1000);
-      const timetableCycleMs = getTimetableCycleMs();
-      if (displayFlights.length <= 1 && (displayFlights.length || idleScreens.length <= 1)) return;
-      flightCycleTimer = setInterval(() => {
-        if (els.emuSource.value !== "live") return;
-        if (displayFlights.length > 1) {
-          currentFlightIndex = (currentFlightIndex + 1) % displayFlights.length;
-        } else if (!displayFlights.length && idleScreens.length > 1) {
-          currentIdleScreenIndex = (currentIdleScreenIndex + 1) % idleScreens.length;
-        }
-        flightCycleStartedAt = performance.now();
-        tickerStartedAt = performance.now();
-        renderEmulator();
-      }, displayFlights.length ? flightCycleMs : timetableCycleMs);
-    }
-
-    function drawPlaceholder(ctx) {
-      ctx.fillStyle = "#000";
-      ctx.fillRect(0, 0, 128, 64);
-      drawPlaceholderLogo(ctx, 3, 3, 42);
-      drawDisplayText(ctx, {
-        airline: "Alaska",
-        route: "PDX-LAX",
-        aircraft: "737 MAX 9",
-        context: "Arriving from Portland Intl"
-      });
-      els.emuMeta.textContent = "Ingen bilde lastet opp. Viser 128 x 64 runde LEDs med P2.5 pitch.";
-    }
-
-    function drawLiveFlightLayout(ctx, flight) {
-      ctx.fillStyle = "#000";
-      ctx.fillRect(0, 0, 128, 64);
-
-      if (!flight) {
-        drawIdleLayout(ctx, idleScreens[currentIdleScreenIndex] || idleScreens[0]);
-        return;
-      }
-
-      const logo = flight.logoUrl ? logoCache.get(flight.logoUrl) : null;
-      if (logo) {
-        ctx.drawImage(logo, 3, 3, 42, 42);
-      } else {
-        drawPlaceholderLogo(ctx, 3, 3, 42);
-      }
-      if (flight.layout === "follow_cycle" || flight.layout === "follow_status" || displayMode === "follow") {
-        drawFollowFlightText(ctx, flight);
-        els.emuMeta.textContent = "Live cycle layout: " + (flight.flt || flight.cs || "flight") + " · live metrics og Flying over.";
-        return;
-      }
-      const airline = (flight.lines && flight.lines.airline) || flight.air || flight.airCode || "";
-      const route = (flight.lines && flight.lines.route) || [flight.from, flight.to].filter(Boolean).join("-");
-      const aircraft = (flight.lines && flight.lines.aircraft) || flight.ac || flight.reg || "";
-      const context = (flight.lines && flight.lines.context) || [flight.ctxLabel, flight.ctxValue].filter(Boolean).join(" ");
-
-      drawDisplayText(ctx, {
-        airline,
-        route: route || flight.flt || flight.cs || "",
-        aircraft,
-        context
-      });
-      els.emuMeta.textContent = "Live layout: " + (flight.flt || flight.cs || route || "flight") + " · 128 x 64 LEDs · 320 x 160 mm · P2.5 pitch.";
-    }
-
-    function drawFollowFlightText(ctx, flight) {
-      const colors = getLineColors();
-      const route = (flight.lines && flight.lines.route) || [flight.from, flight.to].filter(Boolean).join("-");
-      const detailPhase = getFollowDetailPhase();
-      const detailPhaseStartedAt = getFollowDetailPhaseStartedAt();
-      const etaLine = flight.arrTime ? "ETA:" + flight.arrTime : "";
-      const airlineLine = (flight.lines && flight.lines.airline) || flight.air || flight.airCode || "";
-      const topLine = detailPhase === "location" && airlineLine ? airlineLine : flight.flt || flight.cs || "";
-      const secondLine = detailPhase === "location" && etaLine ? etaLine : route || airlineLine || "";
-      const thirdLine = flight.ac || flight.reg || "";
-      drawTickerLineBoxed(ctx, topLine, 50, 5, colors.airline, 75, detailPhaseStartedAt);
-      drawTickerLineBoxed(ctx, secondLine, 50, 19, colors.route, 75, detailPhaseStartedAt);
-      drawTickerLineBoxed(ctx, thirdLine, 50, 33, colors.aircraft, 75, detailPhaseStartedAt);
-      if (flight.followStatus) {
-        const statusColor = flight.followStatus.color === "landed" ? "#00d46a" : getTimetableColors().header;
-        drawTickerLine(ctx, flight.followStatus.text || "", 3, 47, statusColor, 122);
-        drawTickerLine(ctx, flight.followStatus.detail || "", 3, 56, statusColor, 122);
-        return;
-      }
-      if (detailPhase === "location") {
-        drawDotText(ctx, flight.locationLabel || "Flying over", 3, 47, colors.context, { maxWidth: 122 });
-        drawTickerLine(ctx, flight.locationValue || "Unknown area", 3, 56, colors.context, 122);
-        return;
-      }
-      const metrics = formatMetricsForEmulator(flight);
-      const firstMetricLine = [
-        metrics.altitude ? "ALT:" + metrics.altitude : "",
-        metrics.speed ? "SPD:" + metrics.speed : ""
-      ].filter(Boolean).join(" ");
-      const secondMetricLine = [
-        metrics.track ? "TRK:" + metrics.track : "",
-        metrics.verticalRate ? "VR:" + metrics.verticalRate : ""
-      ].filter(Boolean).join(" ");
-      drawTickerLine(ctx, firstMetricLine || "NO LIVE METRICS", 3, 47, colors.context, 122);
-      drawTickerLine(ctx, secondMetricLine, 3, 56, colors.context, 122);
-    }
-
-    function drawClockLayout(ctx) {
-      ctx.fillStyle = "#000";
-      ctx.fillRect(0, 0, 128, 64);
-
-      const time = getClockTimeParts();
-      const completedMinutes = Math.max(0, Math.min(59, Number(time.minute)));
-      const activeSeconds = Math.max(0, Math.min(60, time.second + 1));
-      const clockTopColor = els.clockTopColor.value || "#ffffff";
-      const clockBottomColor = els.clockColor.value || "#081b6b";
-      updateClockFallState(completedMinutes);
-      const falling = isClockRowFalling();
-
-      ensureClockAnimation();
-
-      for (let index = 0; index < completedMinutes; index += 1) {
-        if (falling && index === clockFallingMinuteIndex) continue;
-        const y = 62 - index;
-        ctx.fillStyle = getClockMinuteRowColor(completedMinutes - index, clockTopColor, clockBottomColor);
-        ctx.fillRect(4, y, 60, 1);
-      }
-
-      if (falling) {
-        const targetY = 62 - clockFallingMinuteIndex;
-        const elapsed = Math.min(400, performance.now() - clockFallingStartedAt);
-        const y = Math.round(3 + ((targetY - 3) * elapsed) / 400);
-        ctx.fillStyle = getClockMinuteRowColor(1, clockTopColor, clockBottomColor);
-        ctx.fillRect(4, y, 60, 1);
-      } else if (clockFallingMinuteIndex !== null) {
-        clockFallingMinuteIndex = null;
-        clockFallingStartedAt = 0;
-      }
-
-      if (activeSeconds > 0) {
-        ctx.fillStyle = clockTopColor;
-        ctx.fillRect(4, 3, activeSeconds, 1);
-      }
-
-      drawClockTimeStack(ctx, 69, time, clockTopColor, clockBottomColor);
-      els.emuMeta.textContent = "Clock layout: sekundlinje fra kolonne 4-63, minutter stablet nederst, HH/MM/SS fra kolonne 70 · " + time.hour + ":" + time.minute + ":" + time.second.toString().padStart(2, "0") + ".";
-    }
-
-    function resetClockEmulatorState() {
-      clockLastMinute = null;
-      clockFallingMinuteIndex = null;
-      clockFallingStartedAt = 0;
-    }
-
-    function updateClockFallState(completedMinutes) {
-      if (clockLastMinute === null) {
-        clockLastMinute = completedMinutes;
-        return;
-      }
-      if (completedMinutes === clockLastMinute) return;
-      if (completedMinutes > 0) {
-        clockFallingMinuteIndex = completedMinutes - 1;
-        clockFallingStartedAt = performance.now();
-      } else {
-        clockFallingMinuteIndex = null;
-        clockFallingStartedAt = 0;
-      }
-      clockLastMinute = completedMinutes;
-    }
-
-    function isClockRowFalling() {
-      return clockFallingMinuteIndex !== null && performance.now() - clockFallingStartedAt < 400;
-    }
-
-    function getClockMinuteRowColor(depth, topColor, bottomColor) {
-      const step = Math.max(1, Math.min(60, depth));
-      return interpolateHexColor(topColor, bottomColor, step, 60);
-    }
-
-    function drawClockTimeStack(ctx, x, time, topColor, bottomColor) {
-      drawThinClockPair(ctx, time.hour, x, 3, getClockTextRowColor(11, topColor, bottomColor));
-      drawThinClockPair(ctx, time.minute, x, 24, getClockTextRowColor(32, topColor, bottomColor));
-      drawThinClockPair(ctx, time.second.toString().padStart(2, "0"), x, 45, getClockTextRowColor(53, topColor, bottomColor));
-    }
-
-    function getClockTextRowColor(centerY, topColor, bottomColor) {
-      const step = Math.max(0, Math.min(58, centerY - 3));
-      return interpolateHexColor(topColor, bottomColor, step, 58);
-    }
-
-    function drawThinClockPair(ctx, text, x, y, color) {
-      const value = String(text || "--").padStart(2, "-").slice(0, 2);
-      drawThinClockChar(ctx, value[0], x, y, color);
-      drawThinClockChar(ctx, value[1], x + 30, y, color);
-    }
-
-    function drawThinClockChar(ctx, char, x, y, color) {
-      const segmentsByDigit = {
-        "0": ["a", "b", "c", "d", "e", "f"],
-        "1": ["b", "c"],
-        "2": ["a", "b", "g", "e", "d"],
-        "3": ["a", "b", "g", "c", "d"],
-        "4": ["f", "g", "b", "c"],
-        "5": ["a", "f", "g", "c", "d"],
-        "6": ["a", "f", "g", "e", "c", "d"],
-        "7": ["a", "b", "c"],
-        "8": ["a", "b", "c", "d", "e", "f", "g"],
-        "9": ["a", "b", "c", "d", "f", "g"],
-        "-": ["g"]
-      };
-      const segments = segmentsByDigit[char] || [];
-      ctx.fillStyle = color;
-      segments.forEach((segment) => drawThinClockSegment(ctx, segment, x, y));
-    }
-
-    function drawThinClockSegment(ctx, segment, x, y) {
-      if (segment === "a") ctx.fillRect(x + 1, y, 23, 1);
-      if (segment === "b") ctx.fillRect(x + 24, y + 1, 1, 7);
-      if (segment === "c") ctx.fillRect(x + 24, y + 9, 1, 7);
-      if (segment === "d") ctx.fillRect(x + 1, y + 16, 23, 1);
-      if (segment === "e") ctx.fillRect(x, y + 9, 1, 7);
-      if (segment === "f") ctx.fillRect(x, y + 1, 1, 7);
-      if (segment === "g") ctx.fillRect(x + 1, y + 8, 23, 1);
-    }
-
-    function interpolateHexColor(from, to, step, steps) {
-      const fromRgb = hexToRgb(from);
-      const toRgb = hexToRgb(to);
-      const ratio = steps <= 0 ? 1 : Math.max(0, Math.min(1, step / steps));
-      const r = Math.round(fromRgb.r + (toRgb.r - fromRgb.r) * ratio);
-      const g = Math.round(fromRgb.g + (toRgb.g - fromRgb.g) * ratio);
-      const b = Math.round(fromRgb.b + (toRgb.b - fromRgb.b) * ratio);
-      return "rgb(" + r + ", " + g + ", " + b + ")";
-    }
-
-    function hexToRgb(hex) {
-      const value = String(hex || "").replace("#", "");
-      const normalized = value.length === 3 ? value.split("").map((part) => part + part).join("") : value.padStart(6, "0").slice(0, 6);
-      return {
-        r: Number.parseInt(normalized.slice(0, 2), 16) || 0,
-        g: Number.parseInt(normalized.slice(2, 4), 16) || 0,
-        b: Number.parseInt(normalized.slice(4, 6), 16) || 0
-      };
-    }
-
-    function getClockTimeParts() {
-      const now = new Date();
-      const parts = new Intl.DateTimeFormat("en-GB", {
-        timeZone: els.timezone.value || "Europe/Oslo",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-        hour12: false
-      }).formatToParts(now);
-      return {
-        hour: parts.find((part) => part.type === "hour")?.value || "00",
-        minute: parts.find((part) => part.type === "minute")?.value || "00",
-        second: Number(parts.find((part) => part.type === "second")?.value || "0")
-      };
-    }
-
-    function ensureClockAnimation() {
-      if (clockAnimationTimer) return;
-      const tick = () => {
-        clockAnimationTimer = null;
-        if (els.emuSource.value !== "live" || (els.displayMode.value !== "clock" && displayMode !== "clock")) return;
-        renderEmulator();
-        ensureClockAnimation();
-      };
-      clockAnimationTimer = setTimeout(tick, isClockRowFalling() ? 50 : millisecondsUntilNextSecond());
-    }
-
-    function millisecondsUntilNextSecond() {
-      const now = new Date();
-      return Math.max(50, 1000 - now.getMilliseconds() + 20);
-    }
-
-    function buildClockCirclePoints(centerX, centerY, radius, count) {
-      const points = [];
-      const seen = new Set();
-      for (let index = 0; index < count; index += 1) {
-        const angle = (-Math.PI / 2) + (index / count) * Math.PI * 2;
-        const x = Math.round(centerX + Math.cos(angle) * radius);
-        const y = Math.round(centerY + Math.sin(angle) * radius);
-        const key = x + ":" + y;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        points.push({ x, y });
-      }
-      return points;
-    }
-
-    function buildClockSecondPoints(centerX, centerY, radius) {
-      const outline = buildMidpointCircleOutline(centerX, centerY, radius)
-        .sort((a, b) => a.angle - b.angle);
-      const points = [];
-      const offset = outline.findIndex((point) => point.x === centerX && point.y === centerY - radius);
-      const ordered = offset > 0 ? outline.slice(offset).concat(outline.slice(0, offset)) : outline;
-      const step = ordered.length / 60;
-      for (let index = 0; index < 60; index += 1) {
-        const point = ordered[Math.round(index * step) % ordered.length];
-        points.push({ x: point.x, y: point.y });
-      }
-      return points;
-    }
-
-    function buildMidpointCircleOutline(centerX, centerY, radius) {
-      const points = new Map();
-      let x = radius;
-      let y = 0;
-      let decision = 1 - x;
-      while (y <= x) {
-        [
-          [x, y], [y, x], [-y, x], [-x, y],
-          [-x, -y], [-y, -x], [y, -x], [x, -y]
-        ].forEach(([dx, dy]) => {
-          const px = centerX + dx;
-          const py = centerY + dy;
-          const angle = (Math.atan2(py - centerY, px - centerX) + Math.PI / 2 + Math.PI * 2) % (Math.PI * 2);
-          const key = px + ":" + py;
-          points.set(key, { x: px, y: py, angle, key });
-        });
-        y += 1;
-        if (decision <= 0) {
-          decision += 2 * y + 1;
-        } else {
-          x -= 1;
-          decision += 2 * (y - x) + 1;
-        }
-      }
-      return Array.from(points.values());
-    }
-
-    function drawClockTimeText(ctx, text, centerX, centerY, color) {
-      const value = normalizeLedText(text).toUpperCase();
-      const width = measureDotText(value);
-      const startX = centerX - Math.floor(width / 2);
-      const startY = centerY - 3;
-      drawDotText(ctx, value, startX, startY, color, { maxWidth: 63 });
-    }
-
-    function getFollowDetailPhase() {
-      const elapsed = Math.max(0, performance.now() - flightCycleStartedAt);
-      return elapsed % 15000 < 10000 ? "metrics" : "location";
-    }
-
-    function getFollowDetailPhaseStartedAt() {
-      const elapsed = Math.max(0, performance.now() - flightCycleStartedAt);
-      const cycleIndex = Math.floor(elapsed / 15000);
-      return flightCycleStartedAt + cycleIndex * 15000 + (elapsed % 15000 < 10000 ? 0 : 10000);
-    }
-
-    function formatMetricsForEmulator(flight) {
-      return {
-        altitude: formatAltitudeForEmulator(flight.alt, els.altitudeUnit.value),
-        speed: formatSpeedForEmulator(flight.spd, els.speedUnit.value),
-        track: formatTrackForEmulator(flight.trk, els.trackUnit.value),
-        verticalRate: formatVerticalRateForEmulator(flight.vr, els.verticalRateUnit.value)
-      };
-    }
-
-    function formatAltitudeForEmulator(value, unit) {
-      if (value === null || value === undefined || value === "") return "";
-      if (unit === "fl") return "FL" + Math.round(value / 100);
-      if (unit === "m") return Math.round(value * 0.3048) + "m";
-      if (unit === "km") return roundOne(value * 0.0003048) + "km";
-      if (unit === "nmi") return roundOne(value / 6076.12) + "nmi";
-      return Math.round(value) + "ft";
-    }
-
-    function formatSpeedForEmulator(value, unit) {
-      if (value === null || value === undefined || value === "") return "";
-      if (unit === "mph") return Math.round(value * 1.15078) + "mph";
-      if (unit === "kmh") return Math.round(value * 1.852) + "kmh";
-      if (unit === "ms") return Math.round(value * 0.514444) + "m/s";
-      if (unit === "mach") return "M" + (Math.round((value / 661.47) * 100) / 100).toFixed(2);
-      return Math.round(value) + "kn";
-    }
-
-    function formatTrackForEmulator(value, unit) {
-      if (value === null || value === undefined || value === "") return "";
-      const heading = ((Math.round(value) % 360) + 360) % 360;
-      if (unit === "cardinal") return headingToCardinalForEmulator(heading);
-      return heading + "deg";
-    }
-
-    function formatVerticalRateForEmulator(value, unit) {
-      if (value === null || value === undefined || value === "") return "";
-      if (unit === "fts") return roundOne(value / 60) + "ft/s";
-      if (unit === "ms") return roundOne(value * 0.00508) + "m/s";
-      if (unit === "mph") return roundOne(value * 0.0113636) + "mph";
-      if (unit === "kmh") return roundOne(value * 0.018288) + "kmh";
-      return Math.round(value) + "fpm";
-    }
-
-    function headingToCardinalForEmulator(heading) {
-      const points = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"];
-      return points[Math.round(heading / 22.5) % 16];
-    }
-
-    function roundOne(value) {
-      return (Math.round(value * 10) / 10).toString();
-    }
-
-    function drawIdleLayout(ctx, screen) {
-      ctx.fillStyle = "#000";
-      ctx.fillRect(0, 0, 128, 64);
-      const colors = getTimetableColors();
-      if (!screen) {
-        drawDotText(ctx, "No flights", 3, 9, colors.header, { maxWidth: 122 });
-        drawDotText(ctx, "No airport data", 3, 23, colors.data, { maxWidth: 122 });
-        els.emuMeta.textContent = "Idle layout: ingen flydata tilgjengelig.";
-        return;
-      }
-      ensureTickerAnimation();
-      const title = screen.title || "AIRPORT";
-      drawDotText(ctx, title, 3, 3, colors.header, { maxWidth: 86 });
-      drawLocalClock(ctx, 125, 3, colors.time);
-      ctx.fillStyle = colors.header;
-      ctx.fillRect(3, 14, 122, 1);
-      const transition = getTimetableTransition(screen);
-      drawIdleRowsClipped(ctx, screen.kind, Array.isArray(screen.rows) ? screen.rows : [], 20 - transition.offset);
-      if (transition.nextScreen) {
-        drawIdleRowsClipped(ctx, transition.nextScreen.kind, Array.isArray(transition.nextScreen.rows) ? transition.nextScreen.rows : [], 64 - transition.offset);
-      }
-      const rows = Array.isArray(screen.rows) ? screen.rows.slice(0, 4) : [];
-      if (!rows.length) drawDotText(ctx, "No airport data", 3, 28, colors.data, { maxWidth: 122 });
-      els.emuMeta.textContent = "Idle layout: " + title + " · airport board.";
-    }
-
-    function drawIdleRowsClipped(ctx, kind, rows, y) {
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(0, 15, 128, 49);
-      ctx.clip();
-      rows.slice(0, 4).forEach((row, index) => drawIdleRow(ctx, kind, row, 3, y + index * 11));
-      ctx.restore();
-    }
-
-    function getTimetableTransition(screen) {
-      if (els.emuSource.value !== "live" || displayFlights.length || idleScreens.length <= 1) return { offset: 0, nextScreen: null };
-      const nextScreen = idleScreens[(currentIdleScreenIndex + 1) % idleScreens.length];
-      if (!screen || !nextScreen || screen.kind !== nextScreen.kind) return { offset: 0, nextScreen: null };
-      const rowTravel = 44;
-      const cycleMs = getTimetableCycleMs();
-      const speed = Math.max(4, Number(els.timetableScrollSpeed.value || 18));
-      const transitionMs = Math.min(cycleMs * 0.75, Math.max(400, (rowTravel / speed) * 1000));
-      const elapsed = Math.max(0, performance.now() - flightCycleStartedAt);
-      const transitionStart = Math.max(0, cycleMs - transitionMs);
-      if (elapsed < transitionStart) return { offset: 0, nextScreen: null };
-      const progress = Math.min(1, (elapsed - transitionStart) / transitionMs);
-      return { offset: Math.round(rowTravel * easeInOut(progress)), nextScreen };
-    }
-
-    function getTimetableCycleMs() {
-      return Math.max(2000, Number(els.timetableCycleSeconds.value || 7) * 1000);
-    }
-
-    function easeInOut(t) {
-      return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-    }
-
-    function drawIdleRow(ctx, kind, row, x, y) {
-      const colors = getTimetableColors();
-      const status = row && row.status ? row.status : "scheduled";
-      if (status === "empty" || row.message) {
-        const parts = String(row.message || row.flightId || "").split("|");
-        drawDotText(ctx, (parts[0] || "").toUpperCase(), x, y, colors.data, { maxWidth: 122 });
-        if (parts[1]) drawDotText(ctx, parts[1].toUpperCase(), x, y + 11, colors.data, { maxWidth: 122 });
-        return;
-      }
-      const timeColor = status === "canceled" ? colors.canceled : status === "newTime" ? colors.newTime : colors.time;
-      const rowColor = status === "canceled" ? colors.canceled : colors.data;
-      drawDotText(ctx, row.time || "", x, y, timeColor, { maxWidth: 29 });
-      drawIdleDestinationText(ctx, row.airport || "", x + 33, y, rowColor, 54);
-      drawDotText(ctx, idleFlightFieldText(kind, row), x + 91, y, rowColor, { maxWidth: 18 });
-      drawIdleSymbol(ctx, kind, row, x + 113, y, status, colors);
-      if (status === "canceled") {
-        ctx.fillStyle = colors.canceled;
-        ctx.fillRect(x, y + 3, 122, 1);
-      }
-    }
-
-    function normalizeGateStatusForDisplay(value) {
-      const raw = String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
-      if (!raw) return "";
-      if (raw.includes("gotogate") || raw.includes("togate")) return "Go to gate";
-      if (raw.includes("boarding")) return "Boarding";
-      if (raw.includes("closing")) return "Closing";
-      if (raw.includes("closed")) return "Closed";
-      return "";
-    }
-
-    const departureCircleSymbol = [
-      ".##.",
-      "####",
-      "####",
-      ".##."
-    ];
-
-    const landedCheckSymbol = [
-      "....#",
-      "...#.",
-      "#.#..",
-      ".#..."
-    ];
-
-    function airlinePrefix(flightId) {
-      return String(flightId || "").trim().toUpperCase().slice(0, 2);
-    }
-
-    function idleFlightFieldText(kind, row) {
-      const airline = airlinePrefix(row.flightId);
-      const gate = String(row.gate || "").trim().toUpperCase().slice(0, 3);
-      if (kind === "departures" && gate && Math.floor(performance.now() / 1200) % 2 === 1) return gate;
-      return airline;
-    }
-
-    function idleSymbolState(kind, row, status) {
-      if (status === "canceled") return null;
-      if (kind === "arrivals") return status === "done" ? "landed" : null;
-      const gateStatus = normalizeGateStatusForDisplay(row.gateMessage);
-      if (gateStatus === "Go to gate") return "goToGate";
-      if (gateStatus === "Boarding") return "boarding";
-      if (gateStatus === "Closing") return "gateClosing";
-      if (gateStatus === "Closed") return "gateClosed";
-      return null;
-    }
-
-    function idleSymbolColor(state, colors) {
-      if (state === "goToGate") return colors.gateGoToGate;
-      if (state === "boarding") return colors.gateBoarding;
-      if (state === "gateClosing") return colors.gateClosing;
-      if (state === "gateClosed") return colors.gateClosed;
-      if (state === "landed") return colors.landed;
-      return colors.data;
-    }
-
-    function drawSymbolBitmap(ctx, bitmap, x, y, color) {
-      ctx.fillStyle = color;
-      for (let row = 0; row < bitmap.length; row += 1) {
-        for (let col = 0; col < bitmap[row].length; col += 1) {
-          if (bitmap[row][col] === "#") ctx.fillRect(x + col, y + row, 1, 1);
-        }
-      }
-    }
-
-    function drawIdleSymbol(ctx, kind, row, x, y, status, colors) {
-      const state = idleSymbolState(kind, row, status);
-      if (!state) return;
-      const blinkOn = Math.floor(performance.now() / 600) % 2 === 0;
-      if ((state === "boarding" || state === "gateClosing") && !blinkOn) return;
-      const bitmap = state === "landed" ? landedCheckSymbol : departureCircleSymbol;
-      const width = bitmap[0].length;
-      const fieldWidth = 9;
-      const drawX = x + Math.max(0, fieldWidth - width);
-      const drawY = state === "landed" ? y + 4 : y + 1;
-      drawSymbolBitmap(ctx, bitmap, drawX, drawY, idleSymbolColor(state, colors));
-    }
-
-    function drawIdleDestinationText(ctx, text, x, y, color, width) {
-      const normalized = normalizeLedText(text);
-      const textWidth = measureDotText(normalized);
-      if (textWidth <= width) {
-        drawDotText(ctx, normalized, x, y, color, { maxWidth: width });
-        return;
-      }
-      drawTickerLineBoxed(ctx, normalized, x, y, color, width, flightCycleStartedAt, Number(els.timetableScrollSpeed.value || 18));
-    }
-
-    function drawLocalClock(ctx, rightX, y, color) {
-      const now = new Date();
-      const parts = new Intl.DateTimeFormat("en-GB", {
-        timeZone: els.timezone.value || "Europe/Oslo",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-        hour12: false
-      }).formatToParts(now);
-      const hour = parts.find((part) => part.type === "hour")?.value || "00";
-      const minute = parts.find((part) => part.type === "minute")?.value || "00";
-      const second = Number(parts.find((part) => part.type === "second")?.value || "0");
-      const textWidth = measureDotText("00:00");
-      const x = rightX - textWidth;
-      drawDotText(ctx, hour, x, y, color, { maxWidth: 12 });
-      if (second % 2 === 0) drawDotText(ctx, ":", x + measureDotText("00"), y, color, { maxWidth: 5 });
-      drawDotText(ctx, minute, x + measureDotText("00:"), y, color, { maxWidth: 12 });
-    }
-
-    function getTimetableColors() {
-      return {
-        header: els.timetableHeaderColor.value || "#f7b500",
-        data: els.timetableDataColor.value || "#f4f7ff",
-        time: els.timetableTimeColor.value || "#f4f7ff",
-        newTime: els.timetableNewTimeColor.value || "#f7b500",
-        canceled: els.timetableCanceledColor.value || "#ff3b30",
-        gateGoToGate: els.timetableGateGoToGateColor.value || "#00f900",
-        gateBoarding: els.timetableGateBoardingColor.value || "#00f900",
-        gateClosing: els.timetableGateClosingColor.value || "#ff9300",
-        gateClosed: els.timetableGateClosedColor.value || "#ff2600",
-        landed: els.timetableLandedColor.value || "#00f900"
-      };
-    }
-
-    function formatScreenTimestamp(value) {
-      if (!value) return "aldri";
-      const date = new Date(value);
-      if (Number.isNaN(date.getTime())) return "aldri";
-      return new Intl.DateTimeFormat("nb-NO", {
-        dateStyle: "short",
-        timeStyle: "medium"
-      }).format(date);
-    }
-
-    function updateScreenStateUi() {
-      const active = screenState && screenState.active !== false;
-      const brightnessMode = screenState && screenState.brightnessMode === "night" ? "natt" : "dag";
-      const displayModeLabel = els.displayMode.value === "clock" ? "klokke" : "fly";
-      const source = screenState && screenState.source ? " via " + screenState.source : "";
-      els.screenStateSummary.textContent = "Skjermstatus: " + (active ? "på" : "av") + " · modus: " + displayModeLabel + " · lysmodus: " + brightnessMode + source;
-      els.screenToggle.textContent = active ? "Slå av skjerm" : "Slå på skjerm";
-      els.screenToggle.classList.toggle("danger", active);
-      els.screenStateTimestamps.textContent =
-        "Sist aktivert: " + formatScreenTimestamp(screenState && screenState.lastActivatedAt)
-        + " · sist deaktivert: " + formatScreenTimestamp(screenState && screenState.lastDeactivatedAt)
-        + " · sist byttet lysmodus: " + formatScreenTimestamp(screenState && screenState.lastBrightnessModeChangedAt);
-    }
-
-    function updateSoundTestUi() {
-      const source = soundState && soundState.source ? " via " + soundState.source : "";
-      const volume = soundState && Number.isFinite(Number(soundState.volumePercent)) ? " · volum " + Number(soundState.volumePercent) + "%" : "";
-      els.soundTestStatus.textContent = "Lydtest: " + formatScreenTimestamp(soundState && soundState.lastTriggeredAt) + source + volume;
-    }
-
-    function updateAudioVolumeUi() {
-      els.audioVolumeValue.textContent = String(Math.round(Number(els.audioVolumePercent.value || 0)));
-    }
-
-    function updateFollowInputUi() {
-      els.followFlightsLabel.textContent = "Flightnummer";
-      els.followFlights.placeholder = "SK4673, DY1304, DOC45";
-      els.followFlightsHelp.textContent = "La stå av for å vise fly i området. Skru på for å følge bestemte fly.";
-    }
-
-    function bindRangeValues() {
-      [
-        els.radius,
-        els.audioVolumePercent,
-        els.deviceBrightness,
-        els.nightBrightness,
-        els.pollSeconds,
-        els.configRefreshSeconds,
-        els.cycleSeconds,
-        els.scrollSpeed,
-        els.timetableCycleSeconds,
-        els.timetableScrollSpeed,
-        els.departureTimetableItemCount,
-        els.arrivalTimetableItemCount,
-        els.departureAvinorWindowHours,
-        els.arrivalAvinorWindowHours
-      ].forEach((input) => {
-        input.addEventListener("input", syncRangeValues);
-      });
-      syncRangeValues();
-    }
-
-    function syncRangeValues() {
-      const pairs = [
-        [els.radius, els.radiusValue],
-        [els.audioVolumePercent, els.audioVolumeValue],
-        [els.deviceBrightness, els.deviceBrightnessValue],
-        [els.nightBrightness, els.nightBrightnessValue],
-        [els.pollSeconds, els.pollSecondsValue],
-        [els.configRefreshSeconds, els.configRefreshSecondsValue],
-        [els.cycleSeconds, els.cycleSecondsValue],
-        [els.scrollSpeed, els.scrollSpeedValue],
-        [els.timetableCycleSeconds, els.timetableCycleSecondsValue],
-        [els.timetableScrollSpeed, els.timetableScrollSpeedValue],
-        [els.departureTimetableItemCount, els.departureTimetableItemCountValue],
-        [els.arrivalTimetableItemCount, els.arrivalTimetableItemCountValue],
-        [els.departureAvinorWindowHours, els.departureAvinorWindowHoursValue],
-        [els.arrivalAvinorWindowHours, els.arrivalAvinorWindowHoursValue]
-      ];
-      pairs.forEach(([input, output]) => {
-        if (input && output) output.textContent = String(Math.round(Number(input.value || 0)));
-      });
-    }
-
-    function getLineColors() {
-      return {
-        airline: els.airlineColor.value || "#f4f7ff",
-        route: els.routeColor.value || "#f4f7ff",
-        aircraft: els.aircraftColor.value || "#f4f7ff",
-        context: els.contextColor.value || "#f4f7ff",
-        progress: els.progressColor.value || "#f7b500",
-        routeProgress: els.routeProgressColor.value || "#00d46a"
-      };
-    }
-
-    function drawDisplayText(ctx, lines) {
-      const colors = getLineColors();
-      drawDotText(ctx, lines.airline || "", 50, 5, colors.airline, { maxWidth: 75 });
-      drawDotText(ctx, lines.route || "", 50, 19, colors.route, { maxWidth: 75 });
-      drawDotText(ctx, lines.aircraft || "", 50, 33, colors.aircraft, { maxWidth: 75 });
-      drawTickerLine(ctx, lines.context || "", 3, 52, colors.context, 122);
-    }
-
-    function drawFlightProgress(ctx, flight) {
-      if (els.emuSource.value !== "live") return;
-      ensureTickerAnimation();
-      if ((flight.layout === "follow_cycle" || displayMode === "follow") && flight && !flight.followStatus && typeof flight.routeProgress === "number") {
-        drawRouteProgressValue(ctx, flight.routeProgress, 0);
-      }
-      if (displayFlights.length <= 1) return;
-      const cycleMs = Math.max(2000, Number(els.cycleSeconds.value || 5) * 1000);
-      drawCycleProgress(ctx, cycleMs, 63);
-    }
-
-    function drawCycleProgress(ctx, cycleMs, y = 0) {
-      const elapsed = Math.max(0, performance.now() - flightCycleStartedAt);
-      const progress = Math.min(1, elapsed / cycleMs);
-      drawProgressValue(ctx, progress, y);
-    }
-
-    function drawProgressValue(ctx, progress, y = 0) {
-      const width = Math.max(0, Math.min(128, Math.floor(128 * progress)));
-      ctx.fillStyle = "#07101c";
-      ctx.fillRect(0, y, 128, 1);
-      ctx.fillStyle = getLineColors().progress;
-      ctx.fillRect(0, y, width, 1);
-    }
-
-    function drawRouteProgressValue(ctx, progress, y = 0) {
-      const width = Math.max(0, Math.min(128, Math.floor(128 * progress)));
-      ctx.fillStyle = "#3c3c3c";
-      ctx.fillRect(0, y, 128, 1);
-      ctx.fillStyle = getLineColors().routeProgress;
-      ctx.fillRect(0, y, width, 1);
-    }
-
-    function loadLogoForFlight(flight) {
-      if (!flight.logoUrl || logoCache.has(flight.logoUrl)) return;
-      const image = new Image();
-      image.onload = () => {
-        logoCache.set(flight.logoUrl, image);
-        if (els.emuSource.value === "live") renderEmulator();
-      };
-      image.onerror = () => {
-        if (image.src.endsWith("/logos/UNKNOWN.png")) {
-          logoCache.set(flight.logoUrl, null);
-          if (els.emuSource.value === "live") renderEmulator();
-          return;
-        }
-        image.src = "/logos/UNKNOWN.png";
-        image.onload = () => {
-          logoCache.set(flight.logoUrl, image);
-          if (els.emuSource.value === "live") renderEmulator();
-        };
-        image.onerror = () => {
-          logoCache.set(flight.logoUrl, null);
-          if (els.emuSource.value === "live") renderEmulator();
-        };
-      };
-      image.src = flight.logoUrl;
-    }
-
-    function drawPlaceholderLogo(ctx, x, y, size) {
-      const cx = x + Math.floor(size / 2);
-      const cy = y + Math.floor(size / 2);
-      const radius = Math.floor(size / 2);
-      ctx.fillStyle = "#105ab7";
-      ctx.beginPath();
-      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = "#0d4a96";
-      ctx.beginPath();
-      ctx.arc(cx + 4, cy + 2, radius - 7, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = "#f4f7ff";
-      ctx.fillRect(x + 15, y + 13, 13, 2);
-      ctx.fillRect(x + 12, y + 16, 18, 2);
-      ctx.fillRect(x + 10, y + 19, 22, 2);
-      ctx.fillRect(x + 13, y + 22, 16, 2);
-      ctx.fillRect(x + 16, y + 25, 10, 2);
-      ctx.fillStyle = "#8fc2ff";
-      ctx.fillRect(x + 8, y + 31, 26, 2);
-    }
-
-    function drawLedPanel(ctx, sourceCanvas) {
-      const panelW = ctx.canvas.width;
-      const panelH = ctx.canvas.height;
-      const cols = 128;
-      const rows = 64;
-      const pitchX = panelW / cols;
-      const pitchY = panelH / rows;
-      const radius = Math.min(pitchX, pitchY) * 0.27;
-      const sourceCtx = sourceCanvas.getContext("2d", { willReadFrequently: true });
-      const imageData = sourceCtx.getImageData(0, 0, cols, rows).data;
-
-      ctx.fillStyle = "#000";
-      ctx.fillRect(0, 0, panelW, panelH);
-
-      for (let y = 0; y < rows; y++) {
-        for (let x = 0; x < cols; x++) {
-          const index = (y * cols + x) * 4;
-          const r = imageData[index];
-          const g = imageData[index + 1];
-          const b = imageData[index + 2];
-          const a = imageData[index + 3] / 255;
-          const cx = x * pitchX + pitchX / 2;
-          const cy = y * pitchY + pitchY / 2;
-
-          ctx.fillStyle = "#050607";
-          ctx.beginPath();
-          ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-          ctx.fill();
-
-          if (a > 0 && (r > 1 || g > 1 || b > 1)) {
-            ctx.beginPath();
-            ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-            ctx.fillStyle = "rgba(" + r + "," + g + "," + b + "," + a + ")";
-            ctx.fill();
-          }
-        }
-      }
-    }
-
-    function drawTickerLine(ctx, text, x, y, color, width) {
-      if (!text) return;
-      ensureTickerAnimation();
-      const textWidth = measureDotText(text);
-      const fitsRestingWidth = textWidth <= width;
-      const fitsFullWidth = textWidth + Math.max(0, x) <= 128;
-      const overflow = fitsRestingWidth || fitsFullWidth ? 0 : Math.max(1, textWidth + Math.max(0, x) - 128);
-      const offset = overflow > 0 ? getTickerOffset(overflow) : 0;
-      ctx.save();
-      ctx.beginPath();
-      if (overflow > 0) {
-        ctx.rect(0, y, 128, 8);
-      } else {
-        ctx.rect(x, y, fitsFullWidth ? 128 - Math.max(0, x) : width, 8);
-      }
-      ctx.clip();
-      drawDotText(ctx, text, x - offset, y, color, { maxWidth: textWidth });
-      ctx.restore();
-    }
-
-    function drawTickerLineBoxed(ctx, text, x, y, color, width, startedAt, pxPerSecond = Number(els.scrollSpeed.value || 9)) {
-      if (!text) return;
-      ensureTickerAnimation();
-      const textWidth = measureDotText(text);
-      const overflow = textWidth <= width ? 0 : Math.max(1, textWidth - width);
-      const offset = overflow > 0 ? getTickerForwardOffset(overflow, startedAt, pxPerSecond) : 0;
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(x, y, width, 8);
-      ctx.clip();
-      drawDotText(ctx, text, x - offset, y, color, { maxWidth: textWidth });
-      ctx.restore();
-    }
-
-    function ensureTickerAnimation() {
-      if (tickerAnimationFrame) return;
-      const tick = () => {
-        tickerAnimationFrame = requestAnimationFrame(tick);
-        if (els.emuSource.value === "live" || els.emuSource.value === "upload") {
-          renderEmulator();
-        }
-      };
-      tickerAnimationFrame = requestAnimationFrame(tick);
-    }
-
-    function getTickerOffset(overflow) {
-      const holdMs = 900;
-      const pxPerSecond = Math.max(2, Number(els.scrollSpeed.value || 9));
-      const travelMs = Math.max(1200, (overflow / pxPerSecond) * 1000);
-      const cycleMs = holdMs + travelMs + holdMs + travelMs;
-      const t = (performance.now() - tickerStartedAt) % cycleMs;
-      if (t < holdMs) return 0;
-      if (t < holdMs + travelMs) return Math.round(((t - holdMs) / travelMs) * overflow);
-      if (t < holdMs + travelMs + holdMs) return overflow;
-      return Math.round((1 - ((t - holdMs - travelMs - holdMs) / travelMs)) * overflow);
-    }
-
-    function getTickerForwardOffset(overflow, startedAt, pxPerSecond = Number(els.scrollSpeed.value || 9)) {
-      const holdMs = 900;
-      const speed = Math.max(2, Number(pxPerSecond || 9));
-      const travelMs = Math.max(1200, (overflow / speed) * 1000);
-      const cycleMs = holdMs + travelMs + holdMs;
-      const t = (performance.now() - startedAt) % cycleMs;
-      if (t < holdMs) return 0;
-      if (t < holdMs + travelMs) return Math.round(((t - holdMs) / travelMs) * overflow);
-      return overflow;
-    }
-
-    function measureDotText(text) {
-      return Array.from(normalizeLedText(text)).reduce((width, char) => width + dotCharAdvance(char), 0);
-    }
-
-    function dotCharAdvance(char) {
-      if (char === " ") return 4;
-      if (char === ":") return 5;
-      return 6;
-    }
-
-    function drawDotTextRight(ctx, text, rightX, y, color, maxWidth) {
-      const value = normalizeLedText(text);
-      const width = Math.min(measureDotText(value), maxWidth);
-      drawDotText(ctx, value, rightX - width, y, color, { maxWidth });
-    }
-
-    function drawDotText(ctx, text, x, y, color, options = {}) {
-      const glyphs = {
-        " ": ["00000","00000","00000","00000","00000","00000","00000"],
-        "-": ["00000","00000","00000","11111","00000","00000","00000"],
-        ".": ["00000","00000","00000","00000","00000","01100","01100"],
-        ":": ["00000","01100","01100","00000","01100","01100","00000"],
-        "(": ["00010","00100","01000","01000","01000","00100","00010"],
-        ")": ["01000","00100","00010","00010","00010","00100","01000"],
-        "0": ["01110","10001","10011","10101","11001","10001","01110"],
-        "1": ["00100","01100","00100","00100","00100","00100","01110"],
-        "2": ["01110","10001","00001","00010","00100","01000","11111"],
-        "3": ["11110","00001","00001","01110","00001","00001","11110"],
-        "4": ["00010","00110","01010","10010","11111","00010","00010"],
-        "5": ["11111","10000","10000","11110","00001","00001","11110"],
-        "6": ["01110","10000","10000","11110","10001","10001","01110"],
-        "7": ["11111","00001","00010","00100","01000","01000","01000"],
-        "8": ["01110","10001","10001","01110","10001","10001","01110"],
-        "9": ["01110","10001","10001","01111","00001","00001","01110"],
-        "A": ["01110","10001","10001","11111","10001","10001","10001"],
-        "B": ["11110","10001","10001","11110","10001","10001","11110"],
-        "C": ["01111","10000","10000","10000","10000","10000","01111"],
-        "D": ["11110","10001","10001","10001","10001","10001","11110"],
-        "E": ["11111","10000","10000","11110","10000","10000","11111"],
-        "F": ["11111","10000","10000","11110","10000","10000","10000"],
-        "G": ["01111","10000","10000","10011","10001","10001","01111"],
-        "H": ["10001","10001","10001","11111","10001","10001","10001"],
-        "I": ["11111","00100","00100","00100","00100","00100","11111"],
-        "J": ["00111","00010","00010","00010","00010","10010","01100"],
-        "K": ["10001","10010","10100","11000","10100","10010","10001"],
-        "L": ["10000","10000","10000","10000","10000","10000","11111"],
-        "M": ["10001","11011","10101","10101","10001","10001","10001"],
-        "N": ["10001","11001","10101","10011","10001","10001","10001"],
-        "O": ["01110","10001","10001","10001","10001","10001","01110"],
-        "P": ["11110","10001","10001","11110","10000","10000","10000"],
-        "Q": ["01110","10001","10001","10001","10101","10010","01101"],
-        "R": ["11110","10001","10001","11110","10100","10010","10001"],
-        "S": ["01111","10000","10000","01110","00001","00001","11110"],
-        "T": ["11111","00100","00100","00100","00100","00100","00100"],
-        "U": ["10001","10001","10001","10001","10001","10001","01110"],
-        "V": ["10001","10001","10001","10001","10001","01010","00100"],
-        "W": ["10001","10001","10001","10101","10101","10101","01010"],
-        "X": ["10001","10001","01010","00100","01010","10001","10001"],
-        "Y": ["10001","10001","01010","00100","00100","00100","00100"],
-        "Z": ["11111","00001","00010","00100","01000","10000","11111"]
-      };
-      let cursor = x;
-      const maxChars = typeof options === "number" ? options : options.maxChars || 999;
-      const maxWidth = typeof options === "object" ? options.maxWidth || 999 : 999;
-      ctx.fillStyle = color;
-      for (const char of normalizeLedText(text).toUpperCase().slice(0, maxChars)) {
-        const rows = glyphs[char] || glyphs[" "];
-        if (cursor + rows[0].length > x + maxWidth) break;
-        for (let row = 0; row < rows.length; row++) {
-          for (let col = 0; col < rows[row].length; col++) {
-            if (rows[row][col] === "1") ctx.fillRect(cursor + col, y + row, 1, 1);
-          }
-        }
-        cursor += dotCharAdvance(char);
-      }
-    }
-
-    function normalizeLedText(value) {
-      return String(value || "")
-        .replace(/[æÆåÅ]/g, "a")
-        .replace(/[øØöÖóÓòÒôÔ]/g, "o")
-        .replace(/[üÜúÚùÙûÛ]/g, "u")
-        .replace(/[äÄáÁàÀâÂ]/g, "a")
-        .replace(/[éÉèÈêÊëË]/g, "e")
-        .replace(/[íÍìÌîÎïÏ]/g, "i")
-        .replace(/[çÇ]/g, "c")
-        .replace(/[ñÑ]/g, "n");
-    }
-
-    renderEmulator();
+    const output = document.querySelector("#output");
+    let pairedScreenId = "";
+    const afterPairing = document.querySelector("#afterPairing");
+    const pairedScreenIdLabel = document.querySelector("#pairedScreenId");
+    const pairingCodeInput = document.querySelector("#pairingCode");
+    const screenLabelInput = document.querySelector("#screenLabel");
+    const connectionLabel = document.querySelector("#connectionLabel");
+    function show(value) { output.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2); }
+    function setStatus(text, tone) { connectionLabel.textContent = text; const dot = document.querySelector(".status-dot"); dot.style.background = tone === "ok" ? "var(--green)" : tone === "error" ? "#ff3b30" : "var(--amber)"; dot.style.boxShadow = tone === "ok" ? "0 0 0 4px rgba(0, 184, 112, 0.14)" : tone === "error" ? "0 0 0 4px rgba(255, 59, 48, 0.14)" : "0 0 0 4px rgba(255, 147, 0, 0.14)"; }
+    async function api(path, body) { const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); const json = await response.json().catch(() => ({})); if (!response.ok) throw json; return json; }
+    function controlUrl() { return pairedScreenId ? "/?screenId=" + encodeURIComponent(pairedScreenId) : "/"; }
+    pairingCodeInput.addEventListener("input", () => { pairingCodeInput.value = pairingCodeInput.value.toUpperCase().replace(/[^A-Z0-9-]/g, ""); });
+    document.querySelector("#claimButton").addEventListener("click", async () => { setStatus("Pairing screen", "pending"); try { const json = await api("/api/provision/claim", { code: pairingCodeInput.value, label: screenLabelInput.value }); pairedScreenId = json.screenId || ""; pairedScreenIdLabel.textContent = "Ready for the control panel"; afterPairing.hidden = false; pairingCodeInput.disabled = true; screenLabelInput.disabled = true; document.querySelector("#claimButton").disabled = true; setStatus("Screen paired", "ok"); show("Paired. You can open the control panel now. FR24 is optional."); } catch (error) { setStatus("Pairing failed", "error"); show(error); } });
+    document.querySelector("#saveFr24Button").addEventListener("click", async () => { if (!pairedScreenId) return show("Pair the screen before adding FR24."); setStatus("Saving FR24", "pending"); try { const json = await api("/api/screens/" + encodeURIComponent(pairedScreenId) + "/fr24-key", { apiKey: document.querySelector("#fr24Key").value }); document.querySelector("#fr24Key").value = ""; setStatus("FR24 connected", "ok"); show("FR24 saved. Opening control panel..."); window.location.href = controlUrl(); } catch (error) { setStatus("FR24 failed", "error"); show(error); } });
+    document.querySelector("#openConfigButton").addEventListener("click", () => { window.location.href = controlUrl(); });
+    document.querySelector("#skipFr24Button").addEventListener("click", () => { window.location.href = controlUrl(); });
+    document.querySelector("#openConfigWithFr24Button").addEventListener("click", () => { window.location.href = controlUrl(); });
   </script>
 </body>
 </html>`;
+}
+
+function skyFrameLogoMarkup(): string {
+  return `<svg class="skyframe-logo" fill="none" viewBox="0 0 244 29" aria-label="SkyFrame"><path d="M7.78885 16.5497C2.50763 15.7526 0.379944 12.716 0.379944 8.92016C0.379944 1.89791 7.25693 0 16.0716 0C28.1538 0 33.0931 3.15052 33.5111 8.8822H21.0489C21.0489 7.78141 20.441 7.13613 19.4151 6.71859C18.4653 6.30105 17.2495 6.14921 16.0716 6.14921C12.8801 6.14921 11.7783 6.90838 11.7783 8.08508C11.7783 8.84424 12.1202 9.3377 13.1841 9.48953L25.9882 11.3874C31.4214 12.1846 34.7269 14.6898 34.7269 19.2827C34.7269 25.9254 29.3317 29 17.2874 29C9.08066 29 0 27.8613 0 19.8901H12.9181C12.9561 20.7631 13.336 21.4084 14.0579 21.8259C14.8558 22.2055 16.0716 22.3953 17.7054 22.3953C21.0489 22.3953 21.9608 21.5223 21.9608 20.1937C21.9608 19.3966 21.5048 18.6374 20.023 18.3717L7.78885 16.5497Z" fill="currentColor"/><path d="M51.5584 17.6505L48.0249 20.7631V28.051H37.3105V0.948953H48.0249V10.5144L57.9794 0.948953H72.1893L60.0691 11.4254L73.2152 28.051H58.9673L51.5584 17.6505Z" fill="currentColor"/><path d="M81.46 20.4215L69.4158 0.948953H81.6499L86.8172 11.5772L91.9844 0.948953H104.219L92.1744 20.4215V28.051H81.46V20.4215Z" fill="currentColor"/><path d="M104.599 0.948953H125.609V4.4411H108.626V12.4503H124.812V15.9424H108.626V28.051H104.599V0.948953Z" fill="currentColor"/><path d="M128.421 0.948953H145.215C150.648 0.948953 152.623 4.70681 152.623 8.16099C152.623 11.6152 151.066 13.8927 148.064 14.8416V14.9175C150.496 15.2592 151.864 17.4987 152.016 20.6872C152.206 25.6976 152.434 27.0641 153.307 28.051H149.052C148.406 27.2919 148.406 26.1152 148.216 22.8887C147.912 18.0301 146.316 16.5497 142.973 16.5497H132.448V28.051H128.421V0.948953ZM143.695 13.0576C147.646 13.0576 148.596 10.7042 148.596 8.76832C148.596 6.18717 147.038 4.4411 143.809 4.4411H132.448V13.0576H143.695Z" fill="currentColor"/><path d="M174.166 20.1558H160.868L157.411 28.051H153.079L165.352 0.948953H169.949L182.221 28.051H177.624L174.166 20.1558ZM167.479 4.66885L162.388 16.6636H172.685L167.479 4.66885Z" fill="currentColor"/><path d="M211.325 0.948953H216.91V28.051H212.883V5.57984H212.807L202.244 28.051H198.673L188.148 6.03534H188.072V28.051H184.045V0.948953H189.706L200.458 23.4202L211.325 0.948953Z" fill="currentColor"/><path d="M221.807 0.948953H243.616V4.4411H225.835V12.2984H243.084V15.7906H225.835V24.5589H243.996V28.051H221.807V0.948953Z" fill="currentColor"/></svg>`;
+}
+
+function skyFramePreviewMarkup(): string {
+  return `<aside class="preview" aria-label="SkyFrame preview"><div class="device"><div class="led-screen"><div class="plane-mark"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20 16.2 13.5 13l-3.8 5.1-1.7-.7 1.8-6.2L4 8.4V6.7l6.6 1.2L14 3.5c.4-.6 1.2-.8 1.8-.5.6.3.9 1 .7 1.7l-1.5 5.1 6.1 2.8c.5.2.8.8.6 1.4-.2.5-.7.8-1.2.8h-.5Z" fill="currentColor"/></svg></div><div class="led-copy"><strong id="previewName">SKYFRAME</strong><span id="previewRoute">PAIRING MODE</span><small id="previewCode">WAITING FOR CODE</small></div></div></div><div class="signal"><div><strong>Firmware</strong><span>One image</span></div><div><strong>Owner</strong><span>Verified here</span></div><div><strong>FR24</strong><span>Per screen</span></div></div></aside>`;
+}
+
+function skyFrameSetupStyles(): string {
+  return `<style>
+    :root { color-scheme: light; font-family: "Outfit", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; --background:#dfdad7; --foreground:#3c2415; --primary:#3c2415; --secondary:#c1b4ac; --card:#fffaf5; --muted:#efe9e4; --muted-foreground:#6b5d52; --border-soft:rgba(60,36,21,.15); --border-mid:rgba(60,36,21,.28); --sky:#3478f6; --green:#00b870; --amber:#ff9300; --shadow:0 24px 64px rgba(34,20,12,.14); }
+    *{box-sizing:border-box} html{min-height:100%;background:var(--secondary);color:var(--foreground)} body{margin:0;min-height:100vh;background:radial-gradient(circle at 18% 0%,rgba(255,255,255,.9),transparent 28%),linear-gradient(180deg,#f2ece8 0%,var(--background) 42%,#d8d1cd 100%);color:var(--foreground)} button,input{font:inherit}.page{width:min(1100px,100%);margin:0 auto;padding:24px;min-height:100vh;display:grid;grid-template-columns:minmax(0,1fr) 390px;gap:28px;align-items:center}.setup-page{width:min(760px,100%);grid-template-columns:1fr;align-items:start;padding-top:30px;padding-bottom:40px}.hero{min-width:0;display:grid;gap:26px}.brand{display:flex;align-items:center;justify-content:space-between;gap:16px}.skyframe-logo{width:min(244px,68vw);height:auto;color:var(--primary)}.status-pill{min-height:34px;display:inline-flex;align-items:center;gap:8px;border:1px solid var(--border-soft);border-radius:999px;padding:0 12px;background:rgba(255,255,255,.52);color:var(--muted-foreground);font-size:13px;white-space:nowrap}.status-dot{width:8px;height:8px;border-radius:999px;background:var(--amber);box-shadow:0 0 0 4px rgba(255,147,0,.14)}h1{max-width:740px;margin:0;font-size:clamp(36px,6vw,68px);line-height:.94;letter-spacing:0;font-weight:700}.lead{max-width:620px;margin:0;color:var(--muted-foreground);font-size:18px;line-height:1.45}.panel{border:1px solid var(--border-soft);border-radius:8px;background:rgba(255,250,245,.78);box-shadow:var(--shadow);backdrop-filter:blur(18px);overflow:hidden}.panel-header{padding:18px;background:var(--secondary);display:flex;align-items:center;justify-content:space-between;gap:12px}.panel-title{margin:0;font-size:17px;font-weight:700}.panel-subtitle{margin:4px 0 0;color:rgba(60,36,21,.7);font-size:13px}.panel-body{padding:18px;display:grid;gap:14px}.step{display:grid;grid-template-columns:32px minmax(0,1fr);gap:12px;align-items:start;border:1px solid var(--border-soft);border-radius:8px;background:rgba(255,255,255,.62);padding:14px}.step-number{width:32px;height:32px;border-radius:999px;background:var(--primary);color:#fff;display:grid;place-items:center;font-weight:700;font-size:14px}.step h2{margin:0;font-size:15px}.step p{margin:5px 0 0;color:var(--muted-foreground);font-size:13px;line-height:1.4}.form{display:grid;gap:12px}.after-pairing{display:grid;gap:14px}.after-pairing[hidden]{display:none}.success-card{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 12px;align-items:center;border:1px solid rgba(0,184,112,.3);border-radius:8px;background:rgba(0,184,112,.08);padding:14px}.success-card strong{font-size:15px}.success-card span{grid-column:1/-1;font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:var(--muted-foreground);overflow-wrap:anywhere}.success-card button{grid-column:2;grid-row:1 / span 2;width:auto;min-width:138px;margin:0}label{display:grid;gap:7px;color:var(--foreground);font-size:13px;font-weight:700}input{width:100%;height:46px;border-radius:8px;border:1px solid var(--border-mid);padding:0 13px;background:#fff;color:var(--foreground);outline:none;transition:border-color 160ms ease,box-shadow 160ms ease}input:disabled{opacity:.7;background:rgba(255,255,255,.54)}input:focus{border-color:var(--sky);box-shadow:0 0 0 4px rgba(52,120,246,.14)}.pair-code{font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:700;letter-spacing:0;text-transform:uppercase}.actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}.actions.single{grid-template-columns:1fr}button,.button{height:48px;border:0;border-radius:8px;background:var(--primary);color:#fff;font-weight:700;cursor:pointer;transition:transform 140ms ease,opacity 140ms ease;display:grid;place-items:center;text-decoration:none;text-align:center}button:disabled{cursor:not-allowed;opacity:.58}button:hover,.button:hover{transform:translateY(-1px)}button:active,.button:active{transform:translateY(0);opacity:.82}button.secondary,.button.secondary{background:var(--sky)}.result{min-height:58px;white-space:pre-wrap;word-break:break-word;margin:0;border-radius:8px;border:1px solid var(--border-soft);background:rgba(60,36,21,.06);padding:12px;color:var(--muted-foreground);font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.45}@media(max-width:860px){.page{grid-template-columns:1fr;padding:18px;align-items:start}.setup-page{padding-top:18px}.hero{gap:20px}h1{font-size:42px}.actions{grid-template-columns:1fr}}@media(max-width:520px){.brand{align-items:flex-start;flex-direction:column}.status-pill{white-space:normal}.success-card{grid-template-columns:1fr}.success-card button{grid-column:1;grid-row:auto;width:100%}}
+  </style>`;
 }
 
 function isConfig(value: unknown): value is Config {
@@ -6416,8 +4629,9 @@ function jsonResponse(body: unknown, status = 200, headers: HeadersInit = {}): R
   });
 }
 
-function htmlResponse(body: string): Response {
+function htmlResponse(body: string, status = 200): Response {
   return new Response(body, {
+    status,
     headers: {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-store"

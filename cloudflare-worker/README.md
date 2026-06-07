@@ -1,42 +1,30 @@
-# Flight Display Server
+# SkyFrame Worker
 
-Cloudflare Worker for TheFlightWall-style displays.
+Cloudflare Worker, React control panel and admin surface for SkyFrame.
 
-It provides:
+Primary public domain:
 
-- A small map frontend at `/` for choosing latitude, longitude and radius.
-- `GET /api/config` and `POST /api/config` backed by Cloudflare KV.
-- `GET /api/flights` for normalized FR24 live flight data.
-- `GET /api/display` for a compact ESP32-friendly payload.
-
-## Setup
-
-Create a KV namespace and paste the namespace id into `wrangler.toml`:
-
-```bash
-npx wrangler kv namespace create FLIGHT_DISPLAY_KV
+```text
+https://skyframe.danaksel.no
 ```
 
-Set your FR24 API key as a secret:
+## Scripts
 
 ```bash
-npx wrangler secret put FR24_API_KEY
-```
-
-For followed flights that are scheduled but not yet available from FR24, set an Aviationstack key too. The Worker uses it to fill departure time and departure gate when available:
-
-```bash
-npx wrangler secret put AVIATIONSTACK_API_KEY
-```
-
-For FR24 sandbox testing, change this in `wrangler.toml`:
-
-```toml
-FR24_LIVE_ENDPOINT = "/sandbox/live/flight-positions/light"
-```
-
-Then deploy:
-
-```bash
+npm test -- --run
+npm run typecheck
+npm run build:web
 npm run deploy
 ```
+
+`build:web` writes the React app to `public/`, and the Worker serves those assets through the `ASSETS` binding.
+
+## Active Surfaces
+
+- `/start`: public pairing journey.
+- `/`: Google-protected control panel.
+- `/admin`: admin-only fleet overview.
+- `/api/*`: control-panel and admin APIs.
+- `/public/*`: firmware/device APIs.
+
+Legacy inline control panels and the pixel editor have been removed. The active app is `frontend/src/App.tsx`.

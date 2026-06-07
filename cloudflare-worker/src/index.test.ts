@@ -125,6 +125,44 @@ describe("auth gates", () => {
   });
 });
 
+describe("device provisioning", () => {
+  it("pairs a generic device and lets its token read scoped config", async () => {
+    const env = makeEnv({}, {
+      [CONFIG_KEY]: baseConfig()
+    });
+
+    const start = await request("/public/provision/start", env, {
+      method: "POST",
+      body: JSON.stringify({ hardwareId: "esp32-test-001" })
+    });
+    const started = await start.json() as Record<string, string>;
+
+    expect(start.status).toBe(200);
+    expect(started.code).toMatch(/^SKY-\d{6}$/);
+
+    const claim = await request("/api/provision/claim", env, {
+      method: "POST",
+      headers: { "CF-Access-Authenticated-User-Email": "owner@example.com" },
+      body: JSON.stringify({ code: started.code, label: "Kitchen" })
+    });
+    const claimed = await claim.json() as Record<string, string>;
+
+    expect(claim.status).toBe(200);
+    expect(claimed.deviceToken).toBeTruthy();
+    expect(claimed.screenId).toBeTruthy();
+
+    const scopedConfig = await request("/public/device-config", env, {
+      headers: { "X-Flight-Device-Token": claimed.deviceToken }
+    });
+    const json = await scopedConfig.json() as Record<string, unknown>;
+
+    expect(scopedConfig.status).toBe(200);
+    expect(json).toMatchObject({
+      homeAirportIata: "OSL"
+    });
+  });
+});
+
 describe("display polling contract", () => {
   it("suspends display and avoids live source calls only when screen is inactive", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch");

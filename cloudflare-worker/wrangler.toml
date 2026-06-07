@@ -18,6 +18,7 @@ DEFAULT_LON = "10.7522"
 DEFAULT_RADIUS_KM = "10"
 CACHE_TTL_SECONDS = "60"
 DISPLAY_LIMIT = "8"
+ACCESS_TEAM_DOMAIN = "danaksel.cloudflareaccess.com"
 
 [[kv_namespaces]]
 binding = "FLIGHT_DISPLAY_KV"

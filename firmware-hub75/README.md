@@ -10,6 +10,8 @@ Target firmware for the Waveshare ESP32-S3-RGB-Matrix controller and a 128 x 64 
 - Listen for realtime config/display/sound events over WebSocket.
 - Poll realtime/config endpoints as fallback.
 - Send device heartbeat/status with Wi-Fi hostname, SSID, RSSI, IP, uptime, screen state, config OK and display OK.
+- Show a pairing code after Wi-Fi is connected and block display/config fetching until the screen is paired.
+- Handle remote maintenance commands from the Worker: restart, unpair, forget Wi-Fi and factory reset.
 - Download and cache missing logos from the Worker.
 - Rotate locally between fetched flights.
 - Render the 128 x 64 layout used by the web emulator.
@@ -52,7 +54,7 @@ When setup mode starts, the display shows:
 
 ```text
 SETUP MODE
-Connect to
+CONNECT TO WIFI
 SKYFRAME-SETUP
 ```
 
@@ -97,6 +99,17 @@ This hostname is what routers, DHCP leases, and network scanners may show on the
 ## Audio
 
 PA/test audio uses `audioVolumePercent` from config. Clock tick uses `clockTickEnabled` and `clockTickVolumePercent`, and the tic sample is scaled independently from PA volume.
+
+## Remote Maintenance
+
+The firmware reads `deviceCommand` from `/public/realtime-state` and can also receive the same command over realtime when enabled.
+
+- `restart`: reboot.
+- `unpair`: clear the device token and return to pairing mode while keeping Wi-Fi.
+- `forget_wifi`: clear the device token and Wi-Fi credentials, then reboot into setup mode.
+- `factory_reset`: clear account and Wi-Fi state.
+
+Wi-Fi and device token are stored in ESP32 Preferences/NVS so normal firmware updates do not wipe customer setup. Resetting those values should happen through the control panel or admin commands.
 
 ## Build And Upload
 
