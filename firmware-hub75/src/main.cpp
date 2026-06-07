@@ -84,6 +84,7 @@ constexpr uint8_t WifiReconnectSeconds = 30;
 constexpr uint32_t OtaPollIntervalMs = 6UL * 60UL * 60UL * 1000UL;
 constexpr uint32_t OtaRetryIntervalMs = 30UL * 60UL * 1000UL;
 constexpr uint32_t OtaDownloadTimeoutMs = 120000UL;
+constexpr uint32_t OtaNetworkLockWaitMs = 15000UL;
 constexpr uint8_t SetupButtonPin = 0;
 constexpr uint32_t WifiConnectTimeoutMs = 6500;
 constexpr uint16_t ConfigFallbackPollSeconds = 300;
@@ -3295,7 +3296,8 @@ bool performOtaUpdate(const FirmwareManifest &manifest)
     bool locked = false;
     if (networkMutex)
     {
-        if (xSemaphoreTake(networkMutex, pdMS_TO_TICKS(500)) != pdTRUE)
+        setOtaState("waiting_for_network", "");
+        if (xSemaphoreTake(networkMutex, pdMS_TO_TICKS(OtaNetworkLockWaitMs)) != pdTRUE)
         {
             setOtaState("error", "network_busy");
             return false;
@@ -3454,7 +3456,7 @@ void checkFirmwareUpdate(bool forced)
 
     String body;
     int httpCode = 0;
-    if (!fetchText(FirmwareLatestUrl, body, httpCode, pdMS_TO_TICKS(500)))
+    if (!fetchText(FirmwareLatestUrl, body, httpCode, pdMS_TO_TICKS(OtaNetworkLockWaitMs)))
     {
         setOtaState("error", httpCode == -2 ? "network_busy" : String("manifest_http_") + httpCode);
         lastOtaCheckedAt = millis() - (OtaPollIntervalMs - OtaRetryIntervalMs);
@@ -3702,7 +3704,8 @@ bool connectWiFi()
 
         if (screenActive)
         {
-            drawWifiStatus("WIFI OK", ssid.c_str(), ip.c_str(), colorSuccess());
+            const String connectedLine = String(SKYFRAME_FW_VERSION) + " " + ip;
+            drawWifiStatus("WIFI OK", ssid.c_str(), connectedLine.c_str(), colorSuccess());
         }
         else
         {
