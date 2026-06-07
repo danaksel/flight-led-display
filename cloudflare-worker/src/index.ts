@@ -3,7 +3,6 @@ export interface Env {
   REALTIME_HUB?: DurableObjectNamespace;
   AIRLINE_LOGOS?: R2Bucket;
   ASSETS: Fetcher;
-  FR24_API_KEY: string;
   FR24_API_BASE_URL?: string;
   FR24_LIVE_ENDPOINT?: string;
   FR24_FOLLOW_ENDPOINT?: string;
@@ -73,6 +72,12 @@ type HomeyAuthResult = {
   screenLookupSucceeded: boolean;
   tokenRecordFound: boolean;
   failureReason?: "missing-screen-id" | "default-screen-not-supported" | "screen-owner-not-found" | "homey-token-not-found" | "token-mismatch";
+};
+
+type AdminUiSettings = {
+  showEmulator: boolean;
+  updatedAt?: string;
+  updatedBy?: string;
 };
 
 type ProvisionRecord = {
@@ -453,9 +458,11 @@ const CONFIG_KEY = "config:v1";
 const SCREEN_STATE_KEY = "screen-state:v1";
 const HOMEY_TOKEN_KEY = "homey-token:v1";
 const ACCOUNT_FR24_SECRET_KEY = "secret:fr24-api-key:v1";
+const ACCOUNT_FR24_USAGE_CACHE_KEY = "fr24-usage-cache:v1";
 const SOUND_STATE_KEY = "sound-state:v1";
 const DEVICE_STATUS_KEY = "device-status:v1";
 const DEVICE_COMMAND_KEY = "device-command:v1";
+const ADMIN_UI_SETTINGS_KEY = "admin:ui:v1";
 const DEFAULT_SCREEN_ID = "main";
 const PROVISION_TTL_SECONDS = 15 * 60;
 const DEVICE_TOKEN_BYTES = 32;
@@ -598,16 +605,7 @@ export class RealtimeHub implements DurableObject {
 
   async webSocketMessage(socket: WebSocket, message: ArrayBuffer | string): Promise<void> {
     void socket;
-    if (typeof message !== "string") return;
-    try {
-      const event = JSON.parse(message) as RealtimeEvent & Record<string, unknown>;
-      if (event.type === "device_status") {
-        const status = normalizeDeviceStatus(event, new Date().toISOString());
-        await this.env.FLIGHT_DISPLAY_KV.put(DEVICE_STATUS_KEY, JSON.stringify(status));
-      }
-    } catch {
-      // Ignore malformed device telemetry; realtime control messages should keep flowing.
-    }
+    void message;
   }
 
   async webSocketClose(socket: WebSocket): Promise<void> {
@@ -679,6 +677,7 @@ export default {
       if (url.pathname.match(/^\/api\/screens\/[^/]+\/fr24-key$/) && request.method === "POST") return saveFr24Key(request, env, context);
       if (url.pathname === "/api/account/fr24-key" && request.method === "GET") return fr24KeyStatusResponse(env, context);
       if (url.pathname === "/api/account/fr24-key" && request.method === "POST") return saveFr24Key(request, env, context);
+      if (url.pathname === "/api/account/fr24-usage" && request.method === "GET") return fr24UsageResponse(env, context);
       if (url.pathname === "/api/account/homey-token/rotate" && request.method === "POST") return rotateHomeyToken(request, env, context);
       if (url.pathname.match(/^\/api\/screens\/[^/]+\/display$/) && request.method === "GET") return flightsResponse(env, true, context);
       if (url.pathname.match(/^\/api\/screens\/[^/]+\/device-status$/) && request.method === "GET") return deviceStatusResponse(env, context);
@@ -694,7 +693,10 @@ export default {
       if (url.pathname === "/api/firmware/latest" && request.method === "GET") return firmwareLatestResponse(request, env);
       if (url.pathname === "/api/sound-state" && request.method === "GET") return soundStateResponse(env, context);
       if (url.pathname === "/api/logo-status" && request.method === "GET") return logoStatusResponse(env);
+      if (url.pathname === "/api/ui-settings" && request.method === "GET") return publicUiSettingsResponse(env);
       if (url.pathname === "/api/admin/screens" && request.method === "GET") return adminScreensResponse(request, env, context);
+      if (url.pathname === "/api/admin/ui-settings" && request.method === "GET") return adminUiSettingsResponse(request, env, context);
+      if (url.pathname === "/api/admin/ui-settings" && request.method === "POST") return saveAdminUiSettings(request, env, context);
       if (url.pathname.match(/^\/api\/admin\/screens\/[^/]+$/) && request.method === "DELETE") return deleteAdminScreen(request, env, context, url.pathname);
       if (url.pathname.match(/^\/api\/admin\/screens\/[^/]+\/command$/) && request.method === "POST") return adminDeviceCommand(request, env, context, url.pathname);
       if (url.pathname === "/api/admin/screen-state/toggle" && request.method === "POST") return toggleScreenState(env, context);
@@ -890,10 +892,6 @@ function deviceTokenKey(tokenHash: string): string {
 
 function deviceRecordKey(deviceId: string): string {
   return `device:v1:${deviceId}`;
-}
-
-function fr24ScreenSecretKey(screenId: string): string {
-  return `screen:${screenId}:secret:fr24-api-key:v1`;
 }
 
 function accountScopedKey(baseKey: string, email: string): string {
@@ -1399,6 +1397,50 @@ async function adminScreensResponse(request: Request, env: Env, context?: Reques
   }, 200, { "Cache-Control": "no-store" });
 }
 
+function normalizeAdminUiSettings(value: unknown): AdminUiSettings {
+  const v = value && typeof value === "object" ? value as Partial<AdminUiSettings> : {};
+  return {
+    showEmulator: v.showEmulator === true,
+    updatedAt: typeof v.updatedAt === "string" && v.updatedAt ? v.updatedAt : undefined,
+    updatedBy: typeof v.updatedBy === "string" && v.updatedBy ? v.updatedBy.slice(0, 120) : undefined
+  };
+}
+
+async function getAdminUiSettings(env: Env): Promise<AdminUiSettings> {
+  const stored = await env.FLIGHT_DISPLAY_KV.get(ADMIN_UI_SETTINGS_KEY, "json");
+  return normalizeAdminUiSettings(stored);
+}
+
+async function adminUiSettingsResponse(request: Request, env: Env, context?: RequestContext): Promise<Response> {
+  const authFailure = requireAdminUser(request, env, context);
+  if (authFailure) return authFailure;
+  const settings = await getAdminUiSettings(env);
+  return jsonResponse({ ...settings, isAdmin: true }, 200, { "Cache-Control": "no-store" });
+}
+
+async function publicUiSettingsResponse(env: Env): Promise<Response> {
+  const settings = await getAdminUiSettings(env);
+  return jsonResponse({
+    showEmulator: settings.showEmulator,
+    updatedAt: settings.updatedAt
+  }, 200, { "Cache-Control": "no-store" });
+}
+
+async function saveAdminUiSettings(request: Request, env: Env, context?: RequestContext): Promise<Response> {
+  const authFailure = requireAdminUser(request, env, context);
+  if (authFailure) return authFailure;
+  const body = await readJsonObject(request);
+  const previous = await getAdminUiSettings(env);
+  const next: AdminUiSettings = {
+    ...previous,
+    showEmulator: body.showEmulator === true,
+    updatedAt: new Date().toISOString(),
+    updatedBy: normalizeEmail(context?.userEmail) || "admin"
+  };
+  await env.FLIGHT_DISPLAY_KV.put(ADMIN_UI_SETTINGS_KEY, JSON.stringify(next));
+  return jsonResponse({ ...next, isAdmin: true }, 200, { "Cache-Control": "no-store" });
+}
+
 async function sendDeviceCommand(request: Request, env: Env, context?: RequestContext): Promise<Response> {
   const authFailure = requireAuthenticatedUser(context);
   if (authFailure) return authFailure;
@@ -1880,21 +1922,11 @@ async function fr24KeyStatus(env: Env, context?: RequestContext): Promise<{ conf
     }
   }
 
-  if (!screenId || screenId === DEFAULT_SCREEN_ID) {
-    const configured = Boolean(normalizeSecretString(env.FR24_API_KEY));
-    return {
-      configured,
-      screenConfigured: configured,
-      source: configured ? "worker-secret" : "missing"
-    };
-  }
-
-  const stored = await env.FLIGHT_DISPLAY_KV.get(fr24ScreenSecretKey(screenId));
   return {
-    configured: Boolean(stored),
-    screenConfigured: Boolean(stored),
-    source: stored ? "legacy-screen" : "missing",
-    screenId
+    configured: false,
+    screenConfigured: false,
+    source: "missing",
+    ...(screenId ? { screenId } : {})
   };
 }
 
@@ -1919,6 +1951,115 @@ async function saveFr24Key(request: Request, env: Env, context?: RequestContext)
     screenConfigured: true,
     source: "account"
   }, 200, { "Cache-Control": "no-store" });
+}
+
+type Fr24UsageEndpointSummary = {
+  endpoint: string;
+  requestCount: number;
+  credits: number;
+};
+
+type Fr24UsageSummary = {
+  configured: boolean;
+  period: {
+    from: string;
+    to: string;
+    hours: number;
+  };
+  updatedAt: string;
+  cached?: boolean;
+  totalCredits: number;
+  totalRequests: number;
+  endpoints: Fr24UsageEndpointSummary[];
+};
+
+async function fr24UsageResponse(env: Env, context?: RequestContext): Promise<Response> {
+  const authFailure = requireAuthenticatedUser(context);
+  if (authFailure) return authFailure;
+
+  const userEmail = normalizeEmail(context?.userEmail);
+  if (!userEmail) return jsonResponse({ error: "Login required" }, 401, { "Cache-Control": "no-store" });
+
+  const apiKey = await getFr24ApiKey(env, { ...context, userEmail });
+  const now = new Date();
+  const period = {
+    from: new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString(),
+    to: now.toISOString(),
+    hours: 24
+  };
+  if (!apiKey) {
+    return jsonResponse({
+      configured: false,
+      period,
+      updatedAt: now.toISOString(),
+      totalCredits: 0,
+      totalRequests: 0,
+      endpoints: []
+    }, 200, { "Cache-Control": "no-store" });
+  }
+
+  const cacheKey = accountScopedKey(ACCOUNT_FR24_USAGE_CACHE_KEY, userEmail);
+  const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json") as (Fr24UsageSummary & { cacheUntil?: string }) | null;
+  if (cached?.cacheUntil && Date.parse(cached.cacheUntil) > Date.now()) {
+    const { cacheUntil: _cacheUntil, ...summary } = cached;
+    return jsonResponse({ ...summary, cached: true }, 200, { "Cache-Control": "no-store" });
+  }
+
+  const baseUrl = env.FR24_API_BASE_URL || "https://fr24api.flightradar24.com/api";
+  const url = new URL(`${baseUrl}/usage`);
+  url.searchParams.set("from", period.from);
+  url.searchParams.set("to", period.to);
+
+  const response = await fetch(url, {
+    headers: {
+      Accept: "application/json",
+      "Accept-Version": "v1",
+      Authorization: `Bearer ${apiKey}`
+    }
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    return jsonResponse({
+      configured: true,
+      period,
+      updatedAt: now.toISOString(),
+      totalCredits: 0,
+      totalRequests: 0,
+      endpoints: [],
+      error: `FR24 usage failed (${response.status}): ${text.slice(0, 240)}`
+    }, response.status === 401 || response.status === 402 ? 200 : response.status, { "Cache-Control": "no-store" });
+  }
+
+  const json = await response.json();
+  const endpoints = normalizeFr24UsageEndpoints(json);
+  const summary: Fr24UsageSummary & { cacheUntil: string } = {
+    configured: true,
+    period,
+    updatedAt: now.toISOString(),
+    totalCredits: endpoints.reduce((sum, item) => sum + item.credits, 0),
+    totalRequests: endpoints.reduce((sum, item) => sum + item.requestCount, 0),
+    endpoints,
+    cacheUntil: new Date(Date.now() + 60 * 1000).toISOString()
+  };
+  await env.FLIGHT_DISPLAY_KV.put(cacheKey, JSON.stringify(summary), { expirationTtl: 120 });
+  const { cacheUntil: _cacheUntil, ...publicSummary } = summary;
+  return jsonResponse(publicSummary, 200, { "Cache-Control": "no-store" });
+}
+
+function normalizeFr24UsageEndpoints(value: unknown): Fr24UsageEndpointSummary[] {
+  const rawRows = value && typeof value === "object" && Array.isArray((value as { data?: unknown[] }).data)
+    ? (value as { data: unknown[] }).data
+    : Array.isArray(value) ? value : [];
+
+  return rawRows.map((row) => {
+    const record = row && typeof row === "object" ? row as Record<string, unknown> : {};
+    return {
+      endpoint: firstString(record, ["endpoint", "path", "url"]) || "unknown",
+      requestCount: Math.max(0, Math.round(firstNumber(record, ["request_count", "requestCount", "requests"]) || 0)),
+      credits: Math.max(0, Math.round(firstNumber(record, ["credits", "total_credits", "totalCredits"]) || 0))
+    };
+  }).filter((row) => row.endpoint !== "unknown" || row.requestCount > 0 || row.credits > 0);
 }
 
 function publicProvisionRecord(record: ProvisionRecord): Record<string, unknown> {
@@ -3301,7 +3442,7 @@ async function getFlights(env: Env, config: Config, context?: RequestContext): P
   const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
   if (Array.isArray(cached)) {
     const flights = cached as DisplayFlight[];
-    await enrichAirlineNames(env, flights);
+    await enrichAirlineNames(env, flights, context);
     return flights;
   }
 
@@ -3315,8 +3456,8 @@ async function getFlights(env: Env, config: Config, context?: RequestContext): P
     .filter((flight) => flight.distanceKm <= config.radiusKm)
     .sort((a, b) => a.distanceKm - b.distanceKm);
 
-  await enrichAirlineNames(env, flights);
-  await enrichAirportContext(env, config, flights);
+  await enrichAirlineNames(env, flights, context);
+  await enrichAirportContext(env, config, flights, context);
   await env.FLIGHT_DISPLAY_KV.put(cacheKey, JSON.stringify(flights), { expirationTtl: cacheTtl });
   return flights;
 }
@@ -3382,8 +3523,8 @@ async function getTargetedFollowFlights(env: Env, config: Config, tokens: string
     .filter((flight): flight is DisplayFlight => Boolean(flight));
   const flights = mergeFollowStaticFlights(liveFlights, staticFlights);
 
-  await enrichAirlineNames(env, flights);
-  await enrichAirportContext(env, config, flights);
+  await enrichAirlineNames(env, flights, context);
+  await enrichAirportContext(env, config, flights, context);
   await env.FLIGHT_DISPLAY_KV.put(cacheKey, JSON.stringify(flights), { expirationTtl: cacheTtl });
   return flights;
 }
@@ -4169,12 +4310,7 @@ async function getFr24ApiKey(env: Env, context?: RequestContext): Promise<string
     const accountStored = await env.FLIGHT_DISPLAY_KV.get(accountScopedKey(ACCOUNT_FR24_SECRET_KEY, userEmail));
     if (accountStored) return decryptSecret(env, accountStored);
   }
-  if (screenId && screenId !== DEFAULT_SCREEN_ID) {
-    const stored = await env.FLIGHT_DISPLAY_KV.get(fr24ScreenSecretKey(screenId));
-    if (stored) return decryptSecret(env, stored);
-    return undefined;
-  }
-  return normalizeSecretString(env.FR24_API_KEY);
+  return undefined;
 }
 
 function normalizeFlight(record: unknown, config: Config, fallbackFlight?: string): DisplayFlight | null {
@@ -4270,7 +4406,7 @@ function firstAircraftCategory(record: Record<string, unknown>): AircraftCategor
   ]));
 }
 
-async function enrichAirlineNames(env: Env, flights: DisplayFlight[]): Promise<void> {
+async function enrichAirlineNames(env: Env, flights: DisplayFlight[], context?: RequestContext): Promise<void> {
   const iataCodes = Array.from(
     new Set(
       flights
@@ -4292,7 +4428,7 @@ async function enrichAirlineNames(env: Env, flights: DisplayFlight[]): Promise<v
     )
   );
 
-  const names = await Promise.all(codes.map((code) => getAirlineName(env, code)));
+  const names = await Promise.all(codes.map((code) => getAirlineName(env, code, context)));
   const nameByCode = new Map<string, string>();
   codes.forEach((code, index) => {
     if (names[index]) nameByCode.set(code, names[index]);
@@ -4355,11 +4491,14 @@ async function getAvinorAirlineNames(env: Env): Promise<Record<string, string>> 
   return names;
 }
 
-async function getAirlineName(env: Env, icao: string): Promise<string | undefined> {
+async function getAirlineName(env: Env, icao: string, context?: RequestContext): Promise<string | undefined> {
   const code = icao.toUpperCase();
   const cacheKey = `airline:v1:${code}`;
   const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey);
   if (cached) return cached;
+
+  const apiKey = await getFr24ApiKey(env, context);
+  if (!apiKey) return undefined;
 
   const baseUrl = env.FR24_API_BASE_URL || "https://fr24api.flightradar24.com/api";
   const template = env.FR24_AIRLINE_ENDPOINT_TEMPLATE || "/static/airlines/{icao}/light";
@@ -4368,7 +4507,7 @@ async function getAirlineName(env: Env, icao: string): Promise<string | undefine
     headers: {
       Accept: "application/json",
       "Accept-Version": "v1",
-      Authorization: `Bearer ${env.FR24_API_KEY}`
+      Authorization: `Bearer ${apiKey}`
     }
   });
 
@@ -4397,7 +4536,7 @@ function extractAirlineName(value: unknown): string | undefined {
   return firstString(record, ["name", "full_name", "airline_name", "display_name", "legal_name"]);
 }
 
-async function enrichAirportContext(env: Env, config: Config, flights: DisplayFlight[]): Promise<void> {
+async function enrichAirportContext(env: Env, config: Config, flights: DisplayFlight[], context?: RequestContext): Promise<void> {
   const home = (config.homeAirportIata || env.HOME_AIRPORT_IATA || "OSL").toUpperCase();
   const neededCodes = new Set<string>();
 
@@ -4414,7 +4553,7 @@ async function enrichAirportContext(env: Env, config: Config, flights: DisplayFl
   }
 
   const codes = Array.from(neededCodes);
-  const names = await Promise.all(codes.map((code) => getAirportDisplayName(env, code)));
+  const names = await Promise.all(codes.map((code) => getAirportDisplayName(env, code, context)));
   const nameByCode = new Map<string, string>();
   codes.forEach((code, index) => {
     if (names[index]) nameByCode.set(code, names[index]);
@@ -4427,7 +4566,7 @@ async function enrichAirportContext(env: Env, config: Config, flights: DisplayFl
   }
 }
 
-async function getAirportDisplayName(env: Env, code: string): Promise<string | undefined> {
+async function getAirportDisplayName(env: Env, code: string, context?: RequestContext): Promise<string | undefined> {
   const normalized = code.toUpperCase();
   const cacheKey = `airport:v4:${normalized}`;
   const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey);
@@ -4448,6 +4587,9 @@ async function getAirportDisplayName(env: Env, code: string): Promise<string | u
     }
   }
 
+  const apiKey = await getFr24ApiKey(env, context);
+  if (!apiKey) return undefined;
+
   const baseUrl = env.FR24_API_BASE_URL || "https://fr24api.flightradar24.com/api";
   const template = env.FR24_AIRPORT_ENDPOINT_TEMPLATE || "/static/airports/{code}/light";
   const path = template.replace("{code}", encodeURIComponent(normalized));
@@ -4455,7 +4597,7 @@ async function getAirportDisplayName(env: Env, code: string): Promise<string | u
     headers: {
       Accept: "application/json",
       "Accept-Version": "v1",
-      Authorization: `Bearer ${env.FR24_API_KEY}`
+      Authorization: `Bearer ${apiKey}`
     }
   });
 
@@ -4577,24 +4719,27 @@ function renderAdminHtml(request: Request, userEmail: string): string {
   <title>SkyFrame admin</title>
   <style>
     :root{color-scheme:light;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--bg:#f2ece8;--ink:#3c2415;--muted:#6b5d52;--line:rgba(60,36,21,.16);--panel:#fffaf5;--accent:#3478f6;--ok:#008f5a;--warn:#b36b00;--danger:#b42318}
-    *{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#f8f4ef,#ddd7d2);color:var(--ink)}main{width:min(1180px,100%);margin:0 auto;padding:28px 20px 48px}.top{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:22px}.skyframe-logo{width:245px;max-width:70vw;height:auto}h1{margin:10px 0 0;font-size:42px;line-height:1}.lead{margin:8px 0 0;color:var(--muted);font-size:15px}.user{display:grid;justify-items:end;gap:4px;border:1px solid var(--line);border-radius:8px;padding:9px 12px;background:rgba(255,255,255,.6);color:var(--muted);font-size:13px}.user a{font-size:12px}.toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:18px 0}.status{color:var(--muted);font-size:13px}button{border:0;border-radius:8px;background:var(--ink);color:white;font:inherit;font-weight:800;padding:10px 14px;cursor:pointer}.danger{background:rgba(180,35,24,.1);color:var(--danger);border:1px solid rgba(180,35,24,.22)}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:8px;background:rgba(255,250,245,.86);box-shadow:0 24px 64px rgba(34,20,12,.12)}table{width:100%;border-collapse:collapse;min-width:1040px}th,td{padding:12px 14px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;font-size:13px}th{background:#c1b4ac;color:var(--ink);font-size:12px;text-transform:uppercase;letter-spacing:.06em}tr:last-child td{border-bottom:0}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;overflow-wrap:anywhere}.muted{color:var(--muted)}.pill{display:inline-flex;align-items:center;border-radius:999px;padding:3px 8px;font-weight:800;font-size:11px;background:#eee;color:var(--muted)}.pill.ok{background:rgba(0,143,90,.12);color:var(--ok)}.pill.warn{background:rgba(179,107,0,.12);color:var(--warn)}.pill.danger{background:rgba(180,35,24,.1);color:var(--danger);border:0}a{color:var(--accent);font-weight:800;text-decoration:none}.vitals{display:grid;gap:4px;color:var(--muted)}@media(max-width:700px){.top{display:grid}.skyframe-logo{width:210px}h1{font-size:32px}}
+    *{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#f8f4ef,#ddd7d2);color:var(--ink)}main{width:min(1180px,100%);margin:0 auto;padding:28px 20px 48px}.top{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:22px}.skyframe-logo{width:245px;max-width:70vw;height:auto}h1{margin:10px 0 0;font-size:42px;line-height:1}.lead{margin:8px 0 0;color:var(--muted);font-size:15px}.user{display:grid;justify-items:end;gap:4px;border:1px solid var(--line);border-radius:8px;padding:9px 12px;background:rgba(255,255,255,.6);color:var(--muted);font-size:13px}.user a{font-size:12px}.toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:18px 0;flex-wrap:wrap}.toolbar-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.status{color:var(--muted);font-size:13px}button{border:0;border-radius:8px;background:var(--ink);color:white;font:inherit;font-weight:800;padding:10px 14px;cursor:pointer}.secondary{background:rgba(255,255,255,.62);color:var(--ink);border:1px solid var(--line)}.secondary.active{background:rgba(0,143,90,.13);color:var(--ok);border-color:rgba(0,143,90,.26)}.danger{background:rgba(180,35,24,.1);color:var(--danger);border:1px solid rgba(180,35,24,.22)}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:8px;background:rgba(255,250,245,.86);box-shadow:0 24px 64px rgba(34,20,12,.12)}table{width:100%;border-collapse:collapse;min-width:1040px}th,td{padding:12px 14px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;font-size:13px}th{background:#c1b4ac;color:var(--ink);font-size:12px;text-transform:uppercase;letter-spacing:.06em}tr:last-child td{border-bottom:0}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;overflow-wrap:anywhere}.muted{color:var(--muted)}.pill{display:inline-flex;align-items:center;border-radius:999px;padding:3px 8px;font-weight:800;font-size:11px;background:#eee;color:var(--muted)}.pill.ok{background:rgba(0,143,90,.12);color:var(--ok)}.pill.warn{background:rgba(179,107,0,.12);color:var(--warn)}.pill.danger{background:rgba(180,35,24,.1);color:var(--danger);border:0}a{color:var(--accent);font-weight:800;text-decoration:none}.vitals{display:grid;gap:4px;color:var(--muted)}@media(max-width:700px){.top{display:grid}.skyframe-logo{width:210px}h1{font-size:32px}}
   </style>
 </head>
 <body>
   <main>
     <div class="top"><div>${skyFrameLogoMarkup()}<h1>Admin</h1><p class="lead">Screens, owners, FR24 status and device vitals.</p></div><div class="user"><span>${escapeHtml(userEmail)}</span><a href="${logoutUrl}">Log out</a></div></div>
-    <div class="toolbar"><div id="status" class="status">Loading screens...</div><button id="refresh" type="button">Refresh</button></div>
+    <div class="toolbar"><div id="status" class="status">Loading screens...</div><div class="toolbar-actions"><button id="emulatorToggle" class="secondary" type="button">Show emulator: loading</button><button id="refresh" type="button">Refresh</button></div></div>
     <div class="table-wrap"><table><thead><tr><th>Screen</th><th>Owner</th><th>Mode</th><th>FR24</th><th>Screen state</th><th>Vitals</th><th>Actions</th></tr></thead><tbody id="rows"></tbody></table></div>
   </main>
   <script>
     const rows = document.querySelector("#rows");
     const status = document.querySelector("#status");
+    const emulatorToggle = document.querySelector("#emulatorToggle");
+    let uiSettings = { showEmulator: false };
     document.querySelector("#refresh").addEventListener("click", load);
+    emulatorToggle.addEventListener("click", toggleEmulator);
     function esc(value){return String(value ?? "").replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));}
     function date(value){if(!value)return "never";const d=new Date(value);return Number.isNaN(d.getTime())?"never":d.toLocaleString();}
     function mode(value){return ({airspace:"AirSpace",hybrid:"AirSpace + Airport Board",airport_board:"Airport Board",clock:"Clock"}[value]||"Not set");}
     function stateLabel(value){return value===false?"Screen off":"Screen on";}
-    function source(value){return ({screen:"Personal key",missing:"No key",["worker-secret"]:"Shared Worker key"}[value]||value||"No key");}
+    function source(value){return ({account:"Account key",missing:"No key"}[value]||value||"No key");}
     function freshness(value){if(!value)return ["No heartbeat","warn"];const t=Date.parse(value);if(!Number.isFinite(t))return ["Unknown","warn"];const mins=Math.round((Date.now()-t)/60000);if(mins<=4)return ["Online","ok"];return ["Last seen "+mins+" min ago","warn"];}
     function vitalLine(label,value){return "<span><strong>"+esc(label)+":</strong> "+esc(value ?? "-")+"</span>";}
     rows.addEventListener("click", async (event)=>{
@@ -4621,6 +4766,27 @@ function renderAdminHtml(request: Request, userEmail: string): string {
         await load();
       }
     });
+    function renderUiSettings(){
+      emulatorToggle.textContent = "Show emulator: " + (uiSettings.showEmulator ? "on" : "off");
+      emulatorToggle.classList.toggle("active", Boolean(uiSettings.showEmulator));
+    }
+    async function loadUiSettings(){
+      const res=await fetch("/api/admin/ui-settings");
+      const data=await res.json().catch(()=>({}));
+      if(!res.ok){emulatorToggle.textContent="Show emulator: unavailable";emulatorToggle.disabled=true;return;}
+      uiSettings=data;
+      renderUiSettings();
+    }
+    async function toggleEmulator(){
+      emulatorToggle.disabled=true;
+      const next=!uiSettings.showEmulator;
+      const res=await fetch("/api/admin/ui-settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({showEmulator:next})});
+      const data=await res.json().catch(()=>({}));
+      emulatorToggle.disabled=false;
+      if(!res.ok){alert(data.error||"Could not update emulator setting");return;}
+      uiSettings=data;
+      renderUiSettings();
+    }
     async function load(){
       status.textContent="Loading screens...";
       const res=await fetch("/api/admin/screens");
@@ -4633,7 +4799,7 @@ function renderAdminHtml(request: Request, userEmail: string): string {
         const fr24=screen.fr24&&screen.fr24.screenConfigured;
         const fresh=freshness(vitals.updatedAt);
         return "<tr>"
-          +"<td><div class='mono'>"+esc(screen.screenId)+"</div><div>"+esc(screen.label)+"</div><div class='mono'>"+esc(screen.deviceId)+"</div></td>"
+          +"<td><div class='mono'>"+esc(screen.screenId)+"</div><div>"+esc(screen.label)+"</div></td>"
           +"<td>"+esc(screen.ownerEmail||"-")+"<div class='mono'>paired "+esc(date(screen.pairedAt))+"</div></td>"
           +"<td>"+esc(mode(screen.displayMode))+"</td>"
           +"<td><span class='pill "+(fr24?"ok":"warn")+"'>"+esc(source(screen.fr24&&screen.fr24.source))+"</span></td>"
@@ -4644,6 +4810,7 @@ function renderAdminHtml(request: Request, userEmail: string): string {
       }).join("")||"<tr><td colspan='7'>No paired screens yet.</td></tr>";
     }
     load();
+    loadUiSettings();
   </script>
 </body>
 </html>`;
@@ -4757,7 +4924,7 @@ function renderScreenSetupHtml(userEmail: string): string {
       <div><h1>Pair your screen.</h1><p class="lead">Enter the code shown on the display. FR24 and Homey are managed from your account after pairing.</p></div>
       <div class="panel"><div class="panel-header"><div><p class="panel-title">Screen setup</p><p class="panel-subtitle">Use the code currently shown on the LED panel.</p></div></div><div class="panel-body">
         <div class="step"><div class="step-number">1</div><div><h2>Pair the display</h2><p>The screen waits here until this code is claimed.</p></div></div>
-        <div class="form"><label>Pairing code<input id="pairingCode" class="pair-code" placeholder="SKY-123456" autocomplete="one-time-code" inputmode="numeric"></label><label>Screen name<input id="screenLabel" placeholder="Kitchen, office, cabin"></label><button id="claimButton">Pair screen</button></div>
+        <div class="form"><label>Pairing code<input id="pairingCode" class="pair-code" placeholder="SKY-123456" autocomplete="one-time-code" inputmode="numeric"></label><label>Device name<input id="screenLabel" placeholder="Kitchen, office, cabin"></label><button id="claimButton">Pair screen</button></div>
         <div id="afterPairing" class="after-pairing" hidden>
           <div class="success-card"><strong>Screen paired</strong><span id="pairedScreenId">Ready for the control panel</span></div>
           <div class="actions"><button id="openConfigButton" type="button">Open control panel</button></div>

@@ -118,10 +118,10 @@ a {
 }
 
 .skeleton-block {
-  border-radius: 14px;
-  background: linear-gradient(90deg, rgba(255, 255, 255, 0.46), rgba(193, 180, 172, 0.42), rgba(255, 255, 255, 0.46));
+  border-radius: 8px;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.56), rgba(193, 180, 172, 0.38), rgba(255, 255, 255, 0.56));
   background-size: 220% 100%;
-  animation: skeleton-shimmer 1.25s ease-in-out infinite;
+  animation: skeleton-shimmer 1.35s ease-in-out infinite;
   border: 1px solid rgba(60, 36, 21, 0.08);
 }
 
@@ -131,5 +131,11 @@ a {
   }
   100% {
     background-position: -120% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-block {
+    animation: none;
   }
 }

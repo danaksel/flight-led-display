@@ -4,6 +4,8 @@ import worker, { type Env } from "./index";
 const CONFIG_KEY = "config:v1";
 const SCREEN_STATE_KEY = "screen-state:v1";
 const HOMEY_TOKEN_KEY = "homey-token:v1";
+const ACCOUNT_FR24_SECRET_KEY = "secret:fr24-api-key:v1";
+const TEST_USER_EMAIL = "test@example.com";
 
 class MemoryKv {
   private values = new Map<string, string>();
@@ -66,7 +68,6 @@ function makeEnv(overrides: Partial<Env> = {}, kvValues: Record<string, unknown>
     ASSETS: {
       fetch: vi.fn(async () => new Response(null, { status: 404 }))
     } as unknown as Fetcher,
-    FR24_API_KEY: "test-fr24-key",
     HOME_AIRPORT_IATA: "OSL",
     DEFAULT_LAT: "59.9139",
     DEFAULT_LON: "10.7522",
@@ -79,6 +80,23 @@ function makeEnv(overrides: Partial<Env> = {}, kvValues: Record<string, unknown>
 
 async function request(path: string, env: Env, init: RequestInit = {}): Promise<Response> {
   return worker.fetch(new Request(`https://example.test${path}`, init), env);
+}
+
+async function userRequest(path: string, env: Env, init: RequestInit = {}): Promise<Response> {
+  return request(path, env, {
+    ...init,
+    headers: {
+      ...(init.headers || {}),
+      "X-SkyFrame-User-Email": TEST_USER_EMAIL
+    }
+  });
+}
+
+function accountFr24KeyValues(kvValues: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    [`account:${TEST_USER_EMAIL}:${ACCOUNT_FR24_SECRET_KEY}`]: "test-fr24-key",
+    ...kvValues
+  };
 }
 
 afterEach(() => {
@@ -428,11 +446,11 @@ describe("display polling contract", () => {
     const env = makeEnv({
       FR24_LIVE_ENDPOINT: "/live/flight-positions/full",
       FR24_FOLLOW_ENDPOINT: "/live/flight-positions/light"
-    }, {
+    }, accountFr24KeyValues({
       [CONFIG_KEY]: config
-    });
+    }));
 
-    const firstResponse = await request("/api/display", env);
+    const firstResponse = await userRequest("/api/display", env);
     expect(firstResponse.status).toBe(200);
     expect(fetchedUrls.filter((url) => url.includes("/live/flight-positions/full"))).toHaveLength(1);
     expect(fetchedUrls.filter((url) => url.includes("/live/flight-positions/light"))).toHaveLength(1);
@@ -440,7 +458,7 @@ describe("display polling contract", () => {
     await (env.FLIGHT_DISPLAY_KV as unknown as MemoryKv).delete("follow:fr24:v4:SK123");
     fetchedUrls.length = 0;
 
-    const secondResponse = await request("/api/display", env);
+    const secondResponse = await userRequest("/api/display", env);
     const secondJson = await secondResponse.json() as { flights?: Array<Record<string, unknown>> };
 
     expect(secondResponse.status).toBe(200);
@@ -518,11 +536,11 @@ describe("display polling contract", () => {
       });
     });
 
-    const env = makeEnv({}, {
+    const env = makeEnv({}, accountFr24KeyValues({
       [CONFIG_KEY]: baseConfig()
-    });
+    }));
 
-    const response = await request("/api/display", env);
+    const response = await userRequest("/api/display", env);
     const json = await response.json() as { flights?: Array<Record<string, unknown>> };
 
     expect(response.status).toBe(200);
@@ -579,11 +597,11 @@ describe("display polling contract", () => {
       ...(config.device as Record<string, unknown>),
       allowedAircraftCategories: ["P", "T"]
     };
-    const env = makeEnv({}, {
+    const env = makeEnv({}, accountFr24KeyValues({
       [CONFIG_KEY]: config
-    });
+    }));
 
-    const response = await request("/api/display", env);
+    const response = await userRequest("/api/display", env);
     const json = await response.json() as { flights?: Array<Record<string, unknown>> };
 
     expect(response.status).toBe(200);

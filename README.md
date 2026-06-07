@@ -45,7 +45,7 @@ skyframe.danaksel.no/start
 
 The setup URL scrolls on the panel so the full `/start` path is visible.
 
-5. Customer opens `https://skyframe.danaksel.no/start`, signs in with Google, enters the pairing code and gives the screen a location name.
+5. Customer opens `https://skyframe.danaksel.no/start`, signs in with Google, enters the pairing code and gives the screen a device name.
 6. FR24 is optional. Without a personal FR24 key, the control panel disables AirSpace, Follow Flight and AirSpace + Airport Board. Airport Board and Clock still work.
 7. Later changes happen from the control panel. The device should not need to be connected to a PC again for normal ownership, Wi-Fi or restart tasks.
 
@@ -74,7 +74,7 @@ Global/shared resources:
 Per-screen/private resources:
 
 - Device token
-- Screen config and location label
+- Screen config and device name
 - Screen state and vitals
 - Personal FR24 key
 
@@ -241,11 +241,10 @@ Set these in Cloudflare:
 ```bash
 cd cloudflare-worker
 npx wrangler secret put CREDENTIAL_ENCRYPTION_KEY
-npx wrangler secret put FR24_API_KEY
 npx wrangler secret put AVIATIONSTACK_API_KEY
 ```
 
-`FR24_API_KEY` is only a shared fallback. Customer screens should normally use the owner's FR24 key from the account panel in the control panel. The key is account-scoped, so it survives screen unpairing, Wi-Fi changes, factory reset and re-pairing.
+FR24 keys are account-scoped. Each owner adds their own FR24 key from the account panel in the control panel, and that key follows the account across screen unpairing, Wi-Fi changes, factory reset and re-pairing.
 
 Optional automation/device hardening:
 
@@ -273,7 +272,7 @@ The Worker validates `X-SkyFrame-Homey-Token`. `/api/screens/{screenId}/...` ali
 - New display without Wi-Fi shows setup mode and `CONNECT TO WIFI`.
 - After Wi-Fi, display shows only pairing information until a screen is paired.
 - `/start` pairs the screen and does not require FR24.
-- Control panel shows screen ID and location in the header.
+- Control panel shows the device name in the header.
 - Multiple screens owned by the same account can be selected from the header.
 - AirSpace and Follow modes are disabled until the screen has a personal FR24 key.
 - Header account icon opens the account panel with signed-in user, screens, FR24 and Homey token.

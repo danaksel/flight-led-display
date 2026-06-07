@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type TouchEvent, useEffect, useMemo, useRef, useState } from "react";
 import L from "leaflet";
 import { IconApi, IconClock, IconDisplay, IconMapPin, IconPlane, IconTimetable, SkyframeLogo } from "./components/Icons";
 
@@ -88,11 +88,37 @@ type Fr24KeyStatus = {
   screenId?: string;
 };
 
+type Fr24UsageEndpointSummary = {
+  endpoint: string;
+  requestCount: number;
+  credits: number;
+};
+
+type Fr24UsageSummary = {
+  configured: boolean;
+  period?: {
+    from: string;
+    to: string;
+    hours: number;
+  };
+  updatedAt?: string;
+  cached?: boolean;
+  totalCredits: number;
+  totalRequests: number;
+  endpoints: Fr24UsageEndpointSummary[];
+  error?: string;
+};
+
 type HomeyTokenStatus = {
   configured: boolean;
   token?: string;
   createdAt?: string;
   rotatedAt?: string | null;
+};
+
+type AdminUiSettings = {
+  showEmulator: boolean;
+  updatedAt?: string;
 };
 
 type DeviceCommand = "restart" | "ota_update" | "unpair" | "forget_wifi" | "factory_reset";
@@ -290,7 +316,7 @@ const sections: Section[] = [
   { id: "timetable", label: "AIRPORT BOARD", icon: IconTimetable },
   { id: "clock", label: "CLOCK", icon: IconClock },
   { id: "location", label: "LOCATION", icon: IconMapPin },
-  { id: "api", label: "API DATA", icon: IconApi }
+  { id: "api", label: "Homey Integration", icon: IconApi }
 ];
 
 const slideOrder: SectionId[] = ["display", "aircraft", "timetable", "clock", "location", "api"];
@@ -474,6 +500,7 @@ const appStyles = {
   header: {
     flexShrink: 0,
     background: "var(--secondary)",
+    marginBottom: "25px",
     padding: "max(16px, env(safe-area-inset-top)) 20px 16px"
   },
   navScroller: {
@@ -763,6 +790,10 @@ function shortTime(value: string | null | undefined): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "aldri";
   return new Intl.DateTimeFormat("nb-NO", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(date);
+}
+
+function formatCount(value: number | null | undefined): string {
+  return new Intl.NumberFormat("nb-NO").format(typeof value === "number" && Number.isFinite(value) ? value : 0);
 }
 
 function isRecentTimestamp(value: string | null | undefined, maxAgeMs: number): boolean {
@@ -1719,64 +1750,55 @@ function SelectInput(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
 
 function ToggleRow(props: { label: string; hint?: string; checked: boolean; onChange: (value: boolean) => void }) {
   return (
-    <label style={{ ...cardStyle("12px 14px"), display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", cursor: "pointer" }}>
+    <div style={{ ...cardStyle("12px 14px"), display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
       <span style={{ minWidth: 0, flex: "1 1 auto" }}>
         <span style={{ display: "block", fontSize: "14px" }}>{props.label}</span>
         {props.hint ? <span style={{ display: "block", marginTop: "4px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.4 }}>{props.hint}</span> : null}
       </span>
-      <span style={{ position: "relative", width: "46px", minWidth: "46px", flex: "0 0 46px", height: "28px", borderRadius: "999px", background: props.checked ? "var(--primary)" : "var(--secondary)", transition: "background 160ms ease" }}>
-        <input type="checkbox" checked={props.checked} onChange={(event) => props.onChange(event.target.checked)} style={{ position: "absolute", inset: 0, opacity: 0 }} />
-        <span style={{ position: "absolute", top: "3px", left: props.checked ? "21px" : "3px", width: "22px", height: "22px", borderRadius: "999px", background: "#fff", transition: "left 160ms ease" }} />
-      </span>
-    </label>
+      <SimpleSwitchControl checked={props.checked} label={props.label} onChange={props.onChange} />
+    </div>
   );
 }
 
-function SwitchControl(props: { checked: boolean; disabled?: boolean; label: string; onChange: (value: boolean) => void }) {
+function SimpleSwitchControl(props: { checked: boolean; disabled?: boolean; label: string; onChange: (value: boolean) => void }) {
   return (
-    <label
-      title={props.label}
+    <button
+      type="button"
+      role="switch"
+      aria-checked={props.checked}
+      aria-label={props.label}
+      disabled={props.disabled}
+      onClick={() => props.onChange(!props.checked)}
       style={{
-        display: "inline-block",
-        flex: "0 0 52px",
         position: "relative",
-        width: "52px",
-        minWidth: "52px",
-        height: "30px",
+        width: "46px",
+        minWidth: "46px",
+        height: "28px",
+        border: 0,
         borderRadius: "999px",
-        background: props.checked ? "var(--primary)" : "#c8c8c8",
-        border: "1px solid rgba(60, 36, 21, 0.18)",
+        padding: 0,
+        background: props.checked ? "#18c75a" : "var(--secondary)",
+        boxShadow: props.checked ? "0 0 0 4px rgba(24, 199, 90, 0.14)" : "inset 0 1px 2px rgba(34,20,12,0.12)",
         cursor: props.disabled ? "not-allowed" : "pointer",
-        opacity: props.disabled ? 0.62 : 1,
-        boxShadow: "inset 0 1px 2px rgba(34, 20, 12, 0.12)",
-        transition: "background 160ms ease, opacity 160ms ease, box-shadow 160ms ease"
+        opacity: props.disabled ? 0.55 : 1,
+        transition: "background 180ms ease, box-shadow 180ms ease, opacity 180ms ease"
       }}
     >
-      <input
-        type="checkbox"
-        checked={props.checked}
-        disabled={props.disabled}
-        aria-label={props.label}
-        onChange={(event) => props.onChange(event.target.checked)}
-        style={{ position: "absolute", inset: 0, opacity: 0, cursor: "inherit" }}
-      />
       <span
         style={{
           position: "absolute",
           top: "3px",
-          left: props.checked ? "25px" : "3px",
-          width: "24px",
-          height: "24px",
+          left: "3px",
+          width: "22px",
+          height: "22px",
           borderRadius: "999px",
           background: "#fff",
-          boxShadow: "0 3px 10px rgba(34, 20, 12, 0.18)",
-          transition: "left 160ms ease"
+          boxShadow: "0 2px 8px rgba(34,20,12,0.18)",
+          transform: props.checked ? "translateX(18px)" : "translateX(0)",
+          transition: "transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1)"
         }}
       />
-      {!props.checked ? (
-        <span style={{ position: "absolute", right: "8px", top: "7px", width: "12px", height: "12px", borderRadius: "999px", border: "1.5px solid rgba(60, 36, 21, 0.56)", borderLeftColor: "transparent", transform: "rotate(-25deg)" }} />
-      ) : null}
-    </label>
+    </button>
   );
 }
 
@@ -2325,17 +2347,20 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
 }
 
 function SkeletonBlock(props: { height: number; width?: string }) {
-  return <div className="skeleton-block" style={{ height: `${props.height}px`, width: props.width ?? "100%" }} />;
+  return <div className="skeleton-block" aria-hidden="true" style={{ height: `${props.height}px`, width: props.width ?? "100%" }} />;
 }
 
 function LoadingSkeleton() {
   return (
-    <div style={{ padding: "0 20px 168px", display: "grid", gap: "14px" }}>
-      <SkeletonBlock height={16} width="44%" />
-      <SkeletonBlock height={42} />
-      <SkeletonBlock height={82} />
-      <SkeletonBlock height={82} />
-      <SkeletonBlock height={112} />
+    <div aria-label="Loading control panel" style={{ padding: "0 20px 168px", display: "grid", gap: "14px" }}>
+      <SkeletonBlock height={46} />
+      <SkeletonBlock height={74} />
+      <div style={{ display: "grid", gap: "10px" }}>
+        <SkeletonBlock height={74} />
+        <SkeletonBlock height={74} />
+        <SkeletonBlock height={74} />
+      </div>
+      <SkeletonBlock height={118} />
     </div>
   );
 }
@@ -2354,15 +2379,20 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
   const [accountModalOpen, setAccountModalOpen] = useState(false);
+  const [adminUiSettings, setAdminUiSettings] = useState<AdminUiSettings | null>(null);
+  const [fr24Usage, setFr24Usage] = useState<Fr24UsageSummary | null>(null);
+  const [fr24UsageLoading, setFr24UsageLoading] = useState(false);
+  const [pullRefresh, setPullRefresh] = useState({ distance: 0, refreshing: false });
   const slidesRef = useRef<HTMLDivElement | null>(null);
   const navRef = useRef<HTMLDivElement | null>(null);
   const navDragRef = useRef({ active: false, pointerId: -1, x: 0, left: 0, moved: false, pressedIndex: -1 });
+  const pullRefreshRef = useRef({ active: false, startY: 0, startX: 0, distance: 0, slide: null as HTMLElement | null });
   const isDirty = configSignature(config) !== savedConfigSignature;
   const fr24Enabled = Boolean(config.fr24Key?.screenConfigured);
 
   useEffect(() => {
     let mounted = true;
-    void Promise.allSettled([loadConfig(), loadPreview(), loadAvinor(), loadDeviceStatus(), loadFirmwareLatest()]).finally(() => {
+    void Promise.allSettled([loadConfig(), loadPreview(), loadDeviceStatus(), loadFirmwareLatest(), loadAdminUiSettings()]).finally(() => {
       if (mounted) setInitialLoading(false);
     });
     const deviceStatusTimer = window.setInterval(() => {
@@ -2405,6 +2435,11 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!accountModalOpen) return;
+    void loadFr24Usage();
+  }, [accountModalOpen]);
+
   function markDirty(message = "Endringer ikke lagret") {
     setStatus(message);
     setStatusTone("dirty");
@@ -2434,7 +2469,7 @@ export default function App() {
         meta: data.updatedAt ? `Updated ${new Date(data.updatedAt).toLocaleTimeString("en-GB")}` : "Display data loaded",
         flights: Array.isArray(data.flights) ? data.flights : [],
         idleScreens: Array.isArray(data.idleScreens) ? data.idleScreens : [],
-        avinorRows: preview.avinorRows,
+        avinorRows: [],
         mode: data.mode || "idle",
         updatedAt: data.updatedAt ?? new Date().toISOString(),
         error: null,
@@ -2445,15 +2480,6 @@ export default function App() {
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not load display data";
       setPreview((current) => ({ ...current, meta: message, error: message }));
-    }
-  }
-
-  async function loadAvinor() {
-    try {
-      const data = await apiFetch<{ flights?: AvinorRawFlight[] }>(`/api/avinor-board?ts=${Date.now()}`);
-      setPreview((current) => ({ ...current, avinorRows: Array.isArray(data.flights) ? data.flights : [] }));
-    } catch {
-      setPreview((current) => ({ ...current, avinorRows: [] }));
     }
   }
 
@@ -2472,6 +2498,51 @@ export default function App() {
       setFirmwareLatest(data);
     } catch {
       setFirmwareLatest((current) => current);
+    }
+  }
+
+  async function loadAdminUiSettings() {
+    try {
+      const data = await apiFetch<AdminUiSettings>(`/api/ui-settings?ts=${Date.now()}`);
+      setAdminUiSettings(data);
+    } catch {
+      setAdminUiSettings(null);
+    }
+  }
+
+  async function loadFr24Usage() {
+    if (!fr24Enabled) {
+      setFr24Usage(null);
+      return;
+    }
+    setFr24UsageLoading(true);
+    try {
+      const data = await apiFetch<Fr24UsageSummary>(`/api/account/fr24-usage?ts=${Date.now()}`);
+      setFr24Usage(data);
+    } catch (error) {
+      setFr24Usage({
+        configured: true,
+        totalCredits: 0,
+        totalRequests: 0,
+        endpoints: [],
+        updatedAt: new Date().toISOString(),
+        error: error instanceof Error ? error.message : "Could not load FR24 usage"
+      });
+    } finally {
+      setFr24UsageLoading(false);
+    }
+  }
+
+  async function refreshControlPanel() {
+    setPullRefresh((current) => ({ ...current, refreshing: true, distance: 0 }));
+    setStatus("Refreshing...");
+    setStatusTone("idle");
+    try {
+      await Promise.allSettled([loadConfig(), loadPreview(), loadDeviceStatus(), loadFirmwareLatest(), loadAdminUiSettings()]);
+      setStatus(`Refreshed ${new Date().toLocaleTimeString("nb-NO")}`);
+      setStatusTone("success");
+    } finally {
+      setPullRefresh({ distance: 0, refreshing: false });
     }
   }
 
@@ -2607,10 +2678,41 @@ export default function App() {
     setActiveSection(index);
   }
 
-  const firmwareFresh = isRecentTimestamp(preview.deviceStatus?.updatedAt, 4 * 60 * 1000);
-  const firmwareDotColor = preview.deviceStatus && firmwareFresh
-    ? preview.deviceStatus.ok ? "#00f900" : "#ff2600"
-    : preview.deviceStatus ? "#ff9300" : "rgba(60, 36, 21, 0.34)";
+  function handleRefreshTouchStart(event: TouchEvent<HTMLElement>) {
+    if (pullRefresh.refreshing || accountModalOpen) return;
+    const touch = event.touches[0];
+    if (!touch) return;
+    const slide = (event.target as HTMLElement).closest("[data-refresh-slide]") as HTMLElement | null;
+    if (!slide || slide.scrollTop > 0) return;
+    pullRefreshRef.current = { active: true, startY: touch.clientY, startX: touch.clientX, distance: 0, slide };
+  }
+
+  function handleRefreshTouchMove(event: TouchEvent<HTMLElement>) {
+    const state = pullRefreshRef.current;
+    const touch = event.touches[0];
+    if (!state.active || !touch || !state.slide || pullRefresh.refreshing) return;
+    const dy = touch.clientY - state.startY;
+    const dx = touch.clientX - state.startX;
+    if (dy <= 0 || Math.abs(dx) > dy || state.slide.scrollTop > 0) {
+      setPullRefresh((current) => current.distance ? { ...current, distance: 0 } : current);
+      return;
+    }
+    const distance = Math.min(82, Math.round(dy * 0.45));
+    state.distance = distance;
+    setPullRefresh({ distance, refreshing: false });
+    if (distance > 8) event.preventDefault();
+  }
+
+  function handleRefreshTouchEnd() {
+    const distance = pullRefreshRef.current.distance;
+    pullRefreshRef.current = { active: false, startY: 0, startX: 0, distance: 0, slide: null };
+    if (distance >= 54 && !pullRefresh.refreshing) {
+      void refreshControlPanel();
+      return;
+    }
+    setPullRefresh((current) => current.refreshing ? current : { distance: 0, refreshing: false });
+  }
+
   const displayScreenId = config.screenId || selectedScreenIdFromLocation() || "main";
   const directScreenId = selectedScreenIdFromLocation();
   const isDirectPairedScreen = Boolean(directScreenId && directScreenId !== "main" && config.screenId === directScreenId);
@@ -2633,31 +2735,6 @@ export default function App() {
     { label: "Night mode on", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/brightness-mode/night` },
     { label: "Night mode off", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/brightness-mode/day` }
   ] : [];
-  const accountHomeyLinks = accountScreens.flatMap((screen) => {
-    const screenId = screen.screenId;
-    return [
-      { screen, label: "Screen on", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(screenId)}/screen-state/activate` },
-      { screen, label: "Screen off", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(screenId)}/screen-state/deactivate` },
-      { screen, label: "Night mode on", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(screenId)}/brightness-mode/night` },
-      { screen, label: "Night mode off", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(screenId)}/brightness-mode/day` }
-    ];
-  });
-  const debugApiLinks = apiScreenId ? [
-    `/api/screens/${encodeURIComponent(apiScreenId)}/config`,
-    `/api/screens/${encodeURIComponent(apiScreenId)}/display`,
-    `/api/screens/${encodeURIComponent(apiScreenId)}/device-status`,
-    "/api/device-config",
-    "/api/logo-status",
-    "/api/sound-test",
-    "/api/avinor-board"
-  ] : [
-    "/api/config",
-    "/api/device-config",
-    "/api/logo-status",
-    "/api/sound-test",
-    "/api/avinor-board"
-  ];
-
   async function rotateHomeyToken() {
     const confirmed = window.confirm("Rotate Homey token? Existing Homey flows must be updated with the new token.");
     if (!confirmed) return;
@@ -2688,12 +2765,12 @@ export default function App() {
                 style={{ maxWidth: "100%", width: "fit-content", minWidth: "170px", border: 0, background: "transparent", color: "var(--muted-foreground)", fontSize: "11px", lineHeight: 1.35, padding: 0, outline: "none" }}
               >
                 {accountScreens.map((screen) => (
-                  <option key={screen.screenId} value={screen.screenId}>{screen.label || "Unnamed location"} · Screen {screen.screenId}</option>
+                  <option key={screen.screenId} value={screen.screenId}>{screen.label || "Unnamed device"}</option>
                 ))}
               </select>
             ) : (
               <div style={{ fontSize: "11px", color: "var(--muted-foreground)", lineHeight: 1.35, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {hasRealScreens ? (config.label || "Unnamed location") : isJustPaired ? "Setting up screen" : "No paired screen"} · Screen {hasRealScreens || isJustPaired ? displayScreenId : "-"} · FW {firmwareVersion}{firmwareUpdateAvailable && firmwareLatest ? ` → ${firmwareLatest.version}` : ""}
+                {hasRealScreens ? (config.label || "Unnamed device") : isJustPaired ? "Setting up screen" : "No paired screen"}
               </div>
             )}
           </div>
@@ -2706,30 +2783,13 @@ export default function App() {
             >
               <UserIcon />
             </button>
-            <div style={{ position: "relative" }}>
-            <span
-              title={preview.deviceStatus && firmwareFresh ? (preview.deviceStatus.ok ? "Screen connected" : "Screen error") : "Waiting for screen"}
-              style={{
-                position: "absolute",
-                left: "-11px",
-                top: "50%",
-                width: "8px",
-                height: "8px",
-                borderRadius: "999px",
-                background: firmwareDotColor,
-                boxShadow: firmwareDotColor === "#00f900" ? "0 0 0 4px rgba(0, 249, 0, 0.14)" : "0 0 0 4px rgba(60, 36, 21, 0.08)",
-                transform: "translateY(-50%)"
-              }}
-            />
-            <SwitchControl checked={screenState.active} disabled={busy} label={screenState.active ? "Turn screen off" : "Turn screen on"} onChange={() => void toggleScreen()} />
-            </div>
           </div>
         </div>
       </header>
 
       {accountModalOpen ? (
         <div style={{ position: "absolute", inset: 0, zIndex: 2000, display: "flex", justifyContent: "flex-end", background: "rgba(34, 20, 12, 0.28)" }} onClick={() => setAccountModalOpen(false)}>
-          <aside style={{ width: "min(440px, 100%)", height: "100%", overflow: "auto", background: "var(--background)", borderLeft: "1px solid var(--border-mid)", boxShadow: "-24px 0 70px rgba(34, 20, 12, 0.24)", padding: "18px", display: "grid", alignContent: "start", gap: "14px" }} onClick={(event) => event.stopPropagation()}>
+          <aside style={{ width: "min(440px, 100%)", height: "100%", overflow: "auto", background: "var(--background)", borderLeft: "1px solid var(--border-mid)", boxShadow: "-24px 0 70px rgba(34, 20, 12, 0.24)", padding: "max(16px, env(safe-area-inset-top)) 18px max(18px, env(safe-area-inset-bottom))", display: "grid", alignContent: "start", gap: "14px" }} onClick={(event) => event.stopPropagation()}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
               <div>
                 <div style={{ fontSize: "20px", fontWeight: 850 }}>Account</div>
@@ -2761,6 +2821,56 @@ export default function App() {
               >
                 Save FR24 key
               </button>
+              {fr24Enabled ? (
+                <div style={{ padding: "10px 12px", borderRadius: "8px", background: "rgba(255,255,255,0.5)", border: "1px solid var(--border-mid)", display: "grid", gap: "10px" }}>
+                  <div style={{ display: "flex", alignItems: "start", justifyContent: "space-between", gap: "12px" }}>
+                    <div>
+                      <div style={{ fontSize: "12px", fontWeight: 850, textTransform: "uppercase", letterSpacing: "0.06em" }}>Usage last 24h</div>
+                      <div style={{ marginTop: "3px", fontSize: "11px", color: "var(--muted-foreground)" }}>
+                        {fr24Usage?.updatedAt ? `Checked ${shortTime(fr24Usage.updatedAt)}${fr24Usage.cached ? " · cached" : ""}` : "Loads when this menu opens"}
+                      </div>
+                    </div>
+                    <button type="button" onClick={() => void loadFr24Usage()} disabled={fr24UsageLoading} style={{ minHeight: "30px", padding: "0 10px", borderRadius: "999px", border: "1px solid rgba(68, 43, 28, 0.22)", background: "rgba(255, 255, 255, 0.62)", color: "var(--foreground)", fontSize: "11px", fontWeight: 800, cursor: fr24UsageLoading ? "not-allowed" : "pointer", opacity: fr24UsageLoading ? 0.6 : 1 }}>
+                      Refresh
+                    </button>
+                  </div>
+                  {fr24UsageLoading ? (
+                    <div style={{ display: "grid", gap: "8px" }}>
+                      <SkeletonBlock height={30} />
+                      <SkeletonBlock height={22} width="72%" />
+                    </div>
+                  ) : fr24Usage?.error ? (
+                    <div style={{ fontSize: "12px", color: "#9d3a23", lineHeight: 1.45 }}>{fr24Usage.error}</div>
+                  ) : fr24Usage ? (
+                    <>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
+                        <div style={{ borderRadius: "8px", background: "rgba(255,255,255,0.58)", padding: "8px" }}>
+                          <div style={{ fontSize: "18px", fontWeight: 900 }}>{formatCount(fr24Usage.totalCredits)}</div>
+                          <div style={{ fontSize: "11px", color: "var(--muted-foreground)" }}>credits used</div>
+                        </div>
+                        <div style={{ borderRadius: "8px", background: "rgba(255,255,255,0.58)", padding: "8px" }}>
+                          <div style={{ fontSize: "18px", fontWeight: 900 }}>{formatCount(fr24Usage.totalRequests)}</div>
+                          <div style={{ fontSize: "11px", color: "var(--muted-foreground)" }}>requests</div>
+                        </div>
+                      </div>
+                      {fr24Usage.endpoints.length ? (
+                        <div style={{ display: "grid", gap: "6px" }}>
+                          {fr24Usage.endpoints.slice(0, 3).map((item) => (
+                            <div key={item.endpoint} style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) auto", gap: "8px", fontSize: "11px", color: "var(--muted-foreground)" }}>
+                              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.endpoint}</span>
+                              <span>{formatCount(item.credits)} cr</span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div style={{ fontSize: "12px", color: "var(--muted-foreground)" }}>No FR24 usage reported for this period.</div>
+                      )}
+                    </>
+                  ) : (
+                    <div style={{ fontSize: "12px", color: "var(--muted-foreground)" }}>Open the menu to check usage.</div>
+                  )}
+                </div>
+              ) : null}
             </section>
 
             <section style={{ ...cardStyle("14px"), display: "grid", gap: "12px" }}>
@@ -2771,8 +2881,8 @@ export default function App() {
               <div style={{ display: "grid", gap: "8px" }}>
                 {accountScreens.map((screen) => (
                   <button key={screen.screenId} type="button" onClick={() => { window.location.href = `/?screenId=${encodeURIComponent(screen.screenId)}`; }} style={{ textAlign: "left", display: "grid", gap: "3px", padding: "10px 12px", borderRadius: "8px", border: "1px solid var(--border-mid)", background: screen.screenId === displayScreenId ? "rgba(70, 41, 24, 0.1)" : "rgba(255,255,255,0.52)", color: "var(--foreground)", cursor: "pointer" }}>
-                    <span style={{ fontSize: "13px", fontWeight: 800 }}>{screen.label || "Unnamed location"}</span>
-                    <span style={{ fontSize: "11px", color: "var(--muted-foreground)" }}>Screen {screen.screenId}{screen.deviceId ? ` · ${screen.deviceId}` : ""}</span>
+                    <span style={{ fontSize: "13px", fontWeight: 800 }}>{screen.label || "Unnamed device"}</span>
+                    <span style={{ fontSize: "11px", color: "var(--muted-foreground)" }}>Screen {screen.screenId}</span>
                   </button>
                 ))}
               </div>
@@ -2780,8 +2890,8 @@ export default function App() {
 
             <section style={{ ...cardStyle("14px"), display: "grid", gap: "12px" }}>
               <div>
-                <div style={{ fontSize: "14px", fontWeight: 800 }}>Homey API</div>
-                <div style={{ marginTop: "3px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>Use HTTP POST and include this account token.</div>
+                <div style={{ fontSize: "14px", fontWeight: 800 }}>Homey API key</div>
+                <div style={{ marginTop: "3px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>Used by Homey flows for all screens on this account.</div>
               </div>
               <div style={{ padding: "10px 12px", borderRadius: "8px", background: "rgba(255,255,255,0.5)", border: "1px solid var(--border-mid)", fontSize: "12px", overflowWrap: "anywhere" }}>
                 <strong>X-SkyFrame-Homey-Token:</strong> {homeyToken || "Loading token..."}
@@ -2789,15 +2899,6 @@ export default function App() {
               <button type="button" onClick={rotateHomeyToken} style={{ width: "fit-content", minHeight: "34px", padding: "0 12px", borderRadius: "999px", border: "1px solid rgba(68, 43, 28, 0.22)", background: "rgba(255, 255, 255, 0.62)", color: "var(--foreground)", fontSize: "12px", fontWeight: 800, cursor: "pointer" }}>
                 Rotate token
               </button>
-              <div style={{ display: "grid", gap: "8px" }}>
-                {accountHomeyLinks.map((link) => (
-                  <div key={`${link.screen.screenId}-${link.href}`} style={{ padding: "10px 12px", borderRadius: "8px", border: "1px solid var(--border-mid)", background: "rgba(255,255,255,0.5)", fontSize: "12px", overflowWrap: "anywhere" }}>
-                    <strong style={{ display: "block", marginBottom: "3px" }}>{link.screen.label || "Screen"} · {link.label}</strong>
-                    <span style={{ display: "block", color: "var(--muted-foreground)", marginBottom: "4px" }}>POST</span>
-                    {link.href}
-                  </div>
-                ))}
-              </div>
             </section>
 
             <a href={logoutUrl} style={{ height: "44px", borderRadius: "8px", background: "var(--primary)", color: "#fff", display: "grid", placeItems: "center", textDecoration: "none", fontWeight: 800 }}>Log out</a>
@@ -2805,7 +2906,7 @@ export default function App() {
         </div>
       ) : null}
 
-      {!initialLoading && !hasRealScreens ? null : <EmulatorPreview config={config} preview={preview} screenState={screenState} />}
+      {!initialLoading && hasRealScreens && adminUiSettings?.showEmulator ? <EmulatorPreview config={config} preview={preview} screenState={screenState} /> : null}
 
       {!initialLoading && !hasRealScreens ? null : <div
         ref={navRef}
@@ -2862,7 +2963,40 @@ export default function App() {
         </div>
       </div>}
 
-      <main style={{ minHeight: 0, flex: 1, overflow: "hidden" }}>
+      <main
+        style={{ minHeight: 0, flex: 1, overflow: "hidden", position: "relative" }}
+        onTouchStart={handleRefreshTouchStart}
+        onTouchMove={handleRefreshTouchMove}
+        onTouchEnd={handleRefreshTouchEnd}
+        onTouchCancel={handleRefreshTouchEnd}
+      >
+        {(pullRefresh.distance > 0 || pullRefresh.refreshing) ? (
+          <div
+            style={{
+              position: "absolute",
+              top: "8px",
+              left: "50%",
+              zIndex: 40,
+              transform: `translate(-50%, ${Math.min(18, pullRefresh.distance / 4)}px)`,
+              minHeight: "30px",
+              padding: "0 12px",
+              borderRadius: "999px",
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: "rgba(255, 255, 255, 0.82)",
+              border: "1px solid var(--border-soft)",
+              boxShadow: "0 12px 28px rgba(34,20,12,0.12)",
+              color: "var(--muted-foreground)",
+              fontSize: "12px",
+              fontWeight: 800,
+              pointerEvents: "none",
+              opacity: pullRefresh.refreshing ? 1 : Math.min(1, pullRefresh.distance / 54)
+            }}
+          >
+            {pullRefresh.refreshing ? "Refreshing..." : pullRefresh.distance >= 54 ? "Release to refresh" : "Pull to refresh"}
+          </div>
+        ) : null}
         {!initialLoading && !hasRealScreens ? (
           <div style={{ padding: "24px 20px", display: "grid", gap: "14px" }}>
             <div style={{ ...cardStyle("18px"), display: "grid", gap: "10px" }}>
@@ -2885,7 +3019,7 @@ export default function App() {
           <LoadingSkeleton />
         ) : (
         <div ref={slidesRef} style={appStyles.slides}>
-          <section style={slideStyle("location")}>
+          <section data-refresh-slide style={slideStyle("location")}>
             <div style={{ display: "grid", gap: "14px" }}>
               <MapPicker
                 lat={config.lat}
@@ -2918,11 +3052,22 @@ export default function App() {
             </div>
           </section>
 
-          <section style={slideStyle("display")}>
+          <section data-refresh-slide style={slideStyle("display")}>
             <div style={{ display: "grid", gap: "14px" }}>
-              <Field label="Location name">
+              <Field label="Device name">
                 <TextInput value={config.label} placeholder="Kitchen, office, cabin" onChange={(event) => updateConfig((current) => ({ ...current, label: event.target.value }))} />
               </Field>
+              <div style={{ ...cardStyle("14px"), display: "grid", gap: "12px" }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: "14px", fontWeight: 850 }}>Power</div>
+                    <div style={{ marginTop: "4px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>
+                      {screenState.active ? "On: the screen shows live content." : "Off: the screen stays dark until turned on again."}
+                    </div>
+                  </div>
+                  <SimpleSwitchControl checked={screenState.active} disabled={busy} label={screenState.active ? "Turn screen off" : "Turn screen on"} onChange={() => void toggleScreen()} />
+                </div>
+              </div>
               <DisplayModePicker
                 value={config.device.displayMode}
                 fr24Enabled={fr24Enabled}
@@ -2999,7 +3144,7 @@ export default function App() {
             </div>
           </section>
 
-          <section style={slideStyle("clock")}>
+          <section data-refresh-slide style={slideStyle("clock")}>
             <div style={{ display: "grid", gap: "14px" }}>
               <ColorPresetManager<ClockColors>
                 defaultValues={defaultClockColors}
@@ -3016,7 +3161,7 @@ export default function App() {
             </div>
           </section>
 
-          <section style={slideStyle("aircraft")}>
+          <section data-refresh-slide style={slideStyle("aircraft")}>
             <div style={{ display: "grid", gap: "14px" }}>
               <SliderField label="Fetch interval" value={config.device.pollSeconds} min={30} max={900} step={5} suffix=" s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, pollSeconds: value } }))} />
               <SliderField label="Audio volume" value={config.device.audioVolumePercent} min={0} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, audioVolumePercent: value } }))} />
@@ -3025,16 +3170,13 @@ export default function App() {
               </button>
               <div style={{ fontSize: "12px", color: "var(--muted-foreground)" }}>Last sound test: {formatTimestamp(soundState.lastTriggeredAt)}</div>
               <div style={{ ...cardStyle(), display: "grid", gap: "12px" }}>
-                <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", cursor: "pointer" }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
                   <span style={{ minWidth: 0, flex: "1 1 auto" }}>
                     <span style={{ display: "block", fontSize: "14px" }}>Track flight numbers</span>
                     <span style={{ display: "block", marginTop: "4px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.4 }}>{fr24Enabled ? "Tracked flights can activate Airspace mode." : "Requires an account FR24 key."}</span>
                   </span>
-                  <span style={{ position: "relative", width: "46px", minWidth: "46px", flex: "0 0 46px", height: "28px", borderRadius: "999px", background: config.follow.enabled && fr24Enabled ? "var(--primary)" : "var(--secondary)", transition: "background 160ms ease", opacity: fr24Enabled ? 1 : 0.55 }}>
-                    <input type="checkbox" disabled={!fr24Enabled} checked={fr24Enabled && config.follow.enabled} onChange={(event) => updateConfig((current) => ({ ...current, follow: { ...current.follow, enabled: event.target.checked } }))} style={{ position: "absolute", inset: 0, opacity: 0 }} />
-                    <span style={{ position: "absolute", top: "3px", left: config.follow.enabled && fr24Enabled ? "21px" : "3px", width: "22px", height: "22px", borderRadius: "999px", background: "#fff", transition: "left 160ms ease" }} />
-                  </span>
-                </label>
+                  <SimpleSwitchControl checked={fr24Enabled && config.follow.enabled} disabled={!fr24Enabled} label={config.follow.enabled ? "Disable tracked flights" : "Enable tracked flights"} onChange={(checked) => updateConfig((current) => ({ ...current, follow: { ...current.follow, enabled: checked } }))} />
+                </div>
                 <Field label="Flight numbers">
                   <TextInput
                     value={config.follow.flights.join(", ")}
@@ -3149,7 +3291,7 @@ export default function App() {
             </div>
           </section>
 
-          <section style={slideStyle("timetable")}>
+          <section data-refresh-slide style={slideStyle("timetable")}>
             <div style={{ display: "grid", gap: "14px" }}>
               <SliderField label="Hold each board page" value={config.device.timetableCycleSeconds} min={2} max={60} suffix=" s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, timetableCycleSeconds: value } }))} />
               <SliderField label="Scroll speed" value={config.device.timetableScrollPixelsPerSecond} min={4} max={100} suffix=" px/s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, timetableScrollPixelsPerSecond: value } }))} />
@@ -3181,99 +3323,26 @@ export default function App() {
             </div>
           </section>
 
-          <section style={slideStyle("api")}>
+          <section data-refresh-slide style={slideStyle("api")}>
             <div style={{ display: "grid", gap: "14px" }}>
-              <div style={cardStyle()}>
-                <div style={{ fontSize: "14px", fontWeight: 600 }}>Display preview</div>
-                <div style={{ marginTop: "6px", fontSize: "12px", color: "var(--muted-foreground)" }}>{preview.meta || "No data loaded"}</div>
-                <div style={{ display: "flex", gap: "10px", marginTop: "12px" }}>
-                  <button type="button" onClick={() => void loadPreview()} style={{ flex: 1, height: "40px", borderRadius: "8px", border: 0, background: "var(--primary)", color: "#fff" }}>
-                    Refresh display
-                  </button>
-                  <button type="button" onClick={() => void loadAvinor()} style={{ flex: 1, height: "40px", borderRadius: "8px", border: "1px solid var(--border-mid)", background: "var(--card)", color: "var(--foreground)" }}>
-                    Refresh airport data
-                  </button>
-                </div>
-                <div style={{ marginTop: "10px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>
-                  The preview uses the same content feed as the physical display.
-                </div>
-              </div>
-              {preview.flights.length ? (
-                preview.flights.slice(0, 4).map((flight, index) => (
-                  <article key={`${flight.flight ?? flight.callsign ?? "flight"}-${index}`} style={cardStyle()}>
-                    <div style={{ fontSize: "15px", fontWeight: 600 }}>{flight.flight || flight.callsign || "Flight"}</div>
-                    <div style={{ marginTop: "4px", fontSize: "13px", color: "var(--muted-foreground)" }}>
-                      {[flight.origin, flight.destination].filter(Boolean).join(" → ")}
-                    </div>
-                    <div style={{ marginTop: "8px", fontSize: "12px", color: "var(--muted-foreground)" }}>
-                      {[flight.airline, flight.aircraft, flight.displayTime].filter(Boolean).join(" · ")}
-                    </div>
-                  </article>
-                ))
-              ) : preview.idleScreens.length ? (
-                preview.idleScreens.map((screen, index) => (
-                  <article key={`${screen.title ?? "idle"}-${index}`} style={cardStyle()}>
-                    <div style={{ fontSize: "15px", fontWeight: 600 }}>{screen.title || "Idle board"}</div>
-                    <div style={{ marginTop: "8px", fontSize: "13px", color: "var(--muted-foreground)", lineHeight: 1.5 }}>
-                      {(screen.rows ?? []).slice(0, 4).map(formatIdleRowForPreview).join("\n")}
-                    </div>
-                  </article>
-                ))
-              ) : (
-                <div style={{ ...cardStyle(), color: "var(--muted-foreground)", fontSize: "13px" }}>No aircraft nearby right now.</div>
-              )}
-
-              <Advanced title="API links">
-                <div style={{ display: "grid", gap: "14px" }}>
-                  {homeyLinks.length ? (
-                    <div style={{ display: "grid", gap: "10px" }}>
-                      <div style={{ fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>
-                        Homey commands for Screen {apiScreenId}. Send HTTP POST and include your account token as X-SkyFrame-Homey-Token.
-                      </div>
-                      <div style={cardStyle("10px 12px")}>
-                        <div style={{ fontSize: "11px", fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)" }}>Token header</div>
-                        <div style={{ marginTop: "6px", fontSize: "12px", overflowWrap: "anywhere" }}>
-                          <strong>X-SkyFrame-Homey-Token:</strong> {homeyToken || "Loading token..."}
-                        </div>
-                        <button type="button" onClick={rotateHomeyToken} style={{ marginTop: "10px", width: "fit-content", minHeight: "34px", padding: "0 12px", borderRadius: "999px", border: "1px solid rgba(68, 43, 28, 0.22)", background: "rgba(255, 255, 255, 0.62)", color: "var(--foreground)", fontSize: "12px", fontWeight: 800, cursor: "pointer" }}>
-                          Rotate token
-                        </button>
-                      </div>
-                      <div style={{ display: "grid", gap: "10px", gridTemplateColumns: "1fr 1fr" }}>
-                        {homeyLinks.map((link) => (
-                          <div key={link.href} style={{ ...cardStyle("10px 12px"), fontSize: "12px", overflowWrap: "anywhere" }}>
-                            <strong style={{ display: "block", marginBottom: "4px" }}>{link.label}</strong>
-                            <span style={{ display: "block", color: "var(--muted-foreground)", marginBottom: "4px" }}>POST</span>
-                            {link.href}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
+              {homeyLinks.length ? (
+                <div style={{ display: "grid", gap: "10px" }}>
+                  <div style={{ ...cardStyle("12px 14px"), fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>
+                    Homey commands for Screen {apiScreenId}. Send HTTP POST and include the account token from the user menu as <strong style={{ color: "var(--foreground)" }}>X-SkyFrame-Homey-Token</strong>.
+                  </div>
                   <div style={{ display: "grid", gap: "10px", gridTemplateColumns: "1fr 1fr" }}>
-                    {debugApiLinks.map((href) => (
-                      <a key={href} href={href} target="_blank" rel="noreferrer" style={{ ...cardStyle("10px 12px"), textDecoration: "none", fontSize: "12px", overflowWrap: "anywhere" }}>
-                        {href.replace("/api/", "")}
-                      </a>
-                    ))}
-                  </div>
-                </div>
-              </Advanced>
-
-              {preview.avinorRows.length ? (
-                <Advanced title="Airport data preview">
-                  <div style={{ display: "grid", gap: "10px" }}>
-                    {preview.avinorRows.slice(0, 6).map((row, index) => (
-                      <div key={`${row.resolved?.flightId ?? "row"}-${index}`} style={cardStyle("10px 12px")}>
-                        <div style={{ fontSize: "14px", fontWeight: 600 }}>{row.resolved?.flightId || "Flight"}</div>
-                        <div style={{ marginTop: "4px", fontSize: "12px", color: "var(--muted-foreground)" }}>
-                          {[row.direction === "A" ? "Arrival" : "Departure", row.resolved?.airportName, row.resolved?.displayTime, row.resolved?.status].filter(Boolean).join(" · ")}
-                        </div>
+                    {homeyLinks.map((link) => (
+                      <div key={link.href} style={{ ...cardStyle("10px 12px"), fontSize: "12px", overflowWrap: "anywhere" }}>
+                        <strong style={{ display: "block", marginBottom: "4px" }}>{link.label}</strong>
+                        <span style={{ display: "block", color: "var(--muted-foreground)", marginBottom: "4px" }}>POST</span>
+                        {link.href}
                       </div>
                     ))}
                   </div>
-                </Advanced>
-              ) : null}
+                </div>
+              ) : (
+                <div style={{ ...cardStyle(), color: "var(--muted-foreground)", fontSize: "13px" }}>Pair a screen to see Homey links.</div>
+              )}
             </div>
           </section>
         </div>
