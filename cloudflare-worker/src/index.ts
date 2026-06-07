@@ -60,6 +60,12 @@ type DeviceRecord = {
   deletedAt?: string;
 };
 
+type HomeyTokenRecord = {
+  token: string;
+  createdAt: string;
+  rotatedAt?: string | null;
+};
+
 type ProvisionRecord = {
   code: string;
   hardwareId: string;
@@ -422,6 +428,8 @@ type IdleScreen = {
 
 const CONFIG_KEY = "config:v1";
 const SCREEN_STATE_KEY = "screen-state:v1";
+const HOMEY_TOKEN_KEY = "homey-token:v1";
+const ACCOUNT_FR24_SECRET_KEY = "secret:fr24-api-key:v1";
 const SOUND_STATE_KEY = "sound-state:v1";
 const DEVICE_STATUS_KEY = "device-status:v1";
 const DEVICE_COMMAND_KEY = "device-command:v1";
@@ -616,7 +624,7 @@ export default {
 
     try {
       const context = await resolveRequestContext(request, env, url.pathname);
-      const authFailure = authorizeRequest(request, env, url.pathname, context);
+      const authFailure = await authorizeRequest(request, env, url.pathname, context);
       if (authFailure) return authFailure;
 
       if (url.pathname === "/") return serveAppShell(request, env);
@@ -631,6 +639,10 @@ export default {
       if (url.pathname === "/public/device-config" && request.method === "GET") return deviceConfigResponse(env, context);
       if (url.pathname === "/public/sound-state" && request.method === "GET") return soundStateResponse(env, context);
       if (url.pathname === "/public/display" && request.method === "GET") return flightsResponse(env, true, context);
+      if (url.pathname.match(/^\/public\/homey\/screens\/[^/]+\/screen-state\/activate$/) && isAutomationRequestMethod(request)) return writeScreenState(env, { active: true }, "homey-api", context);
+      if (url.pathname.match(/^\/public\/homey\/screens\/[^/]+\/screen-state\/deactivate$/) && isAutomationRequestMethod(request)) return writeScreenState(env, { active: false }, "homey-api", context);
+      if (url.pathname.match(/^\/public\/homey\/screens\/[^/]+\/brightness-mode\/day$/) && isAutomationRequestMethod(request)) return writeScreenState(env, { brightnessMode: "day" }, "homey-api", context);
+      if (url.pathname.match(/^\/public\/homey\/screens\/[^/]+\/brightness-mode\/night$/) && isAutomationRequestMethod(request)) return writeScreenState(env, { brightnessMode: "night" }, "homey-api", context);
       if (url.pathname.startsWith("/public/logos-rgb565/")) return logoRgb565Response(request, env);
       if (url.pathname.startsWith("/public/logos/")) return logoAssetResponse(request, env);
       if (url.pathname.startsWith("/logos-rgb565/")) return logoRgb565Response(request, env);
@@ -640,6 +652,9 @@ export default {
       if (url.pathname.match(/^\/api\/screens\/[^/]+\/config$/) && request.method === "POST") return saveConfig(request, env, context);
       if (url.pathname.match(/^\/api\/screens\/[^/]+\/fr24-key$/) && request.method === "GET") return fr24KeyStatusResponse(env, context);
       if (url.pathname.match(/^\/api\/screens\/[^/]+\/fr24-key$/) && request.method === "POST") return saveFr24Key(request, env, context);
+      if (url.pathname === "/api/account/fr24-key" && request.method === "GET") return fr24KeyStatusResponse(env, context);
+      if (url.pathname === "/api/account/fr24-key" && request.method === "POST") return saveFr24Key(request, env, context);
+      if (url.pathname === "/api/account/homey-token/rotate" && request.method === "POST") return rotateHomeyToken(request, env, context);
       if (url.pathname.match(/^\/api\/screens\/[^/]+\/display$/) && request.method === "GET") return flightsResponse(env, true, context);
       if (url.pathname.match(/^\/api\/screens\/[^/]+\/device-status$/) && request.method === "GET") return deviceStatusResponse(env, context);
       if (url.pathname.match(/^\/api\/screens\/[^/]+\/screen-state\/activate$/) && isAutomationRequestMethod(request)) return writeScreenState(env, { active: true }, "homey-api", context);
@@ -723,7 +738,7 @@ async function listUserScreens(env: Env, userEmail: string): Promise<DeviceRecor
     .reverse();
 }
 
-function authorizeRequest(request: Request, env: Env, pathname: string, context: RequestContext): Response | undefined {
+async function authorizeRequest(request: Request, env: Env, pathname: string, context: RequestContext): Promise<Response | undefined> {
   const adminToken = normalizeSecretString(env.ADMIN_API_TOKEN);
   const deviceToken = normalizeSecretString(env.DEVICE_API_TOKEN);
 
@@ -731,7 +746,18 @@ function authorizeRequest(request: Request, env: Env, pathname: string, context:
   if (pathname.startsWith("/public/provision/")) return undefined;
   if (pathname.startsWith("/public/logos-rgb565/") || pathname.startsWith("/public/logos/")) return undefined;
 
-  if (adminToken && isAutomationApiPath(pathname) && !requestHasToken(request, adminToken, "X-Flight-Admin-Token")) {
+  if (isScreenAutomationApiPath(pathname) || isPublicHomeyAutomationPath(pathname)) {
+    const hasHomeyToken = await requestHasHomeyToken(request, env, context);
+    const hasAdminToken = adminToken ? requestHasToken(request, adminToken, "X-Flight-Admin-Token") : false;
+    if (!hasHomeyToken && !hasAdminToken) {
+      return jsonResponse({ error: "Unauthorized" }, 401, {
+        "Cache-Control": "no-store",
+        "WWW-Authenticate": "Bearer"
+      });
+    }
+  }
+
+  if (adminToken && isLegacyAutomationApiPath(pathname) && !requestHasToken(request, adminToken, "X-Flight-Admin-Token")) {
     return jsonResponse({ error: "Unauthorized" }, 401, {
       "Cache-Control": "no-store",
       "WWW-Authenticate": "Bearer"
@@ -809,7 +835,7 @@ function screenIdFromQuery(request: Request): string | undefined {
 }
 
 function screenIdFromApiPath(pathname: string): string | undefined {
-  const match = pathname.match(/^\/api\/screens\/([^/]+)/);
+  const match = pathname.match(/^\/(?:api\/screens|public\/homey\/screens)\/([^/]+)/);
   return normalizeId(match?.[1]);
 }
 
@@ -840,6 +866,10 @@ function deviceRecordKey(deviceId: string): string {
 
 function fr24ScreenSecretKey(screenId: string): string {
   return `screen:${screenId}:secret:fr24-api-key:v1`;
+}
+
+function accountScopedKey(baseKey: string, email: string): string {
+  return `account:${email}:${baseKey}`;
 }
 
 function normalizeId(value: unknown): string | undefined {
@@ -882,17 +912,28 @@ function realtimeRoomName(context?: RequestContext): string {
 }
 
 function isAutomationApiPath(pathname: string): boolean {
+  return isLegacyAutomationApiPath(pathname) || isScreenAutomationApiPath(pathname) || isPublicHomeyAutomationPath(pathname);
+}
+
+function isLegacyAutomationApiPath(pathname: string): boolean {
   return pathname === "/api/screen-state"
     || pathname.startsWith("/api/screen-state/")
     || pathname === "/api/display-mode"
     || pathname.startsWith("/api/display-mode/")
     || pathname === "/api/brightness-mode"
-    || pathname.startsWith("/api/brightness-mode/")
-    || /^\/api\/screens\/[^/]+\/(?:screen-state\/(?:activate|deactivate)|brightness-mode\/(?:day|night))$/.test(pathname);
+    || pathname.startsWith("/api/brightness-mode/");
+}
+
+function isScreenAutomationApiPath(pathname: string): boolean {
+  return /^\/api\/screens\/[^/]+\/(?:screen-state\/(?:activate|deactivate)|brightness-mode\/(?:day|night))$/.test(pathname);
+}
+
+function isPublicHomeyAutomationPath(pathname: string): boolean {
+  return /^\/public\/homey\/screens\/[^/]+\/(?:screen-state\/(?:activate|deactivate)|brightness-mode\/(?:day|night))$/.test(pathname);
 }
 
 function isAutomationRequestMethod(request: Request): boolean {
-  return request.method === "POST" || request.method === "GET";
+  return request.method === "POST";
 }
 
 function requestHasToken(request: Request, expectedToken: string, headerName: string): boolean {
@@ -902,6 +943,17 @@ function requestHasToken(request: Request, expectedToken: string, headerName: st
   const authorization = request.headers.get("Authorization") || "";
   const bearer = authorization.match(/^Bearer\s+(.+)$/i)?.[1];
   return constantTimeEquals(normalizeSecretString(bearer), expectedToken);
+}
+
+async function requestHasHomeyToken(request: Request, env: Env, context?: RequestContext): Promise<boolean> {
+  const screenId = normalizeId(context?.screenId);
+  if (!screenId || screenId === DEFAULT_SCREEN_ID) return false;
+  const ownerEmail = await ownerEmailForScreen(env, screenId);
+  if (!ownerEmail) return false;
+  const record = await getHomeyTokenRecord(env, ownerEmail, false);
+  if (!record) return false;
+  return requestHasToken(request, record.token, "X-SkyFrame-Homey-Token")
+    || requestHasToken(request, record.token, "X-Homey-Token");
 }
 
 function constantTimeEquals(a: string | undefined, b: string | undefined): boolean {
@@ -1098,14 +1150,16 @@ async function toggleScreenState(env: Env, context?: RequestContext): Promise<Re
 
 async function configResponse(env: Env, context?: RequestContext): Promise<Response> {
   const screenId = normalizeId(context?.screenId);
-  const [config, aviationstackApiKey, screenState, soundState, deviceStatus, fr24Key, accountScreens] = await Promise.all([
+  const userEmail = normalizeEmail(context?.userEmail);
+  const [config, aviationstackApiKey, screenState, soundState, deviceStatus, fr24Key, accountScreens, homeyToken] = await Promise.all([
     getConfig(env, context),
     getAviationstackApiKey(env),
     getScreenState(env, context),
     getSoundState(env, context),
     getDeviceStatus(env, context),
     fr24KeyStatus(env, context),
-    context?.userEmail ? listUserScreens(env, context.userEmail) : Promise.resolve([])
+    userEmail ? listUserScreens(env, userEmail) : Promise.resolve([]),
+    userEmail ? getHomeyTokenRecord(env, userEmail, true) : Promise.resolve(null)
   ]);
   const normalizedDevice = enforceFr24DeviceSettings(normalizeDeviceSettings(config.device), fr24Key.screenConfigured);
   const normalizedFollow = fr24Key.screenConfigured ? normalizeFollowSettings(config.follow) : { ...normalizeFollowSettings(config.follow), enabled: false };
@@ -1115,7 +1169,7 @@ async function configResponse(env: Env, context?: RequestContext): Promise<Respo
     device: normalizedDevice,
     screenId: screenId || DEFAULT_SCREEN_ID,
     account: {
-      email: context?.userEmail || null,
+      email: userEmail || null,
       screens: await Promise.all(accountScreens.map(async (screen) => {
         const screenConfig = await getConfig(env, { screenId: screen.screenId });
         return {
@@ -1127,6 +1181,7 @@ async function configResponse(env: Env, context?: RequestContext): Promise<Respo
       }))
     },
     fr24Key,
+    homeyToken: homeyToken ? publicHomeyTokenRecord(homeyToken) : null,
     screenState,
     deviceStatus,
     soundState: {
@@ -1135,6 +1190,54 @@ async function configResponse(env: Env, context?: RequestContext): Promise<Respo
     },
     aviationstackApiKeyConfigured: Boolean(aviationstackApiKey)
   }, 200, { "Cache-Control": "no-store" });
+}
+
+async function getHomeyTokenRecord(env: Env, userEmail: string, createIfMissing: boolean): Promise<HomeyTokenRecord | null> {
+  const email = normalizeEmail(userEmail);
+  if (!email) return null;
+  const stored = await env.FLIGHT_DISPLAY_KV.get(accountScopedKey(HOMEY_TOKEN_KEY, email), "json") as HomeyTokenRecord | null;
+  if (stored && typeof stored.token === "string" && stored.token.trim()) {
+    return {
+      token: stored.token,
+      createdAt: typeof stored.createdAt === "string" ? stored.createdAt : new Date().toISOString(),
+      rotatedAt: typeof stored.rotatedAt === "string" ? stored.rotatedAt : null
+    };
+  }
+  if (!createIfMissing) return null;
+
+  const record: HomeyTokenRecord = {
+    token: `sky_${randomToken(24)}`,
+    createdAt: new Date().toISOString(),
+    rotatedAt: null
+  };
+  await env.FLIGHT_DISPLAY_KV.put(accountScopedKey(HOMEY_TOKEN_KEY, email), JSON.stringify(record));
+  return record;
+}
+
+function publicHomeyTokenRecord(record: HomeyTokenRecord): Record<string, unknown> {
+  return {
+    configured: true,
+    token: record.token,
+    createdAt: record.createdAt,
+    rotatedAt: record.rotatedAt || null
+  };
+}
+
+async function rotateHomeyToken(request: Request, env: Env, context?: RequestContext): Promise<Response> {
+  const authFailure = requireAuthenticatedUser(context);
+  if (authFailure) return authFailure;
+  const email = normalizeEmail(context?.userEmail);
+  if (!email) return jsonResponse({ error: "Login required" }, 401, { "Cache-Control": "no-store" });
+
+  const previous = await getHomeyTokenRecord(env, email, false);
+  const now = new Date().toISOString();
+  const record: HomeyTokenRecord = {
+    token: `sky_${randomToken(24)}`,
+    createdAt: previous?.createdAt || now,
+    rotatedAt: now
+  };
+  await env.FLIGHT_DISPLAY_KV.put(accountScopedKey(HOMEY_TOKEN_KEY, email), JSON.stringify(record));
+  return jsonResponse(publicHomeyTokenRecord(record), 200, { "Cache-Control": "no-store" });
 }
 
 async function adminPageResponse(request: Request, env: Env, context?: RequestContext): Promise<Response> {
@@ -1252,14 +1355,18 @@ async function findActiveDeviceRecordByScreen(env: Env, screenId: string): Promi
   return devices.find((record) => record.screenId === screenId);
 }
 
+async function ownerEmailForScreen(env: Env, screenId: string): Promise<string | undefined> {
+  const device = await findActiveDeviceRecordByScreen(env, screenId);
+  return normalizeEmail(device?.ownerEmail);
+}
+
 async function removePairedScreen(env: Env, screenId: string, device?: DeviceRecord): Promise<string> {
   const deletedAt = new Date().toISOString();
   const deleteKeys = [
     scopedKey(CONFIG_KEY, { screenId }),
     scopedKey(SCREEN_STATE_KEY, { screenId }),
     scopedKey(SOUND_STATE_KEY, { screenId }),
-    scopedKey(DEVICE_STATUS_KEY, { screenId }),
-    fr24ScreenSecretKey(screenId)
+    scopedKey(DEVICE_STATUS_KEY, { screenId })
   ];
   await Promise.all(deleteKeys.map((key) => env.FLIGHT_DISPLAY_KV.delete(key)));
 
@@ -1642,6 +1749,19 @@ async function fr24KeyStatusResponse(env: Env, context?: RequestContext): Promis
 
 async function fr24KeyStatus(env: Env, context?: RequestContext): Promise<{ configured: boolean; screenConfigured: boolean; source: string; screenId?: string }> {
   const screenId = normalizeId(context?.screenId);
+  const userEmail = normalizeEmail(context?.userEmail) || (screenId ? await ownerEmailForScreen(env, screenId) : undefined);
+  if (userEmail) {
+    const accountStored = await env.FLIGHT_DISPLAY_KV.get(accountScopedKey(ACCOUNT_FR24_SECRET_KEY, userEmail));
+    if (accountStored) {
+      return {
+        configured: true,
+        screenConfigured: true,
+        source: "account",
+        ...(screenId ? { screenId } : {})
+      };
+    }
+  }
+
   if (!screenId || screenId === DEFAULT_SCREEN_ID) {
     const configured = Boolean(normalizeSecretString(env.FR24_API_KEY));
     return {
@@ -1655,7 +1775,7 @@ async function fr24KeyStatus(env: Env, context?: RequestContext): Promise<{ conf
   return {
     configured: Boolean(stored),
     screenConfigured: Boolean(stored),
-    source: stored ? "screen" : "missing",
+    source: stored ? "legacy-screen" : "missing",
     screenId
   };
 }
@@ -1664,10 +1784,8 @@ async function saveFr24Key(request: Request, env: Env, context?: RequestContext)
   const authFailure = requireAuthenticatedUser(context);
   if (authFailure) return authFailure;
 
-  const screenId = normalizeId(context?.screenId);
-  if (!screenId || screenId === DEFAULT_SCREEN_ID) {
-    return jsonResponse({ error: "Expected screen-specific URL" }, 400, { "Cache-Control": "no-store" });
-  }
+  const userEmail = normalizeEmail(context?.userEmail);
+  if (!userEmail) return jsonResponse({ error: "Login required" }, 401, { "Cache-Control": "no-store" });
 
   const body = await readJsonObject(request);
   const apiKey = normalizeSecretString(firstString(body, ["apiKey", "fr24ApiKey", "key"]));
@@ -1676,11 +1794,12 @@ async function saveFr24Key(request: Request, env: Env, context?: RequestContext)
   }
 
   const encrypted = await encryptSecret(env, apiKey);
-  await env.FLIGHT_DISPLAY_KV.put(fr24ScreenSecretKey(screenId), encrypted);
+  await env.FLIGHT_DISPLAY_KV.put(accountScopedKey(ACCOUNT_FR24_SECRET_KEY, userEmail), encrypted);
   return jsonResponse({
     ok: true,
     configured: true,
-    screenId
+    screenConfigured: true,
+    source: "account"
   }, 200, { "Cache-Control": "no-store" });
 }
 
@@ -3894,7 +4013,7 @@ function aircraftCategoryAllowed(flight: DisplayFlight, allowedCategories: Aircr
 
 async function fetchFr24(env: Env, bounds?: string, filters: { flights?: string[]; callsigns?: string[] } = {}, endpointOverride?: string, context?: RequestContext): Promise<unknown[]> {
   const apiKey = await getFr24ApiKey(env, context);
-  if (!apiKey) throw new Error("FR24 API key is not configured for this screen");
+  if (!apiKey) throw new Error("FR24 API key is not configured for this account");
 
   const baseUrl = env.FR24_API_BASE_URL || "https://fr24api.flightradar24.com/api";
   const endpoint = endpointOverride || env.FR24_LIVE_ENDPOINT || "/live/flight-positions/full";
@@ -3927,6 +4046,11 @@ async function fetchFr24(env: Env, bounds?: string, filters: { flights?: string[
 
 async function getFr24ApiKey(env: Env, context?: RequestContext): Promise<string | undefined> {
   const screenId = normalizeId(context?.screenId);
+  const userEmail = normalizeEmail(context?.userEmail) || (screenId ? await ownerEmailForScreen(env, screenId) : undefined);
+  if (userEmail) {
+    const accountStored = await env.FLIGHT_DISPLAY_KV.get(accountScopedKey(ACCOUNT_FR24_SECRET_KEY, userEmail));
+    if (accountStored) return decryptSecret(env, accountStored);
+  }
   if (screenId && screenId !== DEFAULT_SCREEN_ID) {
     const stored = await env.FLIGHT_DISPLAY_KV.get(fr24ScreenSecretKey(screenId));
     if (stored) return decryptSecret(env, stored);
@@ -4500,15 +4624,13 @@ function renderScreenSetupHtml(userEmail: string): string {
   <main class="page setup-page">
     <section class="hero">
       <div class="brand">${skyFrameLogoMarkup()}<div class="status-pill"><span class="status-dot"></span><span id="connectionLabel">Signed in as ${escapeHtml(userEmail)}</span></div></div>
-      <div><h1>Pair your screen.</h1><p class="lead">Enter the code shown on the display. After pairing you can go straight to the control panel, or add a personal FR24 key as an optional second step.</p></div>
+      <div><h1>Pair your screen.</h1><p class="lead">Enter the code shown on the display. FR24 and Homey are managed from your account after pairing.</p></div>
       <div class="panel"><div class="panel-header"><div><p class="panel-title">Screen setup</p><p class="panel-subtitle">Use the code currently shown on the LED panel.</p></div></div><div class="panel-body">
         <div class="step"><div class="step-number">1</div><div><h2>Pair the display</h2><p>The screen waits here until this code is claimed.</p></div></div>
         <div class="form"><label>Pairing code<input id="pairingCode" class="pair-code" placeholder="SKY-123456" autocomplete="one-time-code" inputmode="numeric"></label><label>Screen name<input id="screenLabel" placeholder="Kitchen, office, cabin"></label><button id="claimButton">Pair screen</button></div>
         <div id="afterPairing" class="after-pairing" hidden>
           <div class="success-card"><strong>Screen paired</strong><span id="pairedScreenId">Ready for the control panel</span></div>
-          <div class="actions"><button id="openConfigButton" type="button">Open control panel</button><button id="skipFr24Button" class="secondary" type="button">Skip FR24 for now</button></div>
-          <div class="step"><div class="step-number">2</div><div><h2>Optional FR24</h2><p>Add a personal FR24 key to unlock AirSpace and Follow Flight modes. You can also do this later in the control panel.</p></div></div>
-          <div class="form"><label>FR24 API key<input id="fr24Key" placeholder="Paste personal FR24 key" autocomplete="off"></label><div class="actions"><button id="saveFr24Button" class="secondary">Save FR24 key</button><button id="openConfigWithFr24Button" type="button">Open control</button></div></div>
+          <div class="actions"><button id="openConfigButton" type="button">Open control panel</button></div>
         </div>
         <pre id="output" class="result">Ready.</pre>
       </div></div>
@@ -4527,11 +4649,8 @@ function renderScreenSetupHtml(userEmail: string): string {
     async function api(path, body) { const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); const json = await response.json().catch(() => ({})); if (!response.ok) throw json; return json; }
     function controlUrl() { return pairedScreenId ? "/?screenId=" + encodeURIComponent(pairedScreenId) + "&paired=1" : "/?paired=1"; }
     pairingCodeInput.addEventListener("input", () => { pairingCodeInput.value = pairingCodeInput.value.toUpperCase().replace(/[^A-Z0-9-]/g, ""); });
-    document.querySelector("#claimButton").addEventListener("click", async () => { setStatus("Pairing screen", "pending"); try { const json = await api("/api/provision/claim", { code: pairingCodeInput.value, label: screenLabelInput.value }); pairedScreenId = json.screenId || ""; pairedScreenIdLabel.textContent = "Ready for the control panel"; afterPairing.hidden = false; pairingCodeInput.disabled = true; screenLabelInput.disabled = true; document.querySelector("#claimButton").disabled = true; setStatus("Screen paired", "ok"); show("Paired. You can open the control panel now. FR24 is optional."); } catch (error) { setStatus("Pairing failed", "error"); show(error); } });
-    document.querySelector("#saveFr24Button").addEventListener("click", async () => { if (!pairedScreenId) return show("Pair the screen before adding FR24."); setStatus("Saving FR24", "pending"); try { const json = await api("/api/screens/" + encodeURIComponent(pairedScreenId) + "/fr24-key", { apiKey: document.querySelector("#fr24Key").value }); document.querySelector("#fr24Key").value = ""; setStatus("FR24 connected", "ok"); show("FR24 saved. Opening control panel..."); window.location.href = controlUrl(); } catch (error) { setStatus("FR24 failed", "error"); show(error); } });
+    document.querySelector("#claimButton").addEventListener("click", async () => { setStatus("Pairing screen", "pending"); try { const json = await api("/api/provision/claim", { code: pairingCodeInput.value, label: screenLabelInput.value }); pairedScreenId = json.screenId || ""; pairedScreenIdLabel.textContent = "Ready for the control panel"; afterPairing.hidden = false; pairingCodeInput.disabled = true; screenLabelInput.disabled = true; document.querySelector("#claimButton").disabled = true; setStatus("Screen paired", "ok"); show("Paired. Open the control panel to manage FR24, Homey and screen settings."); } catch (error) { setStatus("Pairing failed", "error"); show(error); } });
     document.querySelector("#openConfigButton").addEventListener("click", () => { window.location.href = controlUrl(); });
-    document.querySelector("#skipFr24Button").addEventListener("click", () => { window.location.href = controlUrl(); });
-    document.querySelector("#openConfigWithFr24Button").addEventListener("click", () => { window.location.href = controlUrl(); });
   </script>
 </body>
 </html>`;
@@ -4680,7 +4799,7 @@ function corsHeaders(): HeadersInit {
   return {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type,Authorization,X-Flight-Admin-Token,X-Flight-Device-Token"
+    "Access-Control-Allow-Headers": "Content-Type,Authorization,X-Flight-Admin-Token,X-Flight-Device-Token,X-SkyFrame-Homey-Token,X-Homey-Token"
   };
 }
 

@@ -3,6 +3,7 @@ import worker, { type Env } from "./index";
 
 const CONFIG_KEY = "config:v1";
 const SCREEN_STATE_KEY = "screen-state:v1";
+const HOMEY_TOKEN_KEY = "homey-token:v1";
 
 class MemoryKv {
   private values = new Map<string, string>();
@@ -25,6 +26,14 @@ class MemoryKv {
 
   async delete(key: string): Promise<void> {
     this.values.delete(key);
+  }
+
+  async list(options?: { prefix?: string; cursor?: string }): Promise<{ keys: Array<{ name: string }>; list_complete: boolean; cursor?: string }> {
+    const prefix = options?.prefix || "";
+    return {
+      keys: Array.from(this.values.keys()).filter((name) => name.startsWith(prefix)).map((name) => ({ name })),
+      list_complete: true
+    };
   }
 }
 
@@ -113,17 +122,52 @@ describe("auth gates", () => {
   });
 
   it("supports screen-specific Homey aliases", async () => {
-    const env = makeEnv();
+    const env = makeEnv({}, {
+      "device:v1:dev_test": {
+        deviceId: "dev_test",
+        screenId: "93975",
+        tokenHash: "a".repeat(64),
+        pairedAt: "2026-06-07T08:30:00.000Z",
+        ownerEmail: "owner@example.com"
+      },
+      [`account:owner@example.com:${HOMEY_TOKEN_KEY}`]: {
+        token: "homey-secret",
+        createdAt: "2026-06-07T09:00:00.000Z",
+        rotatedAt: null
+      }
+    });
 
-    const night = await request("/api/screens/93975/brightness-mode/night", env);
+    const missingToken = await request("/api/screens/93975/brightness-mode/night", env, { method: "POST" });
+    expect(missingToken.status).toBe(401);
+
+    const getRequest = await request("/api/screens/93975/brightness-mode/night", env, {
+      headers: { "X-SkyFrame-Homey-Token": "homey-secret" }
+    });
+    expect(getRequest.status).toBe(404);
+
+    const night = await request("/api/screens/93975/brightness-mode/night", env, {
+      method: "POST",
+      headers: { "X-SkyFrame-Homey-Token": "homey-secret" }
+    });
     const nightJson = await night.json() as Record<string, unknown>;
     expect(night.status).toBe(200);
     expect(nightJson.brightnessMode).toBe("night");
 
-    const off = await request("/api/screens/93975/screen-state/deactivate", env);
+    const off = await request("/api/screens/93975/screen-state/deactivate", env, {
+      method: "POST",
+      headers: { Authorization: "Bearer homey-secret" }
+    });
     const offJson = await off.json() as Record<string, unknown>;
     expect(off.status).toBe(200);
     expect(offJson.active).toBe(false);
+
+    const publicOn = await request("/public/homey/screens/93975/screen-state/activate", env, {
+      method: "POST",
+      headers: { "X-SkyFrame-Homey-Token": "homey-secret" }
+    });
+    const publicOnJson = await publicOn.json() as Record<string, unknown>;
+    expect(publicOn.status).toBe(200);
+    expect(publicOnJson.active).toBe(true);
   });
 
   it("requires DEVICE_API_TOKEN for /public routes when configured", async () => {

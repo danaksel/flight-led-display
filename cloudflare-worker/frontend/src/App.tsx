@@ -11,6 +11,7 @@ type Config = {
     screens?: AccountScreen[];
   };
   fr24Key?: Fr24KeyStatus;
+  homeyToken?: HomeyTokenStatus | null;
   lat: number;
   lon: number;
   radiusKm: number;
@@ -85,6 +86,13 @@ type Fr24KeyStatus = {
   screenConfigured: boolean;
   source: string;
   screenId?: string;
+};
+
+type HomeyTokenStatus = {
+  configured: boolean;
+  token?: string;
+  createdAt?: string;
+  rotatedAt?: string | null;
 };
 
 type DeviceCommand = "restart" | "unpair" | "forget_wifi" | "factory_reset";
@@ -367,6 +375,7 @@ const defaultConfig: Config = {
   screenId: "main",
   account: { email: null, screens: [] },
   fr24Key: { configured: false, screenConfigured: false, source: "missing" },
+  homeyToken: null,
   lat: 59.9139,
   lon: 10.7522,
   radiusKm: 10,
@@ -580,9 +589,10 @@ function normalizeConfig(input: Partial<Config> & Record<string, unknown>): Conf
                 };
               }).filter((screen) => screen.screenId)
             : []
-        }
+    }
       : { email: null, screens: [] },
     fr24Key: normalizeFr24KeyStatus(input.fr24Key),
+    homeyToken: normalizeHomeyTokenStatus(input.homeyToken),
     lat: Number(input.lat ?? defaultConfig.lat),
     lon: Number(input.lon ?? defaultConfig.lon),
     radiusKm: Number(input.radiusKm ?? defaultConfig.radiusKm),
@@ -644,6 +654,17 @@ function normalizeFr24KeyStatus(value: unknown): Fr24KeyStatus {
     screenConfigured: Boolean(v.screenConfigured),
     source: typeof v.source === "string" ? v.source : "missing",
     screenId: typeof v.screenId === "string" ? v.screenId : undefined
+  };
+}
+
+function normalizeHomeyTokenStatus(value: unknown): HomeyTokenStatus | null {
+  const v = value && typeof value === "object" ? value as Partial<HomeyTokenStatus> : null;
+  if (!v) return null;
+  return {
+    configured: Boolean(v.configured),
+    token: typeof v.token === "string" ? v.token : undefined,
+    createdAt: typeof v.createdAt === "string" ? v.createdAt : undefined,
+    rotatedAt: typeof v.rotatedAt === "string" ? v.rotatedAt : null
   };
 }
 
@@ -1931,7 +1952,7 @@ function DisplayModePicker(props: { value: DisplayBehaviorMode; fr24Enabled: boo
               </span>
               <span>
                 <span style={{ display: "block", fontSize: "14px", fontWeight: 750 }}>{option.title}</span>
-                <span style={{ display: "block", marginTop: "4px", fontSize: "12px", lineHeight: 1.4, color: "var(--muted-foreground)" }}>{locked ? "Requires a personal FR24 key for this screen." : option.description}</span>
+                <span style={{ display: "block", marginTop: "4px", fontSize: "12px", lineHeight: 1.4, color: "var(--muted-foreground)" }}>{locked ? "Requires an account FR24 key." : option.description}</span>
               </span>
             </button>
           );
@@ -2429,22 +2450,16 @@ export default function App() {
   }
 
   async function saveFr24Key(apiKey: string) {
-    const screenId = config.screenId || selectedScreenIdFromLocation();
-    if (!screenId || screenId === "main") {
-      setStatus("Open a paired screen before saving FR24");
-      setStatusTone("error");
-      return;
-    }
     setBusy(true);
     try {
-      const saved = await apiFetch<Fr24KeyStatus>(`/api/screens/${encodeURIComponent(screenId)}/fr24-key`, {
+      const saved = await apiFetch<Fr24KeyStatus>("/api/account/fr24-key", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ apiKey })
       });
       setConfig((current) => ({
         ...current,
-        fr24Key: { ...saved, configured: true, screenConfigured: true, source: "screen", screenId }
+        fr24Key: { ...saved, configured: true, screenConfigured: true, source: "account", screenId: current.screenId }
       }));
       setStatus("FR24 key saved");
       setStatusTone("success");
@@ -2555,12 +2570,25 @@ export default function App() {
   const accountScreens = config.account?.screens ?? [];
   const hasRealScreens = accountScreens.length > 0 || isDirectPairedScreen;
   const apiScreenId = hasRealScreens && displayScreenId !== "main" ? displayScreenId : "";
+  const publicOrigin = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
+    ? "https://skyframe.danaksel.no"
+    : window.location.origin;
+  const homeyToken = config.homeyToken?.token || "";
   const homeyLinks = apiScreenId ? [
-    { label: "Screen on", href: `${window.location.origin}/api/screens/${encodeURIComponent(apiScreenId)}/screen-state/activate` },
-    { label: "Screen off", href: `${window.location.origin}/api/screens/${encodeURIComponent(apiScreenId)}/screen-state/deactivate` },
-    { label: "Night mode on", href: `${window.location.origin}/api/screens/${encodeURIComponent(apiScreenId)}/brightness-mode/night` },
-    { label: "Night mode off", href: `${window.location.origin}/api/screens/${encodeURIComponent(apiScreenId)}/brightness-mode/day` }
+    { label: "Screen on", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/screen-state/activate` },
+    { label: "Screen off", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/screen-state/deactivate` },
+    { label: "Night mode on", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/brightness-mode/night` },
+    { label: "Night mode off", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/brightness-mode/day` }
   ] : [];
+  const accountHomeyLinks = accountScreens.flatMap((screen) => {
+    const screenId = screen.screenId;
+    return [
+      { screen, label: "Screen on", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(screenId)}/screen-state/activate` },
+      { screen, label: "Screen off", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(screenId)}/screen-state/deactivate` },
+      { screen, label: "Night mode on", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(screenId)}/brightness-mode/night` },
+      { screen, label: "Night mode off", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(screenId)}/brightness-mode/day` }
+    ];
+  });
   const debugApiLinks = apiScreenId ? [
     `/api/screens/${encodeURIComponent(apiScreenId)}/config`,
     `/api/screens/${encodeURIComponent(apiScreenId)}/display`,
@@ -2576,6 +2604,22 @@ export default function App() {
     "/api/sound-test",
     "/api/avinor-board"
   ];
+
+  async function rotateHomeyToken() {
+    const confirmed = window.confirm("Rotate Homey token? Existing Homey flows must be updated with the new token.");
+    if (!confirmed) return;
+    try {
+      const next = await apiFetch<HomeyTokenStatus>("/api/account/homey-token/rotate", {
+        method: "POST"
+      });
+      setConfig((current) => ({
+        ...current,
+        homeyToken: next
+      }));
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "Could not rotate Homey token");
+    }
+  }
 
   return (
     <div style={appStyles.shell}>
@@ -2631,16 +2675,80 @@ export default function App() {
       </header>
 
       {accountModalOpen ? (
-        <div style={{ position: "absolute", inset: 0, zIndex: 2000, display: "grid", placeItems: "center", padding: "20px", background: "rgba(34, 20, 12, 0.28)" }} onClick={() => setAccountModalOpen(false)}>
-          <div style={{ ...cardStyle("18px"), width: "min(340px, 100%)", display: "grid", gap: "14px", background: "var(--card)" }} onClick={(event) => event.stopPropagation()}>
+        <div style={{ position: "absolute", inset: 0, zIndex: 2000, display: "flex", justifyContent: "flex-end", background: "rgba(34, 20, 12, 0.28)" }} onClick={() => setAccountModalOpen(false)}>
+          <aside style={{ width: "min(440px, 100%)", height: "100%", overflow: "auto", background: "var(--background)", borderLeft: "1px solid var(--border-mid)", boxShadow: "-24px 0 70px rgba(34, 20, 12, 0.24)", padding: "18px", display: "grid", alignContent: "start", gap: "14px" }} onClick={(event) => event.stopPropagation()}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
-              <div style={{ fontSize: "16px", fontWeight: 750 }}>Account</div>
-              <button type="button" aria-label="Close account" onClick={() => setAccountModalOpen(false)} style={{ width: "32px", height: "32px", borderRadius: "999px", border: "1px solid var(--border-mid)", background: "transparent", color: "var(--primary)", padding: 0 }}>×</button>
+              <div>
+                <div style={{ fontSize: "20px", fontWeight: 850 }}>Account</div>
+                <div style={{ marginTop: "4px", fontSize: "12px", color: "var(--muted-foreground)", overflowWrap: "anywhere" }}>{accountEmail}</div>
+              </div>
+              <button type="button" aria-label="Close account" onClick={() => setAccountModalOpen(false)} style={{ width: "34px", height: "34px", borderRadius: "999px", border: "1px solid var(--border-mid)", background: "rgba(255,255,255,0.54)", color: "var(--primary)", padding: 0, fontSize: "20px", lineHeight: 1 }}>×</button>
             </div>
-            <div style={{ fontSize: "12px", color: "var(--muted-foreground)" }}>Signed in as</div>
-            <div style={{ fontSize: "14px", fontWeight: 700, overflowWrap: "anywhere" }}>{accountEmail}</div>
-            <a href={logoutUrl} style={{ height: "44px", borderRadius: "8px", background: "var(--primary)", color: "#fff", display: "grid", placeItems: "center", textDecoration: "none", fontWeight: 750 }}>Log out</a>
-          </div>
+
+            <section style={{ ...cardStyle("14px"), display: "grid", gap: "12px" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
+                <div>
+                  <div style={{ fontSize: "14px", fontWeight: 800 }}>FR24</div>
+                  <div style={{ marginTop: "3px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>Personal key for all screens on this account.</div>
+                </div>
+                <StatusPill label={fr24Enabled ? "Connected" : "Missing"} tone={fr24Enabled ? "good" : "warn"} />
+              </div>
+              <Field label={fr24Enabled ? "Replace account key" : "Account FR24 API key"}>
+                <TextInput value={fr24Input} placeholder="Paste personal FR24 key" onChange={(event) => setFr24Input(event.target.value)} />
+              </Field>
+              <button
+                type="button"
+                disabled={busy || !fr24Input.trim()}
+                onClick={() => {
+                  const value = fr24Input.trim();
+                  setFr24Input("");
+                  void saveFr24Key(value);
+                }}
+                style={{ height: "42px", borderRadius: "8px", border: 0, background: "var(--primary)", color: "#fff", fontSize: "14px", fontWeight: 800, opacity: busy || !fr24Input.trim() ? 0.55 : 1 }}
+              >
+                Save FR24 key
+              </button>
+            </section>
+
+            <section style={{ ...cardStyle("14px"), display: "grid", gap: "12px" }}>
+              <div>
+                <div style={{ fontSize: "14px", fontWeight: 800 }}>My screens</div>
+                <div style={{ marginTop: "3px", fontSize: "12px", color: "var(--muted-foreground)" }}>{accountScreens.length ? `${accountScreens.length} paired screen${accountScreens.length === 1 ? "" : "s"}` : "No paired screens yet"}</div>
+              </div>
+              <div style={{ display: "grid", gap: "8px" }}>
+                {accountScreens.map((screen) => (
+                  <button key={screen.screenId} type="button" onClick={() => { window.location.href = `/?screenId=${encodeURIComponent(screen.screenId)}`; }} style={{ textAlign: "left", display: "grid", gap: "3px", padding: "10px 12px", borderRadius: "8px", border: "1px solid var(--border-mid)", background: screen.screenId === displayScreenId ? "rgba(70, 41, 24, 0.1)" : "rgba(255,255,255,0.52)", color: "var(--foreground)", cursor: "pointer" }}>
+                    <span style={{ fontSize: "13px", fontWeight: 800 }}>{screen.label || "Unnamed location"}</span>
+                    <span style={{ fontSize: "11px", color: "var(--muted-foreground)" }}>Screen {screen.screenId}{screen.deviceId ? ` · ${screen.deviceId}` : ""}</span>
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <section style={{ ...cardStyle("14px"), display: "grid", gap: "12px" }}>
+              <div>
+                <div style={{ fontSize: "14px", fontWeight: 800 }}>Homey API</div>
+                <div style={{ marginTop: "3px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>Use HTTP POST and include this account token.</div>
+              </div>
+              <div style={{ padding: "10px 12px", borderRadius: "8px", background: "rgba(255,255,255,0.5)", border: "1px solid var(--border-mid)", fontSize: "12px", overflowWrap: "anywhere" }}>
+                <strong>X-SkyFrame-Homey-Token:</strong> {homeyToken || "Loading token..."}
+              </div>
+              <button type="button" onClick={rotateHomeyToken} style={{ width: "fit-content", minHeight: "34px", padding: "0 12px", borderRadius: "999px", border: "1px solid rgba(68, 43, 28, 0.22)", background: "rgba(255, 255, 255, 0.62)", color: "var(--foreground)", fontSize: "12px", fontWeight: 800, cursor: "pointer" }}>
+                Rotate token
+              </button>
+              <div style={{ display: "grid", gap: "8px" }}>
+                {accountHomeyLinks.map((link) => (
+                  <div key={`${link.screen.screenId}-${link.href}`} style={{ padding: "10px 12px", borderRadius: "8px", border: "1px solid var(--border-mid)", background: "rgba(255,255,255,0.5)", fontSize: "12px", overflowWrap: "anywhere" }}>
+                    <strong style={{ display: "block", marginBottom: "3px" }}>{link.screen.label || "Screen"} · {link.label}</strong>
+                    <span style={{ display: "block", color: "var(--muted-foreground)", marginBottom: "4px" }}>POST</span>
+                    {link.href}
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            <a href={logoutUrl} style={{ height: "44px", borderRadius: "8px", background: "var(--primary)", color: "#fff", display: "grid", placeItems: "center", textDecoration: "none", fontWeight: 800 }}>Log out</a>
+          </aside>
         </div>
       ) : null}
 
@@ -2772,32 +2880,6 @@ export default function App() {
               <SliderField label="Config refresh" value={config.device.configRefreshSeconds} min={60} max={3600} step={30} suffix=" s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, configRefreshSeconds: value } }))} />
               <DisplayStatusCard config={config} screenState={screenState} preview={preview} statusTone={statusTone} />
               <div style={{ ...cardStyle(), display: "grid", gap: "12px" }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
-                  <div>
-                    <div style={{ fontSize: "14px", fontWeight: 750 }}>FR24 key</div>
-                    <div style={{ marginTop: "4px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>
-                      Unlocks AirSpace, Follow Flight and AirSpace + Airport Board for this screen.
-                    </div>
-                  </div>
-                  <StatusPill label={fr24Enabled ? "Connected" : "Missing"} tone={fr24Enabled ? "good" : "warn"} />
-                </div>
-                <Field label={fr24Enabled ? "Replace key" : "Personal FR24 API key"}>
-                  <TextInput value={fr24Input} placeholder="Paste personal FR24 key" onChange={(event) => setFr24Input(event.target.value)} />
-                </Field>
-                <button
-                  type="button"
-                  disabled={busy || !fr24Input.trim()}
-                  onClick={() => {
-                    const value = fr24Input.trim();
-                    setFr24Input("");
-                    void saveFr24Key(value);
-                  }}
-                  style={{ height: "42px", borderRadius: "8px", border: 0, background: "var(--primary)", color: "#fff", fontSize: "15px", fontWeight: 750, opacity: busy || !fr24Input.trim() ? 0.55 : 1 }}
-                >
-                  Save FR24 key
-                </button>
-              </div>
-              <div style={{ ...cardStyle(), display: "grid", gap: "12px" }}>
                 <div>
                   <div style={{ fontSize: "14px", fontWeight: 750 }}>Screen maintenance</div>
                   <div style={{ marginTop: "4px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>
@@ -2873,7 +2955,7 @@ export default function App() {
                 <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", cursor: "pointer" }}>
                   <span style={{ minWidth: 0, flex: "1 1 auto" }}>
                     <span style={{ display: "block", fontSize: "14px" }}>Track flight numbers</span>
-                    <span style={{ display: "block", marginTop: "4px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.4 }}>{fr24Enabled ? "Tracked flights can activate Airspace mode." : "Requires a personal FR24 key for this screen."}</span>
+                    <span style={{ display: "block", marginTop: "4px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.4 }}>{fr24Enabled ? "Tracked flights can activate Airspace mode." : "Requires an account FR24 key."}</span>
                   </span>
                   <span style={{ position: "relative", width: "46px", minWidth: "46px", flex: "0 0 46px", height: "28px", borderRadius: "999px", background: config.follow.enabled && fr24Enabled ? "var(--primary)" : "var(--secondary)", transition: "background 160ms ease", opacity: fr24Enabled ? 1 : 0.55 }}>
                     <input type="checkbox" disabled={!fr24Enabled} checked={fr24Enabled && config.follow.enabled} onChange={(event) => updateConfig((current) => ({ ...current, follow: { ...current.follow, enabled: event.target.checked } }))} style={{ position: "absolute", inset: 0, opacity: 0 }} />
@@ -3073,14 +3155,24 @@ export default function App() {
                   {homeyLinks.length ? (
                     <div style={{ display: "grid", gap: "10px" }}>
                       <div style={{ fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>
-                        Homey links for Screen {apiScreenId}. Use GET or POST. If `ADMIN_API_TOKEN` is configured, send it as `X-Flight-Admin-Token` or Bearer token.
+                        Homey commands for Screen {apiScreenId}. Send HTTP POST and include your account token as X-SkyFrame-Homey-Token.
+                      </div>
+                      <div style={cardStyle("10px 12px")}>
+                        <div style={{ fontSize: "11px", fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted-foreground)" }}>Token header</div>
+                        <div style={{ marginTop: "6px", fontSize: "12px", overflowWrap: "anywhere" }}>
+                          <strong>X-SkyFrame-Homey-Token:</strong> {homeyToken || "Loading token..."}
+                        </div>
+                        <button type="button" onClick={rotateHomeyToken} style={{ marginTop: "10px", width: "fit-content", minHeight: "34px", padding: "0 12px", borderRadius: "999px", border: "1px solid rgba(68, 43, 28, 0.22)", background: "rgba(255, 255, 255, 0.62)", color: "var(--foreground)", fontSize: "12px", fontWeight: 800, cursor: "pointer" }}>
+                          Rotate token
+                        </button>
                       </div>
                       <div style={{ display: "grid", gap: "10px", gridTemplateColumns: "1fr 1fr" }}>
                         {homeyLinks.map((link) => (
-                          <a key={link.href} href={link.href} target="_blank" rel="noreferrer" style={{ ...cardStyle("10px 12px"), textDecoration: "none", fontSize: "12px", overflowWrap: "anywhere" }}>
+                          <div key={link.href} style={{ ...cardStyle("10px 12px"), fontSize: "12px", overflowWrap: "anywhere" }}>
                             <strong style={{ display: "block", marginBottom: "4px" }}>{link.label}</strong>
-                            {link.href.replace(window.location.origin, "")}
-                          </a>
+                            <span style={{ display: "block", color: "var(--muted-foreground)", marginBottom: "4px" }}>POST</span>
+                            {link.href}
+                          </div>
                         ))}
                       </div>
                     </div>

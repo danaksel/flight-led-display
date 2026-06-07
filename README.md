@@ -215,7 +215,7 @@ npx wrangler secret put FR24_API_KEY
 npx wrangler secret put AVIATIONSTACK_API_KEY
 ```
 
-`FR24_API_KEY` is only a shared fallback. Customer screens should normally use their own FR24 key from the control panel.
+`FR24_API_KEY` is only a shared fallback. Customer screens should normally use the owner's FR24 key from the account panel in the control panel. The key is account-scoped, so it survives screen unpairing, Wi-Fi changes, factory reset and re-pairing.
 
 Optional automation/device hardening:
 
@@ -223,6 +223,20 @@ Optional automation/device hardening:
 npx wrangler secret put ADMIN_API_TOKEN
 npx wrangler secret put DEVICE_API_TOKEN
 ```
+
+## Homey API
+
+Homey commands use a per-account token from the account panel. The same token can control every screen owned by that account, while each URL still targets a specific screen.
+
+```text
+POST https://skyframe.danaksel.no/public/homey/screens/{screenId}/screen-state/activate
+POST https://skyframe.danaksel.no/public/homey/screens/{screenId}/screen-state/deactivate
+POST https://skyframe.danaksel.no/public/homey/screens/{screenId}/brightness-mode/night
+POST https://skyframe.danaksel.no/public/homey/screens/{screenId}/brightness-mode/day
+X-SkyFrame-Homey-Token: <account-token>
+```
+
+The Worker validates `X-SkyFrame-Homey-Token`. `/api/screens/{screenId}/...` aliases also exist, but those require a Cloudflare Access bypass before Homey can reach the Worker.
 
 ## Verification Checklist
 
@@ -232,7 +246,7 @@ npx wrangler secret put DEVICE_API_TOKEN
 - Control panel shows screen ID and location in the header.
 - Multiple screens owned by the same account can be selected from the header.
 - AirSpace and Follow modes are disabled until the screen has a personal FR24 key.
-- Header account icon opens signed-in user and logout.
+- Header account icon opens the account panel with signed-in user, screens, FR24 and Homey token.
 - Power switch turns the screen on/off.
 - General screen can restart, unpair or reset Wi-Fi remotely.
 - Admin shows all active screens, owners and clean vitals.
