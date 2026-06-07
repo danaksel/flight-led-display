@@ -1,6 +1,6 @@
 {
-  "version": "V1",
-  "url": "https://skyframe.danaksel.no/public/firmware/skyframe-v1.bin",
-  "sha256": "82440bcd1c520d63e099e6746e7e0f31e5b303e58beaba8cdb334cfe4168ba56",
+  "version": "V1.1",
+  "url": "https://skyframe.danaksel.no/public/firmware/skyframe-v1.1.bin",
+  "sha256": "912282a58911b998549e51a9f12fc66fa33d2714e1e17d47fb0f2354f72234db",
   "size": 1109696
 }
