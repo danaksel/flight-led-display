@@ -114,7 +114,7 @@ Wi-Fi and device token are stored in ESP32 Preferences/NVS so normal firmware up
 
 ## OTA
 
-This firmware is built with `partitions_ota_32mb.csv`, which provides dual OTA app partitions. `SKYFRAME_FW_VERSION` in `src/main.cpp` identifies the running version.
+This firmware uses the ESP32 Arduino default dual OTA partition layout for the `esp32s3camlcd` board (`ota_0` and `ota_1`). `SKYFRAME_FW_VERSION` in `src/main.cpp` identifies the running version.
 
 OTA is skipped while Wi-Fi setup mode is active. If download, write or SHA-256 verification fails, the current firmware keeps running and reports the failure in `/public/device-status`.
 
