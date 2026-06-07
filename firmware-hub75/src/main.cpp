@@ -85,6 +85,8 @@ constexpr uint32_t OtaPollIntervalMs = 6UL * 60UL * 60UL * 1000UL;
 constexpr uint32_t OtaRetryIntervalMs = 30UL * 60UL * 1000UL;
 constexpr uint32_t OtaDownloadTimeoutMs = 120000UL;
 constexpr uint32_t OtaNetworkLockWaitMs = 15000UL;
+constexpr uint32_t NetworkPollTaskStackBytes = 10000;
+constexpr uint32_t SoundPollTaskStackBytes = 20000;
 constexpr uint8_t SetupButtonPin = 0;
 constexpr uint32_t WifiConnectTimeoutMs = 6500;
 constexpr uint16_t ConfigFallbackPollSeconds = 300;
@@ -3844,7 +3846,7 @@ void setup()
         xTaskCreatePinnedToCore(
             networkPollTask,
             "network_poll",
-            10000,
+            NetworkPollTaskStackBytes,
             nullptr,
             1,
             &networkPollTaskHandle,
@@ -3855,7 +3857,7 @@ void setup()
         xTaskCreatePinnedToCore(
             soundPollTask,
             "sound_poll",
-            8192,
+            SoundPollTaskStackBytes,
             nullptr,
             1,
             &soundPollTaskHandle,
