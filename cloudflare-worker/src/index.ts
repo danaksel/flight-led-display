@@ -1178,8 +1178,20 @@ async function sendDeviceCommand(request: Request, env: Env, context?: RequestCo
   const command = normalizeDeviceCommand(firstString(body, ["command", "action"]));
   if (!command) return jsonResponse({ error: "Expected restart, unpair, forget_wifi or factory_reset" }, 400, { "Cache-Control": "no-store" });
 
+  const device = await findActiveDeviceRecordByScreen(env, screenId);
+  if (device?.ownerEmail && context?.userEmail && normalizeEmail(device.ownerEmail) !== normalizeEmail(context.userEmail)) {
+    return jsonResponse({ error: "Screen owner required" }, 403, { "Cache-Control": "no-store" });
+  }
+
   const written = await writeDeviceCommand(env, { ...context, screenId }, command, "control-panel");
-  return jsonResponse({ ok: true, deviceCommand: written }, 200, { "Cache-Control": "no-store" });
+  if (command === "unpair" || command === "forget_wifi" || command === "factory_reset") {
+    await removePairedScreen(env, screenId, device);
+  }
+  return jsonResponse({
+    ok: true,
+    deviceCommand: written,
+    redirectTo: command === "restart" ? null : "/start"
+  }, 200, { "Cache-Control": "no-store" });
 }
 
 async function adminDeviceCommand(request: Request, env: Env, context: RequestContext | undefined, pathname: string): Promise<Response> {
@@ -1204,29 +1216,11 @@ async function deleteAdminScreen(request: Request, env: Env, context: RequestCon
   const screenId = normalizeId(match?.[1]);
   if (!screenId) return jsonResponse({ error: "Screen ID required" }, 400, { "Cache-Control": "no-store" });
 
-  const devices = await listDeviceRecords(env);
-  const device = devices.find((record) => record.screenId === screenId);
+  const device = await findActiveDeviceRecordByScreen(env, screenId);
   await writeDeviceCommand(env, { screenId }, "unpair", "admin-delete");
+  const deletedAt = await removePairedScreen(env, screenId, device);
 
-  const now = new Date().toISOString();
-  const deleteKeys = [
-    scopedKey(CONFIG_KEY, { screenId }),
-    scopedKey(SCREEN_STATE_KEY, { screenId }),
-    scopedKey(SOUND_STATE_KEY, { screenId }),
-    scopedKey(DEVICE_STATUS_KEY, { screenId }),
-    fr24ScreenSecretKey(screenId)
-  ];
-  await Promise.all(deleteKeys.map((key) => env.FLIGHT_DISPLAY_KV.delete(key)));
-
-  if (device) {
-    const tombstone: DeviceRecord = { ...device, deletedAt: now };
-    await Promise.all([
-      env.FLIGHT_DISPLAY_KV.put(deviceRecordKey(device.deviceId), JSON.stringify(tombstone)),
-      env.FLIGHT_DISPLAY_KV.put(deviceTokenKey(device.tokenHash), JSON.stringify(tombstone), { expirationTtl: 60 * 60 })
-    ]);
-  }
-
-  return jsonResponse({ ok: true, screenId, deletedAt: now }, 200, { "Cache-Control": "no-store" });
+  return jsonResponse({ ok: true, screenId, deletedAt }, 200, { "Cache-Control": "no-store" });
 }
 
 async function listDeviceRecords(env: Env): Promise<DeviceRecord[]> {
@@ -1241,6 +1235,32 @@ async function listDeviceRecords(env: Env): Promise<DeviceRecord[]> {
     cursor = listed.list_complete ? undefined : listed.cursor;
   } while (cursor);
   return records;
+}
+
+async function findActiveDeviceRecordByScreen(env: Env, screenId: string): Promise<DeviceRecord | undefined> {
+  const devices = await listDeviceRecords(env);
+  return devices.find((record) => record.screenId === screenId);
+}
+
+async function removePairedScreen(env: Env, screenId: string, device?: DeviceRecord): Promise<string> {
+  const deletedAt = new Date().toISOString();
+  const deleteKeys = [
+    scopedKey(CONFIG_KEY, { screenId }),
+    scopedKey(SCREEN_STATE_KEY, { screenId }),
+    scopedKey(SOUND_STATE_KEY, { screenId }),
+    scopedKey(DEVICE_STATUS_KEY, { screenId }),
+    fr24ScreenSecretKey(screenId)
+  ];
+  await Promise.all(deleteKeys.map((key) => env.FLIGHT_DISPLAY_KV.delete(key)));
+
+  if (device) {
+    const tombstone: DeviceRecord = { ...device, deletedAt };
+    await Promise.all([
+      env.FLIGHT_DISPLAY_KV.put(deviceRecordKey(device.deviceId), JSON.stringify(tombstone)),
+      env.FLIGHT_DISPLAY_KV.put(deviceTokenKey(device.tokenHash), JSON.stringify(tombstone), { expirationTtl: 60 * 60 })
+    ]);
+  }
+  return deletedAt;
 }
 
 async function saveConfig(request: Request, env: Env, context?: RequestContext): Promise<Response> {

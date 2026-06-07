@@ -2481,13 +2481,16 @@ export default function App() {
     if (confirmMessage && !window.confirm(confirmMessage)) return;
     setBusy(true);
     try {
-      await apiFetch<{ ok: boolean }>("/api/device-command", {
+      const result = await apiFetch<{ ok: boolean; redirectTo?: string | null }>("/api/device-command", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ command })
       });
       setStatus(message);
       setStatusTone("success");
+      if (result.redirectTo) {
+        window.location.href = result.redirectTo;
+      }
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Could not send command");
       setStatusTone("error");
@@ -2765,7 +2768,7 @@ export default function App() {
                   <button
                     type="button"
                     disabled={busy}
-                    onClick={() => void sendDeviceCommand("unpair", "Pairing mode command sent", "Send this screen back to pairing mode? It will stay on the same Wi-Fi network.")}
+                    onClick={() => void sendDeviceCommand("unpair", "Pairing mode command sent", "Send this screen back to pairing mode? It will be removed from this account and stay on the same Wi-Fi network.")}
                     style={{ height: "42px", borderRadius: "8px", border: "1px solid var(--border-mid)", background: "var(--card)", color: "var(--foreground)", fontSize: "14px", fontWeight: 750, opacity: busy ? 0.55 : 1 }}
                   >
                     Pair again
@@ -2773,7 +2776,7 @@ export default function App() {
                   <button
                     type="button"
                     disabled={busy}
-                    onClick={() => void sendDeviceCommand("forget_wifi", "Wi-Fi reset command sent", "Forget Wi-Fi on this screen? It will open setup mode again.")}
+                    onClick={() => void sendDeviceCommand("forget_wifi", "Wi-Fi reset command sent", "Forget Wi-Fi on this screen? It will be removed from this account and open setup mode again.")}
                     style={{ height: "42px", borderRadius: "8px", border: "1px solid rgba(180,35,24,0.24)", background: "rgba(180,35,24,0.08)", color: "#b42318", fontSize: "14px", fontWeight: 750, opacity: busy ? 0.55 : 1 }}
                   >
                     Change Wi-Fi
@@ -2781,7 +2784,7 @@ export default function App() {
                   <button
                     type="button"
                     disabled={busy}
-                    onClick={() => void sendDeviceCommand("factory_reset", "Factory reset command sent", "Factory reset this screen? It will forget the account and Wi-Fi.")}
+                    onClick={() => void sendDeviceCommand("factory_reset", "Factory reset command sent", "Factory reset this screen? It will be removed from this account and forget Wi-Fi.")}
                     style={{ height: "42px", borderRadius: "8px", border: "1px solid rgba(180,35,24,0.24)", background: "rgba(180,35,24,0.08)", color: "#b42318", fontSize: "14px", fontWeight: 750, opacity: busy ? 0.55 : 1 }}
                   >
                     Factory reset
