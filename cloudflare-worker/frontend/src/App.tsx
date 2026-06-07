@@ -665,6 +665,10 @@ function selectedScreenIdFromLocation(): string {
   return new URLSearchParams(window.location.search).get("screenId") || "";
 }
 
+function justPairedFromLocation(): boolean {
+  return new URLSearchParams(window.location.search).get("paired") === "1";
+}
+
 function withScreenQuery(url: string): string {
   const screenId = selectedScreenIdFromLocation();
   if (!screenId || !url.startsWith("/api/") || url.startsWith("/api/screens/") || url.includes("screenId=")) return url;
@@ -2326,6 +2330,19 @@ export default function App() {
     node.scrollLeft = slideIndexForSection(0) * node.clientWidth;
   }, [initialLoading]);
 
+  useEffect(() => {
+    if (!justPairedFromLocation()) return;
+    const retryTimer = window.setInterval(() => {
+      void loadConfig();
+      void loadDeviceStatus();
+    }, 2000);
+    const stopTimer = window.setTimeout(() => window.clearInterval(retryTimer), 20000);
+    return () => {
+      window.clearInterval(retryTimer);
+      window.clearTimeout(stopTimer);
+    };
+  }, []);
+
   function markDirty(message = "Endringer ikke lagret") {
     setStatus(message);
     setStatusTone("dirty");
@@ -2530,10 +2547,13 @@ export default function App() {
     ? preview.deviceStatus.ok ? "#00f900" : "#ff2600"
     : preview.deviceStatus ? "#ff9300" : "rgba(60, 36, 21, 0.34)";
   const displayScreenId = config.screenId || selectedScreenIdFromLocation() || "main";
+  const directScreenId = selectedScreenIdFromLocation();
+  const isDirectPairedScreen = Boolean(directScreenId && directScreenId !== "main" && config.screenId === directScreenId);
+  const isJustPaired = justPairedFromLocation();
   const accountEmail = config.account?.email || "Signed in";
   const logoutUrl = `/cdn-cgi/access/logout?returnTo=${encodeURIComponent(`${window.location.origin}/screen-setup`)}`;
   const accountScreens = config.account?.screens ?? [];
-  const hasRealScreens = accountScreens.length > 0;
+  const hasRealScreens = accountScreens.length > 0 || isDirectPairedScreen;
 
   return (
     <div style={appStyles.shell}>
@@ -2554,7 +2574,7 @@ export default function App() {
               </select>
             ) : (
               <div style={{ fontSize: "11px", color: "var(--muted-foreground)", lineHeight: 1.35, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {hasRealScreens ? (config.label || "Unnamed location") : "No paired screen"} · Screen {hasRealScreens ? displayScreenId : "-"}
+                {hasRealScreens ? (config.label || "Unnamed location") : isJustPaired ? "Setting up screen" : "No paired screen"} · Screen {hasRealScreens || isJustPaired ? displayScreenId : "-"}
               </div>
             )}
           </div>
@@ -2663,13 +2683,19 @@ export default function App() {
         {!initialLoading && !hasRealScreens ? (
           <div style={{ padding: "24px 20px", display: "grid", gap: "14px" }}>
             <div style={{ ...cardStyle("18px"), display: "grid", gap: "10px" }}>
-              <div style={{ fontSize: "18px", fontWeight: 750 }}>No paired screen</div>
+              <div style={{ fontSize: "18px", fontWeight: 750 }}>{isJustPaired ? "Preparing your screen" : "No paired screen"}</div>
               <div style={{ fontSize: "13px", color: "var(--muted-foreground)", lineHeight: 1.5 }}>
-                Pair a SkyFrame before opening the control panel.
+                {isJustPaired ? "The screen is paired. The control panel will appear as soon as Cloudflare has indexed the new screen." : "Pair a SkyFrame before opening the control panel."}
               </div>
-              <a href="/start" style={{ height: "44px", borderRadius: "8px", background: "var(--primary)", color: "#fff", display: "grid", placeItems: "center", textDecoration: "none", fontWeight: 750 }}>
-                Start pairing
-              </a>
+              {isJustPaired ? (
+                <button type="button" onClick={() => { void loadConfig(); }} style={{ height: "44px", borderRadius: "8px", border: 0, background: "var(--primary)", color: "#fff", fontWeight: 750 }}>
+                  Refresh
+                </button>
+              ) : (
+                <a href="/start" style={{ height: "44px", borderRadius: "8px", background: "var(--primary)", color: "#fff", display: "grid", placeItems: "center", textDecoration: "none", fontWeight: 750 }}>
+                  Start pairing
+                </a>
+              )}
             </div>
           </div>
         ) : initialLoading ? (
@@ -2768,18 +2794,20 @@ export default function App() {
                   <button
                     type="button"
                     disabled={busy}
-                    onClick={() => void sendDeviceCommand("unpair", "Pairing mode command sent", "Send this screen back to pairing mode? It will be removed from this account and stay on the same Wi-Fi network.")}
+                    onClick={() => void sendDeviceCommand("forget_wifi", "Wi-Fi setup command sent", "Forget Wi-Fi on this screen? The screen keeps its account and settings, then opens Wi-Fi setup mode.")}
                     style={{ height: "42px", borderRadius: "8px", border: "1px solid var(--border-mid)", background: "var(--card)", color: "var(--foreground)", fontSize: "14px", fontWeight: 750, opacity: busy ? 0.55 : 1 }}
                   >
-                    Pair again
+                    Change Wi-Fi
                   </button>
+                </div>
+                <div style={{ display: "grid", gap: "10px", gridTemplateColumns: "1fr 1fr" }}>
                   <button
                     type="button"
                     disabled={busy}
-                    onClick={() => void sendDeviceCommand("forget_wifi", "Wi-Fi reset command sent", "Forget Wi-Fi on this screen? It will be removed from this account and open setup mode again.")}
+                    onClick={() => void sendDeviceCommand("unpair", "Pairing mode command sent", "Send this screen back to pairing mode? It will be removed from this account and stay on the same Wi-Fi network.")}
                     style={{ height: "42px", borderRadius: "8px", border: "1px solid rgba(180,35,24,0.24)", background: "rgba(180,35,24,0.08)", color: "#b42318", fontSize: "14px", fontWeight: 750, opacity: busy ? 0.55 : 1 }}
                   >
-                    Change Wi-Fi
+                    Pair again
                   </button>
                   <button
                     type="button"

@@ -1185,13 +1185,13 @@ async function sendDeviceCommand(request: Request, env: Env, context?: RequestCo
   }
 
   const written = await writeDeviceCommand(env, { ...context, screenId }, command, "control-panel");
-  if (command === "unpair" || command === "forget_wifi" || command === "factory_reset") {
+  if (command === "unpair" || command === "factory_reset") {
     await removePairedScreen(env, screenId, device);
   }
   return jsonResponse({
     ok: true,
     deviceCommand: written,
-    redirectTo: command === "restart" ? null : "/start"
+    redirectTo: command === "unpair" || command === "factory_reset" ? "/start" : null
   }, 200, { "Cache-Control": "no-store" });
 }
 
@@ -4516,7 +4516,7 @@ function renderScreenSetupHtml(userEmail: string): string {
     function show(value) { output.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2); }
     function setStatus(text, tone) { connectionLabel.textContent = text; const dot = document.querySelector(".status-dot"); dot.style.background = tone === "ok" ? "var(--green)" : tone === "error" ? "#ff3b30" : "var(--amber)"; dot.style.boxShadow = tone === "ok" ? "0 0 0 4px rgba(0, 184, 112, 0.14)" : tone === "error" ? "0 0 0 4px rgba(255, 59, 48, 0.14)" : "0 0 0 4px rgba(255, 147, 0, 0.14)"; }
     async function api(path, body) { const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); const json = await response.json().catch(() => ({})); if (!response.ok) throw json; return json; }
-    function controlUrl() { return pairedScreenId ? "/?screenId=" + encodeURIComponent(pairedScreenId) : "/"; }
+    function controlUrl() { return pairedScreenId ? "/?screenId=" + encodeURIComponent(pairedScreenId) + "&paired=1" : "/?paired=1"; }
     pairingCodeInput.addEventListener("input", () => { pairingCodeInput.value = pairingCodeInput.value.toUpperCase().replace(/[^A-Z0-9-]/g, ""); });
     document.querySelector("#claimButton").addEventListener("click", async () => { setStatus("Pairing screen", "pending"); try { const json = await api("/api/provision/claim", { code: pairingCodeInput.value, label: screenLabelInput.value }); pairedScreenId = json.screenId || ""; pairedScreenIdLabel.textContent = "Ready for the control panel"; afterPairing.hidden = false; pairingCodeInput.disabled = true; screenLabelInput.disabled = true; document.querySelector("#claimButton").disabled = true; setStatus("Screen paired", "ok"); show("Paired. You can open the control panel now. FR24 is optional."); } catch (error) { setStatus("Pairing failed", "error"); show(error); } });
     document.querySelector("#saveFr24Button").addEventListener("click", async () => { if (!pairedScreenId) return show("Pair the screen before adding FR24."); setStatus("Saving FR24", "pending"); try { const json = await api("/api/screens/" + encodeURIComponent(pairedScreenId) + "/fr24-key", { apiKey: document.querySelector("#fr24Key").value }); document.querySelector("#fr24Key").value = ""; setStatus("FR24 connected", "ok"); show("FR24 saved. Opening control panel..."); window.location.href = controlUrl(); } catch (error) { setStatus("FR24 failed", "error"); show(error); } });

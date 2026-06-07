@@ -1998,7 +1998,6 @@ void executeDeviceCommand(const String &command, uint32_t nonce)
     }
     else if (command == "forget_wifi")
     {
-        clearDeviceProvisioning();
         wifiSetupManager.clearCredentials();
         drawBrandedStatusLines("WIFI SETUP", "Network cleared", "Restarting", "", colorHeader());
         delay(900);
