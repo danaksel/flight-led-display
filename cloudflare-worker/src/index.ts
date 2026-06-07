@@ -206,6 +206,13 @@ type DeviceCommand = {
   source: string;
 };
 
+type FirmwareManifest = {
+  version: string;
+  url: string;
+  sha256: string;
+  size: number;
+};
+
 type AircraftCategoryCode = "P" | "C" | "M" | "J" | "T" | "H" | "B" | "G" | "D" | "V" | "O" | "N";
 
 type RealtimeEvent = {
@@ -675,6 +682,7 @@ export default {
       if (url.pathname === "/api/device-config" && request.method === "GET") return deviceConfigResponse(env, context);
       if (url.pathname === "/api/realtime-state" && request.method === "GET") return realtimeStateResponse(env, context);
       if (url.pathname === "/api/device-status" && request.method === "GET") return deviceStatusResponse(env, context);
+      if (url.pathname === "/api/firmware/latest" && request.method === "GET") return firmwareLatestResponse(request, env);
       if (url.pathname === "/api/sound-state" && request.method === "GET") return soundStateResponse(env, context);
       if (url.pathname === "/api/logo-status" && request.method === "GET") return logoStatusResponse(env);
       if (url.pathname === "/api/admin/screens" && request.method === "GET") return adminScreensResponse(request, env, context);
@@ -912,6 +920,35 @@ async function firmwareAssetResponse(request: Request, env: Env, assetPath: stri
     statusText: response.statusText,
     headers
   });
+}
+
+function normalizeFirmwareManifest(value: unknown): FirmwareManifest | null {
+  const v = value && typeof value === "object" ? value as Partial<FirmwareManifest> : {};
+  if (typeof v.version !== "string" || !v.version.trim()) return null;
+  if (typeof v.url !== "string" || !v.url.trim()) return null;
+  if (typeof v.sha256 !== "string" || !/^[a-f0-9]{64}$/i.test(v.sha256)) return null;
+  if (typeof v.size !== "number" || !Number.isFinite(v.size) || v.size <= 0) return null;
+  return {
+    version: v.version.trim().slice(0, 40),
+    url: v.url.trim(),
+    sha256: v.sha256.trim().toLowerCase(),
+    size: Math.floor(v.size)
+  };
+}
+
+async function loadFirmwareManifest(request: Request, env: Env): Promise<FirmwareManifest | null> {
+  const assetUrl = new URL(request.url);
+  assetUrl.pathname = "/firmware/latest.json";
+  assetUrl.search = "";
+  const response = await env.ASSETS.fetch(new Request(assetUrl.toString(), request));
+  if (!response.ok) return null;
+  return normalizeFirmwareManifest(await response.json().catch(() => null));
+}
+
+async function firmwareLatestResponse(request: Request, env: Env): Promise<Response> {
+  const manifest = await loadFirmwareManifest(request, env);
+  if (!manifest) return jsonResponse({ error: "Firmware manifest unavailable" }, 503, { "Cache-Control": "no-store" });
+  return jsonResponse(manifest, 200, { "Cache-Control": "no-store" });
 }
 
 function realtimeResponse(request: Request, env: Env, context?: RequestContext): Response | Promise<Response> {

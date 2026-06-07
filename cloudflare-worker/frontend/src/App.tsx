@@ -257,6 +257,13 @@ type DeviceStatus = {
   source?: string | null;
 };
 
+type FirmwareLatest = {
+  version: string;
+  url: string;
+  sha256: string;
+  size: number;
+};
+
 type PreviewState = {
   meta: string;
   flights: DisplayFlight[];
@@ -770,6 +777,31 @@ function wifiSignalLabel(rssi: number | null | undefined): string {
   if (rssi >= -67) return `${rssi} dBm · bra`;
   if (rssi >= -75) return `${rssi} dBm · svakt`;
   return `${rssi} dBm · kritisk`;
+}
+
+function versionParts(version: string | null | undefined): number[] {
+  const matches = String(version || "").match(/\d+/g) || [];
+  return matches.slice(0, 4).map((part) => Number.parseInt(part, 10)).filter((part) => Number.isFinite(part));
+}
+
+function isVersionNewer(latest: string | null | undefined, current: string | null | undefined): boolean {
+  const latestParts = versionParts(latest);
+  const currentParts = versionParts(current);
+  if (!latestParts.length || !currentParts.length) return false;
+  const length = Math.max(latestParts.length, currentParts.length);
+  for (let index = 0; index < length; index += 1) {
+    const latestPart = latestParts[index] || 0;
+    const currentPart = currentParts[index] || 0;
+    if (latestPart > currentPart) return true;
+    if (latestPart < currentPart) return false;
+  }
+  return String(latest || "") !== String(current || "") && String(latest || "").length > String(current || "").length;
+}
+
+function firmwareStatusLabel(currentVersion: string, latest: FirmwareLatest | null, otaStatus: string | null | undefined): string {
+  if (latest && isVersionNewer(latest.version, currentVersion)) return `Update available: ${latest.version}`;
+  if (latest && latest.version === currentVersion) return "Up to date";
+  return otaStatus || "idle";
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -2314,6 +2346,7 @@ export default function App() {
   const [screenState, setScreenState] = useState<ScreenState>(defaultScreenState);
   const [soundState, setSoundState] = useState<SoundState>(defaultSoundState);
   const [preview, setPreview] = useState<PreviewState>({ meta: "", flights: [], idleScreens: [], avinorRows: [], mode: "idle", updatedAt: null, error: null, liveSourceStatus: null, deviceStatus: null });
+  const [firmwareLatest, setFirmwareLatest] = useState<FirmwareLatest | null>(null);
   const [status, setStatus] = useState("Laster innstillinger...");
   const [statusTone, setStatusTone] = useState<"idle" | "dirty" | "error" | "success">("idle");
   const [fr24Input, setFr24Input] = useState("");
@@ -2329,11 +2362,12 @@ export default function App() {
 
   useEffect(() => {
     let mounted = true;
-    void Promise.allSettled([loadConfig(), loadPreview(), loadAvinor(), loadDeviceStatus()]).finally(() => {
+    void Promise.allSettled([loadConfig(), loadPreview(), loadAvinor(), loadDeviceStatus(), loadFirmwareLatest()]).finally(() => {
       if (mounted) setInitialLoading(false);
     });
     const deviceStatusTimer = window.setInterval(() => {
       void loadDeviceStatus();
+      void loadFirmwareLatest();
     }, 15000);
     return () => {
       mounted = false;
@@ -2429,6 +2463,15 @@ export default function App() {
       setPreview((current) => ({ ...current, deviceStatus: data ?? null }));
     } catch {
       setPreview((current) => ({ ...current, deviceStatus: current.deviceStatus }));
+    }
+  }
+
+  async function loadFirmwareLatest() {
+    try {
+      const data = await apiFetch<FirmwareLatest>(`/api/firmware/latest?ts=${Date.now()}`);
+      setFirmwareLatest(data);
+    } catch {
+      setFirmwareLatest((current) => current);
     }
   }
 
@@ -2582,6 +2625,8 @@ export default function App() {
     : window.location.origin;
   const homeyToken = config.homeyToken?.token || "";
   const firmwareVersion = preview.deviceStatus?.firmwareVersion || "unknown";
+  const firmwareUpdateAvailable = firmwareLatest ? isVersionNewer(firmwareLatest.version, firmwareVersion) : false;
+  const firmwareDisplayStatus = firmwareStatusLabel(firmwareVersion, firmwareLatest, preview.deviceStatus?.ota?.status);
   const homeyLinks = apiScreenId ? [
     { label: "Screen on", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/screen-state/activate` },
     { label: "Screen off", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/screen-state/deactivate` },
@@ -2648,7 +2693,7 @@ export default function App() {
               </select>
             ) : (
               <div style={{ fontSize: "11px", color: "var(--muted-foreground)", lineHeight: 1.35, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {hasRealScreens ? (config.label || "Unnamed location") : isJustPaired ? "Setting up screen" : "No paired screen"} · Screen {hasRealScreens || isJustPaired ? displayScreenId : "-"} · FW {firmwareVersion}
+                {hasRealScreens ? (config.label || "Unnamed location") : isJustPaired ? "Setting up screen" : "No paired screen"} · Screen {hasRealScreens || isJustPaired ? displayScreenId : "-"} · FW {firmwareVersion}{firmwareUpdateAvailable && firmwareLatest ? ` → ${firmwareLatest.version}` : ""}
               </div>
             )}
           </div>
@@ -2894,6 +2939,14 @@ export default function App() {
                     Commands are sent to the physical SkyFrame the next time it is online.
                   </div>
                 </div>
+                {firmwareUpdateAvailable && firmwareLatest ? (
+                  <div style={{ borderRadius: "8px", border: "1px solid rgba(255,147,0,0.34)", background: "rgba(255,147,0,0.12)", color: "#5f3300", padding: "12px", display: "grid", gap: "5px" }}>
+                    <div style={{ fontSize: "13px", fontWeight: 850 }}>Firmware update available</div>
+                    <div style={{ fontSize: "12px", lineHeight: 1.45 }}>
+                      This screen is running {firmwareVersion}. Latest firmware is {firmwareLatest.version}.
+                    </div>
+                  </div>
+                ) : null}
                 <div style={{ display: "grid", gap: "10px", gridTemplateColumns: "1fr 1fr" }}>
                   <button
                     type="button"
@@ -2907,9 +2960,9 @@ export default function App() {
                     type="button"
                     disabled={busy}
                     onClick={() => void sendDeviceCommand("ota_update", "Firmware update command sent")}
-                    style={{ height: "42px", borderRadius: "8px", border: "1px solid var(--border-mid)", background: "var(--card)", color: "var(--foreground)", fontSize: "14px", fontWeight: 750, opacity: busy ? 0.55 : 1 }}
+                    style={{ height: "42px", borderRadius: "8px", border: firmwareUpdateAvailable ? 0 : "1px solid var(--border-mid)", background: firmwareUpdateAvailable ? "var(--primary)" : "var(--card)", color: firmwareUpdateAvailable ? "#fff" : "var(--foreground)", fontSize: "14px", fontWeight: 750, opacity: busy ? 0.55 : 1 }}
                   >
-                    Update firmware
+                    {firmwareUpdateAvailable ? `Install ${firmwareLatest?.version || "update"}` : "Update firmware"}
                   </button>
                   <button
                     type="button"
@@ -2921,7 +2974,7 @@ export default function App() {
                   </button>
                 </div>
                 <div style={{ fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>
-                  Firmware {firmwareVersion} · OTA {preview.deviceStatus?.ota?.status || "idle"}
+                  Firmware {firmwareVersion}{firmwareLatest ? ` · Latest ${firmwareLatest.version}` : ""} · {firmwareDisplayStatus}
                   {preview.deviceStatus?.ota?.lastError ? ` · ${preview.deviceStatus.ota.lastError}` : ""}
                 </div>
                 <div style={{ display: "grid", gap: "10px", gridTemplateColumns: "1fr 1fr" }}>
