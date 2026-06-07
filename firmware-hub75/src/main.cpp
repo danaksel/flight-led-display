@@ -3136,10 +3136,12 @@ void saveDeviceToken(const String &token, const String &screenId, const String &
     devicePreferences.putString("token", token);
     devicePreferences.putString("screen", screenId);
     devicePreferences.putString("device", deviceId);
+    devicePreferences.remove("cmd_nonce");
     devicePreferences.end();
     deviceAuthToken = token;
     provisionScreenId = screenId;
     provisionDeviceId = deviceId;
+    lastDeviceCommandNonce = 0;
     realtimeConfigured = false;
 }
 

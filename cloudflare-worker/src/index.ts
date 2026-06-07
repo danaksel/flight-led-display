@@ -1024,9 +1024,10 @@ async function writeDeviceCommand(
 ): Promise<DeviceCommand> {
   const now = new Date().toISOString();
   const previous = await getDeviceCommand(env, context);
+  const unixSecondsNonce = Math.floor(Date.now() / 1000);
   const next: DeviceCommand = {
     command,
-    commandNonce: (previous?.commandNonce || 0) + 1,
+    commandNonce: Math.max((previous?.commandNonce || 0) + 1, unixSecondsNonce),
     issuedAt: now,
     source: source.slice(0, 80)
   };
