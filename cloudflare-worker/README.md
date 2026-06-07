@@ -26,6 +26,8 @@ npm run deploy
 - `/admin`: admin-only fleet overview.
 - `/api/*`: control-panel and admin APIs.
 - `/public/*`: firmware/device APIs.
+- `/public/firmware/latest.json`: OTA manifest served from Worker assets.
+- `/public/firmware/*.bin`: OTA binaries served from Worker assets.
 
 Legacy inline control panels and the pixel editor have been removed. The active app is `frontend/src/App.tsx`.
 
@@ -44,3 +46,20 @@ X-SkyFrame-Homey-Token: <account-token>
 ```
 
 The `/public/homey/...` automation routes are designed to bypass browser login and rely on the Worker token check. `/api/screens/{screenId}/...` aliases also exist, but those need a Cloudflare Access bypass before Homey can reach the Worker.
+
+## OTA Assets
+
+Firmware binaries can be published as Worker assets under `public/firmware/`.
+
+`latest.json` must include:
+
+```json
+{
+  "version": "0.1.1",
+  "url": "https://skyframe.danaksel.no/public/firmware/skyframe-0.1.1.bin",
+  "sha256": "<64 hex chars>",
+  "size": 1234567
+}
+```
+
+The current placeholder manifest advertises the same version as the checked-in firmware and does not trigger an update.

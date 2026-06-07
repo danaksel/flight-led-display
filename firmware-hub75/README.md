@@ -105,11 +105,27 @@ PA/test audio uses `audioVolumePercent` from config. Clock tick uses `clockTickE
 The firmware reads `deviceCommand` from `/public/realtime-state` and can also receive the same command over realtime when enabled.
 
 - `restart`: reboot.
+- `ota_update`: check `/public/firmware/latest.json`, download a newer binary over HTTPS, verify SHA-256, write it to the inactive OTA partition and reboot.
 - `unpair`: clear the device token and return to pairing mode while keeping Wi-Fi.
 - `forget_wifi`: clear the device token and Wi-Fi credentials, then reboot into setup mode.
 - `factory_reset`: clear account and Wi-Fi state.
 
 Wi-Fi and device token are stored in ESP32 Preferences/NVS so normal firmware updates do not wipe customer setup. Resetting those values should happen through the control panel or admin commands.
+
+## OTA
+
+This firmware is built with `partitions_ota_32mb.csv`, which provides dual OTA app partitions. `SKYFRAME_FW_VERSION` in `src/main.cpp` identifies the running version.
+
+OTA is skipped while Wi-Fi setup mode is active. If download, write or SHA-256 verification fails, the current firmware keeps running and reports the failure in `/public/device-status`.
+
+Release checklist:
+
+```bash
+pio run -d firmware-hub75
+shasum -a 256 firmware-hub75/.pio/build/waveshare_esp32_s3_rgb_matrix/firmware.bin
+```
+
+Copy the resulting `.bin` to `cloudflare-worker/public/firmware/`, update `cloudflare-worker/public/firmware/latest.json`, then deploy the Worker.
 
 ## Build And Upload
 

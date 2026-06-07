@@ -170,6 +170,33 @@ describe("auth gates", () => {
     expect(publicOnJson.active).toBe(true);
   });
 
+  it("queues ota_update for realtime-state", async () => {
+    const env = makeEnv({}, {
+      "device:v1:dev_test": {
+        deviceId: "dev_test",
+        screenId: "93975",
+        tokenHash: "a".repeat(64),
+        pairedAt: "2026-06-07T08:30:00.000Z",
+        ownerEmail: "owner@example.com"
+      }
+    });
+
+    const command = await request("/api/device-command?screenId=93975", env, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-SkyFrame-User-Email": "owner@example.com"
+      },
+      body: JSON.stringify({ command: "ota_update" })
+    });
+    expect(command.status).toBe(200);
+
+    const realtime = await request("/api/realtime-state?screenId=93975", env);
+    const realtimeJson = await realtime.json() as { deviceCommand?: Record<string, unknown> };
+    expect(realtime.status).toBe(200);
+    expect(realtimeJson.deviceCommand).toMatchObject({ command: "ota_update" });
+  });
+
   it("requires DEVICE_API_TOKEN for /public routes when configured", async () => {
     const env = makeEnv({ DEVICE_API_TOKEN: "device-secret" });
 

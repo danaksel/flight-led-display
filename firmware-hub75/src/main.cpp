@@ -3,11 +3,13 @@
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
 #include <HTTPClient.h>
 #include <Preferences.h>
+#include <Update.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <WebSocketsClient.h>
 #include <Wire.h>
 #include <driver/i2s.h>
+#include <mbedtls/sha256.h>
 #include <sys/time.h>
 #include "WiFiSecrets.h"
 #include "WifiSetupManager.h"
@@ -19,10 +21,12 @@ namespace
 constexpr uint16_t PanelWidth = 128;
 constexpr uint16_t PanelHeight = 64;
 constexpr uint8_t Brightness = 8;
+constexpr const char *SKYFRAME_FW_VERSION = "0.1.0";
 constexpr const char *DeviceConfigUrl = "https://skyframe.danaksel.no/public/device-config";
 constexpr const char *SoundStateUrl = "https://skyframe.danaksel.no/public/sound-state";
 constexpr const char *RealtimeStateUrl = "https://skyframe.danaksel.no/public/realtime-state";
 constexpr const char *DeviceStatusUrl = "https://skyframe.danaksel.no/public/device-status";
+constexpr const char *FirmwareLatestUrl = "https://skyframe.danaksel.no/public/firmware/latest.json";
 constexpr const char *DisplayUrl = "https://skyframe.danaksel.no/public/display";
 constexpr const char *ProvisionStartUrl = "https://skyframe.danaksel.no/public/provision/start";
 constexpr const char *ProvisionStatusUrl = "https://skyframe.danaksel.no/public/provision/status";
@@ -77,6 +81,9 @@ constexpr int16_t TimetableRowsTopY = 15;
 constexpr int16_t TimetableRowsBottomY = 64;
 constexpr uint8_t MainLoopDelayMs = 20;
 constexpr uint8_t WifiReconnectSeconds = 30;
+constexpr uint32_t OtaPollIntervalMs = 6UL * 60UL * 60UL * 1000UL;
+constexpr uint32_t OtaRetryIntervalMs = 30UL * 60UL * 1000UL;
+constexpr uint32_t OtaDownloadTimeoutMs = 120000UL;
 constexpr uint8_t SetupButtonPin = 0;
 constexpr uint32_t WifiConnectTimeoutMs = 6500;
 constexpr uint16_t ConfigFallbackPollSeconds = 300;
@@ -111,6 +118,14 @@ struct IdleScreen
     String kind;
     IdleRow rows[MaxIdleRows];
     uint8_t rowCount = 0;
+};
+
+struct FirmwareManifest
+{
+    String version;
+    String url;
+    String sha256;
+    size_t size = 0;
 };
 
 MatrixPanel_I2S_DMA *display = nullptr;
@@ -208,6 +223,12 @@ String lastRealtimeScreenVersion;
 uint32_t lastRealtimeSoundNonce = 0;
 uint32_t lastDeviceCommandNonce = 0;
 bool realtimeStateSeen = false;
+String otaStatus = "idle";
+String lastOtaError;
+String lastOtaVersion;
+uint32_t lastOtaCheckedAt = 0;
+uint32_t otaStartedAt = 0;
+bool otaUpdateRequested = false;
 
 void drawIdleScreen(uint8_t index);
 void drawCurrentLiveFlight();
@@ -244,6 +265,14 @@ void executeDeviceCommand(const String &command, uint32_t nonce);
 void handleDeviceCommandPayload(JsonVariantConst value);
 void drawProvisioningStatus();
 void updateProvisioningStatusDisplay();
+String absoluteUrl(const String &url);
+void requestOtaUpdate();
+void checkFirmwareUpdate(bool forced);
+bool performOtaUpdate(const FirmwareManifest &manifest);
+bool parseFirmwareManifest(const String &body, FirmwareManifest &manifest);
+bool isVersionNewer(const String &latest, const String &current);
+String sha256ToHex(const uint8_t *digest);
+bool isValidSha256Hex(const String &value);
 
 void startRealtimeTaskIfNeeded()
 {
@@ -2011,6 +2040,11 @@ void executeDeviceCommand(const String &command, uint32_t nonce)
         delay(900);
         ESP.restart();
     }
+    else if (command == "ota_update")
+    {
+        drawBrandedStatusLines("UPDATE", "Checking", "Firmware", "", colorHeader());
+        requestOtaUpdate();
+    }
 }
 
 void handleDeviceCommandPayload(JsonVariantConst value)
@@ -2125,6 +2159,15 @@ void soundPollTask(void *)
         if (WiFi.status() == WL_CONNECTED && hasDeviceToken())
         {
             fetchRealtimeState();
+            if (otaUpdateRequested)
+            {
+                otaUpdateRequested = false;
+                checkFirmwareUpdate(true);
+            }
+            else
+            {
+                checkFirmwareUpdate(false);
+            }
             postDeviceStatusIfDue();
         }
         vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>(RealtimeStatePollSeconds) * 1000UL));
@@ -2208,11 +2251,18 @@ String buildDeviceStatusPayload()
     doc["source"] = "firmware-hub75";
     doc["connected"] = true;
     doc["deviceId"] = WiFi.macAddress();
+    doc["firmwareVersion"] = SKYFRAME_FW_VERSION;
     doc["uptimeMs"] = millis();
     doc["screenActive"] = screenActive;
     doc["configOk"] = lastConfigOk;
     doc["displayOk"] = lastDisplayOk;
     doc["displayMode"] = lastDisplayMode;
+
+    JsonObject ota = doc["ota"].to<JsonObject>();
+    ota["status"] = otaStatus;
+    ota["lastError"] = lastOtaError;
+    ota["latestVersion"] = lastOtaVersion;
+    ota["lastCheckedMs"] = lastOtaCheckedAt;
 
     JsonObject wifi = doc["wifi"].to<JsonObject>();
     wifi["connected"] = true;
@@ -3151,6 +3201,304 @@ void rememberDeviceCommandNonce(uint32_t nonce)
     devicePreferences.begin("sky_device", false);
     devicePreferences.putUInt("cmd_nonce", nonce);
     devicePreferences.end();
+}
+
+void setOtaState(const String &status, const String &error = "")
+{
+    otaStatus = status;
+    lastOtaError = error;
+    lastDeviceStatusPostedAt = 0;
+    lastDeviceStatusSentAt = 0;
+}
+
+void requestOtaUpdate()
+{
+    otaUpdateRequested = true;
+}
+
+int parseVersionPart(const String &version, int &index)
+{
+    while (index < static_cast<int>(version.length()) && !isDigit(version[index])) ++index;
+    int value = 0;
+    while (index < static_cast<int>(version.length()) && isDigit(version[index]))
+    {
+        value = value * 10 + (version[index] - '0');
+        ++index;
+    }
+    return value;
+}
+
+bool isVersionNewer(const String &latest, const String &current)
+{
+    int latestIndex = 0;
+    int currentIndex = 0;
+    for (uint8_t part = 0; part < 4; ++part)
+    {
+        const int latestPart = parseVersionPart(latest, latestIndex);
+        const int currentPart = parseVersionPart(current, currentIndex);
+        if (latestPart > currentPart) return true;
+        if (latestPart < currentPart) return false;
+    }
+    return latest != current && latest.length() > current.length();
+}
+
+bool isValidSha256Hex(const String &value)
+{
+    if (value.length() != 64) return false;
+    for (size_t i = 0; i < value.length(); ++i)
+    {
+        const char c = value[i];
+        if (!isHexadecimalDigit(c)) return false;
+    }
+    return true;
+}
+
+String sha256ToHex(const uint8_t *digest)
+{
+    static const char *hex = "0123456789abcdef";
+    String value;
+    value.reserve(64);
+    for (uint8_t i = 0; i < 32; ++i)
+    {
+        value += hex[(digest[i] >> 4) & 0x0F];
+        value += hex[digest[i] & 0x0F];
+    }
+    return value;
+}
+
+bool parseFirmwareManifest(const String &body, FirmwareManifest &manifest)
+{
+    JsonDocument doc;
+    const DeserializationError error = deserializeJson(doc, body);
+    if (error)
+    {
+        setOtaState("error", String("manifest_json: ") + error.c_str());
+        return false;
+    }
+
+    manifest.version = valueOr(doc["version"]);
+    manifest.url = absoluteUrl(valueOr(doc["url"]));
+    manifest.sha256 = valueOr(doc["sha256"]);
+    manifest.sha256.toLowerCase();
+    manifest.size = doc["size"] | 0;
+
+    if (manifest.version.isEmpty())
+    {
+        setOtaState("error", "manifest_missing_version");
+        return false;
+    }
+    return true;
+}
+
+bool performOtaUpdate(const FirmwareManifest &manifest)
+{
+    bool locked = false;
+    if (networkMutex)
+    {
+        if (xSemaphoreTake(networkMutex, pdMS_TO_TICKS(500)) != pdTRUE)
+        {
+            setOtaState("error", "network_busy");
+            return false;
+        }
+        locked = true;
+    }
+
+    pauseRealtimeForHttp();
+    WiFiClientSecure client;
+    client.setCACert(WorkerTlsRootCa);
+
+    HTTPClient http;
+    http.setTimeout(30000);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+
+    if (!http.begin(client, manifest.url))
+    {
+        setOtaState("error", "download_begin_failed");
+        resumeRealtimeAfterHttp();
+        if (locked) xSemaphoreGive(networkMutex);
+        return false;
+    }
+    if (deviceAuthToken.length() > 0)
+    {
+        http.addHeader("X-Flight-Device-Token", deviceAuthToken);
+    }
+
+    const int httpCode = http.GET();
+    const int contentLength = http.getSize();
+    if (httpCode < 200 || httpCode >= 300)
+    {
+        setOtaState("error", String("download_http_") + httpCode);
+        http.end();
+        resumeRealtimeAfterHttp();
+        if (locked) xSemaphoreGive(networkMutex);
+        return false;
+    }
+    if (contentLength <= 0 || static_cast<size_t>(contentLength) != manifest.size)
+    {
+        setOtaState("error", "download_size_mismatch");
+        http.end();
+        resumeRealtimeAfterHttp();
+        if (locked) xSemaphoreGive(networkMutex);
+        return false;
+    }
+    if (!Update.begin(manifest.size, U_FLASH))
+    {
+        setOtaState("error", String("update_begin_") + Update.errorString());
+        http.end();
+        resumeRealtimeAfterHttp();
+        if (locked) xSemaphoreGive(networkMutex);
+        return false;
+    }
+
+    mbedtls_sha256_context shaContext;
+    mbedtls_sha256_init(&shaContext);
+    mbedtls_sha256_starts_ret(&shaContext, 0);
+
+    WiFiClient *stream = http.getStreamPtr();
+    uint8_t buffer[4096];
+    size_t written = 0;
+    uint32_t lastDataAt = millis();
+    bool failed = false;
+    String failReason;
+
+    while (written < manifest.size && millis() - otaStartedAt < OtaDownloadTimeoutMs)
+    {
+        const int available = stream->available();
+        if (available > 0)
+        {
+            const size_t chunk = min(static_cast<size_t>(available), min(sizeof(buffer), manifest.size - written));
+            const size_t read = stream->readBytes(buffer, chunk);
+            if (read == 0) continue;
+            mbedtls_sha256_update_ret(&shaContext, buffer, read);
+            const size_t updateWritten = Update.write(buffer, read);
+            if (updateWritten != read)
+            {
+                failed = true;
+                failReason = String("update_write_") + Update.errorString();
+                break;
+            }
+            written += read;
+            lastDataAt = millis();
+        }
+        else
+        {
+            if (millis() - lastDataAt > 10000UL)
+            {
+                failed = true;
+                failReason = "download_timeout";
+                break;
+            }
+            delay(2);
+        }
+    }
+
+    uint8_t digest[32] = {};
+    mbedtls_sha256_finish_ret(&shaContext, digest);
+    mbedtls_sha256_free(&shaContext);
+    http.end();
+
+    if (!failed && written != manifest.size)
+    {
+        failed = true;
+        failReason = "download_incomplete";
+    }
+    if (!failed)
+    {
+        const String actualSha = sha256ToHex(digest);
+        if (!actualSha.equalsIgnoreCase(manifest.sha256))
+        {
+            failed = true;
+            failReason = "sha256_mismatch";
+        }
+    }
+    if (failed)
+    {
+        Update.abort();
+        setOtaState("error", failReason);
+        resumeRealtimeAfterHttp();
+        if (locked) xSemaphoreGive(networkMutex);
+        return false;
+    }
+    if (!Update.end(true))
+    {
+        setOtaState("error", String("update_end_") + Update.errorString());
+        resumeRealtimeAfterHttp();
+        if (locked) xSemaphoreGive(networkMutex);
+        return false;
+    }
+    if (!Update.isFinished())
+    {
+        setOtaState("error", "update_not_finished");
+        resumeRealtimeAfterHttp();
+        if (locked) xSemaphoreGive(networkMutex);
+        return false;
+    }
+
+    lastOtaVersion = manifest.version;
+    setOtaState("success", "");
+    resumeRealtimeAfterHttp();
+    if (locked) xSemaphoreGive(networkMutex);
+    return true;
+}
+
+void checkFirmwareUpdate(bool forced)
+{
+    if (WiFi.status() != WL_CONNECTED || !hasDeviceToken()) return;
+    if (wifiSetupManager.isSetupModeActive()) return;
+
+    const uint32_t now = millis();
+    if (!forced && lastOtaCheckedAt != 0 && now - lastOtaCheckedAt < OtaPollIntervalMs) return;
+    lastOtaCheckedAt = now;
+    otaStartedAt = now;
+    setOtaState(forced ? "checking_forced" : "checking", "");
+
+    String body;
+    int httpCode = 0;
+    if (!fetchText(FirmwareLatestUrl, body, httpCode, pdMS_TO_TICKS(500)))
+    {
+        setOtaState("error", httpCode == -2 ? "network_busy" : String("manifest_http_") + httpCode);
+        lastOtaCheckedAt = millis() - (OtaPollIntervalMs - OtaRetryIntervalMs);
+        return;
+    }
+
+    FirmwareManifest manifest;
+    if (!parseFirmwareManifest(body, manifest))
+    {
+        lastOtaCheckedAt = millis() - (OtaPollIntervalMs - OtaRetryIntervalMs);
+        return;
+    }
+
+    lastOtaVersion = manifest.version;
+    if (!isVersionNewer(manifest.version, SKYFRAME_FW_VERSION))
+    {
+        setOtaState("up_to_date", "");
+        return;
+    }
+    if (manifest.url.isEmpty() || !manifest.url.startsWith("https://"))
+    {
+        setOtaState("error", "manifest_missing_https_url");
+        return;
+    }
+    if (!isValidSha256Hex(manifest.sha256))
+    {
+        setOtaState("error", "manifest_invalid_sha256");
+        return;
+    }
+    if (manifest.size == 0)
+    {
+        setOtaState("error", "manifest_missing_size");
+        return;
+    }
+
+    setOtaState("downloading", "");
+    drawBrandedStatusLines("UPDATE", manifest.version.c_str(), "Downloading", "", colorHeader());
+    if (performOtaUpdate(manifest))
+    {
+        drawBrandedStatusLines("UPDATE OK", manifest.version.c_str(), "Restarting", "", colorSuccess());
+        postDeviceStatusIfDue();
+        delay(900);
+        ESP.restart();
+    }
 }
 
 bool startProvisioning()

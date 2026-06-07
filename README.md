@@ -151,6 +151,7 @@ Worker admin authorization is still enforced by `ADMIN_EMAILS`. If someone signs
 The control panel can send remote commands:
 
 - `restart`: reboot the display.
+- `ota_update`: check the firmware manifest and install a newer SHA-256 verified binary if available.
 - `unpair`: remove the account/device token and return to pairing mode while keeping Wi-Fi.
 - `forget_wifi`: remove account/device token and Wi-Fi credentials, then start setup mode after reboot.
 - `factory_reset`: same practical result as forgetting Wi-Fi and account data.
@@ -158,6 +159,35 @@ The control panel can send remote commands:
 The firmware stores Wi-Fi credentials and device token in ESP32 Preferences/NVS. That is still the right approach: persistence survives firmware updates, while remote commands give the user a way to reset ownership or Wi-Fi without flashing.
 
 Admin screen deletion uses `unpair`, not full Wi-Fi reset. That lets a deleted screen become ready for a new pairing on the same network.
+
+## OTA Firmware Updates
+
+The ESP32-S3 firmware uses dual OTA app partitions. The current firmware version is compiled as `SKYFRAME_FW_VERSION`, and the display polls:
+
+```text
+GET https://skyframe.danaksel.no/public/firmware/latest.json
+```
+
+The manifest shape is:
+
+```json
+{
+  "version": "0.1.1",
+  "url": "https://skyframe.danaksel.no/public/firmware/skyframe-0.1.1.bin",
+  "sha256": "<64 lowercase hex chars>",
+  "size": 1234567
+}
+```
+
+Publishing flow:
+
+```bash
+pio run -d firmware-hub75
+shasum -a 256 firmware-hub75/.pio/build/waveshare_esp32_s3_rgb_matrix/firmware.bin
+cp firmware-hub75/.pio/build/waveshare_esp32_s3_rgb_matrix/firmware.bin cloudflare-worker/public/firmware/skyframe-<version>.bin
+```
+
+Then update `cloudflare-worker/public/firmware/latest.json` and deploy the Worker. The firmware writes the downloaded binary to the inactive OTA partition, verifies SHA-256 before finalizing the update, and keeps running the current firmware if anything fails.
 
 ## Local Development
 
@@ -248,6 +278,6 @@ The Worker validates `X-SkyFrame-Homey-Token`. `/api/screens/{screenId}/...` ali
 - AirSpace and Follow modes are disabled until the screen has a personal FR24 key.
 - Header account icon opens the account panel with signed-in user, screens, FR24 and Homey token.
 - Power switch turns the screen on/off.
-- General screen can restart, unpair or reset Wi-Fi remotely.
+- General screen can restart, update firmware, unpair or reset Wi-Fi remotely.
 - Admin shows all active screens, owners and clean vitals.
 - Admin delete removes the screen from admin/user views and sends it back to pairing mode.

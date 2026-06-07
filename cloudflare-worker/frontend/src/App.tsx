@@ -95,7 +95,7 @@ type HomeyTokenStatus = {
   rotatedAt?: string | null;
 };
 
-type DeviceCommand = "restart" | "unpair" | "forget_wifi" | "factory_reset";
+type DeviceCommand = "restart" | "ota_update" | "unpair" | "forget_wifi" | "factory_reset";
 
 type AccountScreen = {
   screenId: string;
@@ -247,6 +247,13 @@ type DeviceStatus = {
   configOk?: boolean | null;
   displayOk?: boolean | null;
   displayMode?: string | null;
+  firmwareVersion?: string | null;
+  ota?: {
+    status?: string | null;
+    lastError?: string | null;
+    latestVersion?: string | null;
+    lastCheckedMs?: number | null;
+  };
   source?: string | null;
 };
 
@@ -2898,11 +2905,23 @@ export default function App() {
                   <button
                     type="button"
                     disabled={busy}
+                    onClick={() => void sendDeviceCommand("ota_update", "Firmware update command sent")}
+                    style={{ height: "42px", borderRadius: "8px", border: "1px solid var(--border-mid)", background: "var(--card)", color: "var(--foreground)", fontSize: "14px", fontWeight: 750, opacity: busy ? 0.55 : 1 }}
+                  >
+                    Update firmware
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
                     onClick={() => void sendDeviceCommand("forget_wifi", "Wi-Fi setup command sent", "Forget Wi-Fi on this screen? The screen keeps its account and settings, then opens Wi-Fi setup mode.")}
                     style={{ height: "42px", borderRadius: "8px", border: "1px solid var(--border-mid)", background: "var(--card)", color: "var(--foreground)", fontSize: "14px", fontWeight: 750, opacity: busy ? 0.55 : 1 }}
                   >
                     Change Wi-Fi
                   </button>
+                </div>
+                <div style={{ fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>
+                  Firmware {preview.deviceStatus?.firmwareVersion || "unknown"} · OTA {preview.deviceStatus?.ota?.status || "idle"}
+                  {preview.deviceStatus?.ota?.lastError ? ` · ${preview.deviceStatus.ota.lastError}` : ""}
                 </div>
                 <div style={{ display: "grid", gap: "10px", gridTemplateColumns: "1fr 1fr" }}>
                   <button

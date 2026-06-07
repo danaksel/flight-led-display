@@ -189,11 +189,18 @@ type DeviceStatus = {
   configOk: boolean | null;
   displayOk: boolean | null;
   displayMode: string | null;
+  firmwareVersion: string | null;
+  ota: {
+    status: string | null;
+    lastError: string | null;
+    latestVersion: string | null;
+    lastCheckedMs: number | null;
+  };
   source: string | null;
 };
 
 type DeviceCommand = {
-  command: "restart" | "unpair" | "forget_wifi" | "factory_reset";
+  command: "restart" | "unpair" | "forget_wifi" | "factory_reset" | "ota_update";
   commandNonce: number;
   issuedAt: string;
   source: string;
@@ -636,6 +643,8 @@ export default {
       if (url.pathname === "/public/realtime") return realtimeResponse(request, env, context);
       if (url.pathname === "/public/realtime-state" && request.method === "GET") return realtimeStateResponse(env, context);
       if (url.pathname === "/public/device-status" && request.method === "POST") return saveDeviceStatus(request, env, context);
+      if (url.pathname === "/public/firmware/latest.json" && request.method === "GET") return firmwareAssetResponse(request, env, "/firmware/latest.json", "application/json; charset=utf-8");
+      if (url.pathname.match(/^\/public\/firmware\/[^/]+\.bin$/) && request.method === "GET") return firmwareAssetResponse(request, env, url.pathname.replace(/^\/public/, ""), "application/octet-stream");
       if (url.pathname === "/public/device-config" && request.method === "GET") return deviceConfigResponse(env, context);
       if (url.pathname === "/public/sound-state" && request.method === "GET") return soundStateResponse(env, context);
       if (url.pathname === "/public/display" && request.method === "GET") return flightsResponse(env, true, context);
@@ -884,7 +893,25 @@ function isDeviceRecord(value: unknown): value is DeviceRecord {
 }
 
 function normalizeDeviceCommand(value: unknown): DeviceCommand["command"] | undefined {
-  return value === "restart" || value === "unpair" || value === "forget_wifi" || value === "factory_reset" ? value : undefined;
+  return value === "restart" || value === "unpair" || value === "forget_wifi" || value === "factory_reset" || value === "ota_update" ? value : undefined;
+}
+
+async function firmwareAssetResponse(request: Request, env: Env, assetPath: string, contentType: string): Promise<Response> {
+  const assetUrl = new URL(request.url);
+  assetUrl.pathname = assetPath;
+  assetUrl.search = "";
+  const response = await env.ASSETS.fetch(new Request(assetUrl.toString(), request));
+  if (response.status === 404) {
+    return jsonResponse({ error: "Firmware asset not found" }, 404, { "Cache-Control": "no-store" });
+  }
+  const headers = new Headers(response.headers);
+  headers.set("Content-Type", contentType);
+  headers.set("Cache-Control", assetPath.endsWith("latest.json") ? "no-store" : "public, max-age=31536000, immutable");
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
 }
 
 function realtimeResponse(request: Request, env: Env, context?: RequestContext): Response | Promise<Response> {
@@ -1023,6 +1050,7 @@ function normalizeSoundState(value: unknown): SoundState {
 function normalizeDeviceStatus(value: unknown, fallbackUpdatedAt: string | null = null): DeviceStatus {
   const v = value && typeof value === "object" ? value as Record<string, unknown> : {};
   const wifi = v.wifi && typeof v.wifi === "object" ? v.wifi as Record<string, unknown> : {};
+  const ota = v.ota && typeof v.ota === "object" ? v.ota as Record<string, unknown> : {};
   const updatedAt = typeof v.updatedAt === "string" && v.updatedAt ? v.updatedAt : fallbackUpdatedAt || new Date().toISOString();
   const updatedAtTime = Date.parse(updatedAt);
   const isFresh = Number.isFinite(updatedAtTime) && Date.now() - updatedAtTime < 4 * 60 * 1000;
@@ -1045,6 +1073,13 @@ function normalizeDeviceStatus(value: unknown, fallbackUpdatedAt: string | null 
     configOk: typeof v.configOk === "boolean" ? v.configOk : null,
     displayOk,
     displayMode: typeof v.displayMode === "string" && v.displayMode ? v.displayMode.slice(0, 40) : null,
+    firmwareVersion: typeof v.firmwareVersion === "string" && v.firmwareVersion ? v.firmwareVersion.slice(0, 40) : null,
+    ota: {
+      status: typeof ota.status === "string" && ota.status ? ota.status.slice(0, 40) : null,
+      lastError: typeof ota.lastError === "string" && ota.lastError ? ota.lastError.slice(0, 120) : null,
+      latestVersion: typeof ota.latestVersion === "string" && ota.latestVersion ? ota.latestVersion.slice(0, 40) : null,
+      lastCheckedMs: typeof ota.lastCheckedMs === "number" && Number.isFinite(ota.lastCheckedMs) ? Math.max(0, Math.floor(ota.lastCheckedMs)) : null
+    },
     source: typeof v.source === "string" && v.source ? v.source.slice(0, 80) : null
   };
 }
@@ -1092,7 +1127,7 @@ async function writeDeviceCommand(
     issuedAt: now,
     source: source.slice(0, 80)
   };
-  const expirationTtl = command === "restart" ? 2 * 60 : 60 * 60;
+  const expirationTtl = command === "restart" ? 2 * 60 : command === "ota_update" ? 30 * 60 : 60 * 60;
   await env.FLIGHT_DISPLAY_KV.put(scopedKey(DEVICE_COMMAND_KEY, context), JSON.stringify(next), { expirationTtl });
   await broadcastRealtime(env, {
     type: "device_command",
@@ -1289,7 +1324,7 @@ async function sendDeviceCommand(request: Request, env: Env, context?: RequestCo
 
   const body = await readJsonObject(request);
   const command = normalizeDeviceCommand(firstString(body, ["command", "action"]));
-  if (!command) return jsonResponse({ error: "Expected restart, unpair, forget_wifi or factory_reset" }, 400, { "Cache-Control": "no-store" });
+  if (!command) return jsonResponse({ error: "Expected restart, ota_update, unpair, forget_wifi or factory_reset" }, 400, { "Cache-Control": "no-store" });
 
   const device = await findActiveDeviceRecordByScreen(env, screenId);
   if (device?.ownerEmail && context?.userEmail && normalizeEmail(device.ownerEmail) !== normalizeEmail(context.userEmail)) {
@@ -1316,7 +1351,7 @@ async function adminDeviceCommand(request: Request, env: Env, context: RequestCo
 
   const body = await readJsonObject(request);
   const command = normalizeDeviceCommand(firstString(body, ["command", "action"]));
-  if (!command) return jsonResponse({ error: "Expected restart, unpair, forget_wifi or factory_reset" }, 400, { "Cache-Control": "no-store" });
+  if (!command) return jsonResponse({ error: "Expected restart, ota_update, unpair, forget_wifi or factory_reset" }, 400, { "Cache-Control": "no-store" });
 
   const written = await writeDeviceCommand(env, { screenId }, command, "admin");
   return jsonResponse({ ok: true, deviceCommand: written }, 200, { "Cache-Control": "no-store" });
@@ -4480,16 +4515,28 @@ function renderAdminHtml(request: Request, userEmail: string): string {
     function freshness(value){if(!value)return ["No heartbeat","warn"];const t=Date.parse(value);if(!Number.isFinite(t))return ["Unknown","warn"];const mins=Math.round((Date.now()-t)/60000);if(mins<=4)return ["Online","ok"];return ["Last seen "+mins+" min ago","warn"];}
     function vitalLine(label,value){return "<span><strong>"+esc(label)+":</strong> "+esc(value ?? "-")+"</span>";}
     rows.addEventListener("click", async (event)=>{
-      const button=event.target.closest("[data-delete-screen]");
-      if(!button)return;
-      const screenId=button.getAttribute("data-delete-screen");
-      const label=button.getAttribute("data-label")||screenId;
-      if(!confirm("Delete "+label+"? The screen will be sent back to pairing mode."))return;
-      button.disabled=true;
-      const res=await fetch("/api/admin/screens/"+encodeURIComponent(screenId),{method:"DELETE"});
-      const data=await res.json().catch(()=>({}));
-      if(!res.ok){alert(data.error||"Could not delete screen");button.disabled=false;return;}
-      await load();
+      const deleteButton=event.target.closest("[data-delete-screen]");
+      const commandButton=event.target.closest("[data-command-screen]");
+      if(deleteButton){
+        const screenId=deleteButton.getAttribute("data-delete-screen");
+        const label=deleteButton.getAttribute("data-label")||screenId;
+        if(!confirm("Delete "+label+"? The screen will be sent back to pairing mode."))return;
+        deleteButton.disabled=true;
+        const res=await fetch("/api/admin/screens/"+encodeURIComponent(screenId),{method:"DELETE"});
+        const data=await res.json().catch(()=>({}));
+        if(!res.ok){alert(data.error||"Could not delete screen");deleteButton.disabled=false;return;}
+        await load();
+        return;
+      }
+      if(commandButton){
+        const screenId=commandButton.getAttribute("data-command-screen");
+        const command=commandButton.getAttribute("data-command");
+        commandButton.disabled=true;
+        const res=await fetch("/api/admin/screens/"+encodeURIComponent(screenId)+"/command",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({command})});
+        const data=await res.json().catch(()=>({}));
+        if(!res.ok){alert(data.error||"Could not send command");commandButton.disabled=false;return;}
+        await load();
+      }
     });
     async function load(){
       status.textContent="Loading screens...";
@@ -4508,8 +4555,8 @@ function renderAdminHtml(request: Request, userEmail: string): string {
           +"<td>"+esc(mode(screen.displayMode))+"</td>"
           +"<td><span class='pill "+(fr24?"ok":"warn")+"'>"+esc(source(screen.fr24&&screen.fr24.source))+"</span></td>"
           +"<td>"+esc(stateLabel(state.active))+" · "+esc(state.brightnessMode==="night"?"Night brightness":"Day brightness")+"<div class='mono'>"+esc(date(state.updatedAt))+"</div></td>"
-          +"<td><div class='vitals'><span class='pill "+fresh[1]+"'>"+esc(fresh[0])+"</span>"+vitalLine("IP address",vitals.wifi&&vitals.wifi.ip)+vitalLine("Wi-Fi",vitals.wifi&&vitals.wifi.ssid)+vitalLine("Signal",vitals.wifi&&typeof vitals.wifi.rssi==="number"?vitals.wifi.rssi+" dBm":null)+vitalLine("Uptime",vitals.uptimeMs?Math.round(vitals.uptimeMs/1000)+" s":null)+vitalLine("Firmware mode",mode(vitals.displayMode))+"</div></td>"
-          +"<td><button class='danger' type='button' data-delete-screen='"+esc(screen.screenId)+"' data-label='"+esc(screen.label)+"'>Delete</button></td>"
+          +"<td><div class='vitals'><span class='pill "+fresh[1]+"'>"+esc(fresh[0])+"</span>"+vitalLine("IP address",vitals.wifi&&vitals.wifi.ip)+vitalLine("Wi-Fi",vitals.wifi&&vitals.wifi.ssid)+vitalLine("Signal",vitals.wifi&&typeof vitals.wifi.rssi==="number"?vitals.wifi.rssi+" dBm":null)+vitalLine("Uptime",vitals.uptimeMs?Math.round(vitals.uptimeMs/1000)+" s":null)+vitalLine("Firmware",vitals.firmwareVersion)+vitalLine("OTA",vitals.ota&&[vitals.ota.status,vitals.ota.latestVersion,vitals.ota.lastError].filter(Boolean).join(" · "))+vitalLine("Firmware mode",mode(vitals.displayMode))+"</div></td>"
+          +"<td><div class='vitals'><button type='button' data-command-screen='"+esc(screen.screenId)+"' data-command='ota_update'>Update firmware</button><button class='danger' type='button' data-delete-screen='"+esc(screen.screenId)+"' data-label='"+esc(screen.label)+"'>Delete</button></div></td>"
           +"</tr>";
       }).join("")||"<tr><td colspan='7'>No paired screens yet.</td></tr>";
     }
