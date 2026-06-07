@@ -642,6 +642,10 @@ export default {
       if (url.pathname.match(/^\/api\/screens\/[^/]+\/fr24-key$/) && request.method === "POST") return saveFr24Key(request, env, context);
       if (url.pathname.match(/^\/api\/screens\/[^/]+\/display$/) && request.method === "GET") return flightsResponse(env, true, context);
       if (url.pathname.match(/^\/api\/screens\/[^/]+\/device-status$/) && request.method === "GET") return deviceStatusResponse(env, context);
+      if (url.pathname.match(/^\/api\/screens\/[^/]+\/screen-state\/activate$/) && isAutomationRequestMethod(request)) return writeScreenState(env, { active: true }, "homey-api", context);
+      if (url.pathname.match(/^\/api\/screens\/[^/]+\/screen-state\/deactivate$/) && isAutomationRequestMethod(request)) return writeScreenState(env, { active: false }, "homey-api", context);
+      if (url.pathname.match(/^\/api\/screens\/[^/]+\/brightness-mode\/day$/) && isAutomationRequestMethod(request)) return writeScreenState(env, { brightnessMode: "day" }, "homey-api", context);
+      if (url.pathname.match(/^\/api\/screens\/[^/]+\/brightness-mode\/night$/) && isAutomationRequestMethod(request)) return writeScreenState(env, { brightnessMode: "night" }, "homey-api", context);
       if (url.pathname === "/api/config" && request.method === "GET") return configResponse(env, context);
       if (url.pathname === "/api/config" && request.method === "POST") return saveConfig(request, env, context);
       if (url.pathname === "/api/device-config" && request.method === "GET") return deviceConfigResponse(env, context);
@@ -883,7 +887,12 @@ function isAutomationApiPath(pathname: string): boolean {
     || pathname === "/api/display-mode"
     || pathname.startsWith("/api/display-mode/")
     || pathname === "/api/brightness-mode"
-    || pathname.startsWith("/api/brightness-mode/");
+    || pathname.startsWith("/api/brightness-mode/")
+    || /^\/api\/screens\/[^/]+\/(?:screen-state\/(?:activate|deactivate)|brightness-mode\/(?:day|night))$/.test(pathname);
+}
+
+function isAutomationRequestMethod(request: Request): boolean {
+  return request.method === "POST" || request.method === "GET";
 }
 
 function requestHasToken(request: Request, expectedToken: string, headerName: string): boolean {

@@ -112,6 +112,20 @@ describe("auth gates", () => {
     expect(authorized.status).toBe(200);
   });
 
+  it("supports screen-specific Homey aliases", async () => {
+    const env = makeEnv();
+
+    const night = await request("/api/screens/93975/brightness-mode/night", env);
+    const nightJson = await night.json() as Record<string, unknown>;
+    expect(night.status).toBe(200);
+    expect(nightJson.brightnessMode).toBe("night");
+
+    const off = await request("/api/screens/93975/screen-state/deactivate", env);
+    const offJson = await off.json() as Record<string, unknown>;
+    expect(off.status).toBe(200);
+    expect(offJson.active).toBe(false);
+  });
+
   it("requires DEVICE_API_TOKEN for /public routes when configured", async () => {
     const env = makeEnv({ DEVICE_API_TOKEN: "device-secret" });
 

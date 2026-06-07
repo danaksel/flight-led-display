@@ -2554,6 +2554,28 @@ export default function App() {
   const logoutUrl = `/cdn-cgi/access/logout?returnTo=${encodeURIComponent(`${window.location.origin}/screen-setup`)}`;
   const accountScreens = config.account?.screens ?? [];
   const hasRealScreens = accountScreens.length > 0 || isDirectPairedScreen;
+  const apiScreenId = hasRealScreens && displayScreenId !== "main" ? displayScreenId : "";
+  const homeyLinks = apiScreenId ? [
+    { label: "Screen on", href: `${window.location.origin}/api/screens/${encodeURIComponent(apiScreenId)}/screen-state/activate` },
+    { label: "Screen off", href: `${window.location.origin}/api/screens/${encodeURIComponent(apiScreenId)}/screen-state/deactivate` },
+    { label: "Night mode on", href: `${window.location.origin}/api/screens/${encodeURIComponent(apiScreenId)}/brightness-mode/night` },
+    { label: "Night mode off", href: `${window.location.origin}/api/screens/${encodeURIComponent(apiScreenId)}/brightness-mode/day` }
+  ] : [];
+  const debugApiLinks = apiScreenId ? [
+    `/api/screens/${encodeURIComponent(apiScreenId)}/config`,
+    `/api/screens/${encodeURIComponent(apiScreenId)}/display`,
+    `/api/screens/${encodeURIComponent(apiScreenId)}/device-status`,
+    "/api/device-config",
+    "/api/logo-status",
+    "/api/sound-test",
+    "/api/avinor-board"
+  ] : [
+    "/api/config",
+    "/api/device-config",
+    "/api/logo-status",
+    "/api/sound-test",
+    "/api/avinor-board"
+  ];
 
   return (
     <div style={appStyles.shell}>
@@ -3047,23 +3069,29 @@ export default function App() {
               )}
 
               <Advanced title="API links">
-                <div style={{ display: "grid", gap: "10px", gridTemplateColumns: "1fr 1fr" }}>
-                  {[
-                    "/api/config",
-                    "/api/device-config",
-                    "/api/logo-status",
-                    "/api/screen-state",
-                    "/api/display-mode",
-                    "/api/brightness-mode",
-                    "/api/sound-test",
-                    "/api/flights",
-                    "/api/display",
-                    "/api/avinor-board"
-                  ].map((href) => (
-                    <a key={href} href={href} target="_blank" rel="noreferrer" style={{ ...cardStyle("10px 12px"), textDecoration: "none", fontSize: "12px" }}>
-                      {href.replace("/api/", "")}
-                    </a>
-                  ))}
+                <div style={{ display: "grid", gap: "14px" }}>
+                  {homeyLinks.length ? (
+                    <div style={{ display: "grid", gap: "10px" }}>
+                      <div style={{ fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>
+                        Homey links for Screen {apiScreenId}. Use GET or POST. If `ADMIN_API_TOKEN` is configured, send it as `X-Flight-Admin-Token` or Bearer token.
+                      </div>
+                      <div style={{ display: "grid", gap: "10px", gridTemplateColumns: "1fr 1fr" }}>
+                        {homeyLinks.map((link) => (
+                          <a key={link.href} href={link.href} target="_blank" rel="noreferrer" style={{ ...cardStyle("10px 12px"), textDecoration: "none", fontSize: "12px", overflowWrap: "anywhere" }}>
+                            <strong style={{ display: "block", marginBottom: "4px" }}>{link.label}</strong>
+                            {link.href.replace(window.location.origin, "")}
+                          </a>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                  <div style={{ display: "grid", gap: "10px", gridTemplateColumns: "1fr 1fr" }}>
+                    {debugApiLinks.map((href) => (
+                      <a key={href} href={href} target="_blank" rel="noreferrer" style={{ ...cardStyle("10px 12px"), textDecoration: "none", fontSize: "12px", overflowWrap: "anywhere" }}>
+                        {href.replace("/api/", "")}
+                      </a>
+                    ))}
+                  </div>
                 </div>
               </Advanced>
 
