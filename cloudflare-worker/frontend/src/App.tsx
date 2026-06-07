@@ -2581,6 +2581,7 @@ export default function App() {
     ? "https://skyframe.danaksel.no"
     : window.location.origin;
   const homeyToken = config.homeyToken?.token || "";
+  const firmwareVersion = preview.deviceStatus?.firmwareVersion || "unknown";
   const homeyLinks = apiScreenId ? [
     { label: "Screen on", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/screen-state/activate` },
     { label: "Screen off", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/screen-state/deactivate` },
@@ -2647,7 +2648,7 @@ export default function App() {
               </select>
             ) : (
               <div style={{ fontSize: "11px", color: "var(--muted-foreground)", lineHeight: 1.35, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {hasRealScreens ? (config.label || "Unnamed location") : isJustPaired ? "Setting up screen" : "No paired screen"} · Screen {hasRealScreens || isJustPaired ? displayScreenId : "-"}
+                {hasRealScreens ? (config.label || "Unnamed location") : isJustPaired ? "Setting up screen" : "No paired screen"} · Screen {hasRealScreens || isJustPaired ? displayScreenId : "-"} · FW {firmwareVersion}
               </div>
             )}
           </div>
@@ -2920,7 +2921,7 @@ export default function App() {
                   </button>
                 </div>
                 <div style={{ fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>
-                  Firmware {preview.deviceStatus?.firmwareVersion || "unknown"} · OTA {preview.deviceStatus?.ota?.status || "idle"}
+                  Firmware {firmwareVersion} · OTA {preview.deviceStatus?.ota?.status || "idle"}
                   {preview.deviceStatus?.ota?.lastError ? ` · ${preview.deviceStatus.ota.lastError}` : ""}
                 </div>
                 <div style={{ display: "grid", gap: "10px", gridTemplateColumns: "1fr 1fr" }}>

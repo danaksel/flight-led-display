@@ -21,7 +21,7 @@ namespace
 constexpr uint16_t PanelWidth = 128;
 constexpr uint16_t PanelHeight = 64;
 constexpr uint8_t Brightness = 8;
-constexpr const char *SKYFRAME_FW_VERSION = "0.1.0";
+constexpr const char *SKYFRAME_FW_VERSION = "V1";
 constexpr const char *DeviceConfigUrl = "https://skyframe.danaksel.no/public/device-config";
 constexpr const char *SoundStateUrl = "https://skyframe.danaksel.no/public/sound-state";
 constexpr const char *RealtimeStateUrl = "https://skyframe.danaksel.no/public/realtime-state";
@@ -3829,7 +3829,8 @@ void setup()
     Serial.println("HUB75 initialized");
     loadDeviceProvisioning();
     const String startupLine = provisionScreenId.isEmpty() ? "Starting up" : "Screen " + provisionScreenId;
-    drawStartupSplashStatus(BrandName, startupLine.c_str(), "");
+    const String firmwareLine = String("Firmware ") + SKYFRAME_FW_VERSION;
+    drawStartupSplashStatus(BrandName, startupLine.c_str(), firmwareLine.c_str());
     wifiSetupManager.begin(SetupAccessPointName, SetupButtonPin);
     wifiSetupManager.setEventCallback(handleSetupManagerEvent);
     ensureAudioReady();
