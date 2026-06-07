@@ -651,7 +651,7 @@ export default {
       if (url.pathname === "/") return serveAppShell(request, env);
       if (url.pathname === "/admin" || url.pathname === "/admin/") return adminPageResponse(request, env, context);
       if (url.pathname === "/start") return htmlResponse(renderStartHtml());
-      if (url.pathname === "/screen-setup") return htmlResponse(context.userEmail ? renderScreenSetupHtml(context.userEmail) : renderLoginRequiredHtml());
+      if (url.pathname === "/screen-setup") return screenSetupResponse(request, env, context);
       if (url.pathname === "/public/provision/start" && request.method === "POST") return startProvisioning(request, env);
       if (url.pathname === "/public/provision/status" && request.method === "POST") return provisioningStatus(request, env);
       if (url.pathname === "/public/realtime") return realtimeResponse(request, env, context);
@@ -4903,6 +4903,22 @@ function renderLoginRequiredHtml(): string {
   </main>
 </body>
 </html>`;
+}
+
+async function screenSetupResponse(request: Request, env: Env, context: RequestContext): Promise<Response> {
+  if (!context.userEmail) return htmlResponse(renderLoginRequiredHtml());
+
+  const screens = await listUserScreens(env, context.userEmail);
+  const firstScreen = screens[0];
+  if (firstScreen) {
+    const controlUrl = new URL(request.url);
+    controlUrl.pathname = "/";
+    controlUrl.search = `?screenId=${encodeURIComponent(firstScreen.screenId)}`;
+    controlUrl.hash = "";
+    return Response.redirect(controlUrl.toString(), 302);
+  }
+
+  return htmlResponse(renderScreenSetupHtml(context.userEmail));
 }
 
 function renderScreenSetupHtml(userEmail: string): string {

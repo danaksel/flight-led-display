@@ -253,6 +253,33 @@ describe("auth gates", () => {
 });
 
 describe("device provisioning", () => {
+  it("opens setup for signed-in accounts without paired screens", async () => {
+    const env = makeEnv();
+
+    const response = await userRequest("/screen-setup", env);
+    const html = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(html).toContain("Pair your screen");
+  });
+
+  it("redirects signed-in accounts with paired screens from setup to the control panel", async () => {
+    const env = makeEnv({}, {
+      "device:v1:dev_test": {
+        deviceId: "dev_test",
+        screenId: "12988",
+        tokenHash: "a".repeat(64),
+        pairedAt: "2026-06-07T08:30:00.000Z",
+        ownerEmail: TEST_USER_EMAIL
+      }
+    });
+
+    const response = await userRequest("/screen-setup", env, { redirect: "manual" });
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get("Location")).toBe("https://example.test/?screenId=12988");
+  });
+
   it("pairs a generic device and lets its token read scoped config", async () => {
     const env = makeEnv({}, {
       [CONFIG_KEY]: baseConfig()
