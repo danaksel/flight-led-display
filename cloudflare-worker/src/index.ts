@@ -1030,7 +1030,8 @@ async function writeDeviceCommand(
     issuedAt: now,
     source: source.slice(0, 80)
   };
-  await env.FLIGHT_DISPLAY_KV.put(scopedKey(DEVICE_COMMAND_KEY, context), JSON.stringify(next), { expirationTtl: 60 * 60 });
+  const expirationTtl = command === "restart" ? 2 * 60 : 60 * 60;
+  await env.FLIGHT_DISPLAY_KV.put(scopedKey(DEVICE_COMMAND_KEY, context), JSON.stringify(next), { expirationTtl });
   await broadcastRealtime(env, {
     type: "device_command",
     updatedAt: now,

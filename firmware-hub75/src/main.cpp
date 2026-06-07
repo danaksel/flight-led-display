@@ -239,6 +239,7 @@ bool startProvisioning();
 bool pollProvisioningStatus(bool drawStatus);
 void saveDeviceToken(const String &token, const String &screenId, const String &deviceId);
 void clearDeviceProvisioning();
+void rememberDeviceCommandNonce(uint32_t nonce);
 void executeDeviceCommand(const String &command, uint32_t nonce);
 void handleDeviceCommandPayload(JsonVariantConst value);
 void drawProvisioningStatus();
@@ -1975,7 +1976,7 @@ void clearDeviceProvisioning()
 void executeDeviceCommand(const String &command, uint32_t nonce)
 {
     if (nonce != 0 && nonce <= lastDeviceCommandNonce) return;
-    if (nonce != 0) lastDeviceCommandNonce = nonce;
+    if (nonce != 0) rememberDeviceCommandNonce(nonce);
 
     Serial.print("Device command: ");
     Serial.print(command);
@@ -3111,6 +3112,7 @@ void loadDeviceProvisioning()
     deviceAuthToken = devicePreferences.getString("token", "");
     provisionScreenId = devicePreferences.getString("screen", "");
     provisionDeviceId = devicePreferences.getString("device", "");
+    lastDeviceCommandNonce = devicePreferences.getUInt("cmd_nonce", 0);
     devicePreferences.end();
 }
 
@@ -3139,6 +3141,15 @@ void saveDeviceToken(const String &token, const String &screenId, const String &
     provisionScreenId = screenId;
     provisionDeviceId = deviceId;
     realtimeConfigured = false;
+}
+
+void rememberDeviceCommandNonce(uint32_t nonce)
+{
+    if (nonce == 0 || nonce <= lastDeviceCommandNonce) return;
+    lastDeviceCommandNonce = nonce;
+    devicePreferences.begin("sky_device", false);
+    devicePreferences.putUInt("cmd_nonce", nonce);
+    devicePreferences.end();
 }
 
 bool startProvisioning()
