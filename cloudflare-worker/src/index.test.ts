@@ -122,7 +122,7 @@ describe("auth gates", () => {
   });
 
   it("supports screen-specific Homey aliases", async () => {
-    const env = makeEnv({}, {
+    const env = makeEnv({ DEVICE_API_TOKEN: "device-secret" }, {
       "device:v1:dev_test": {
         deviceId: "dev_test",
         screenId: "93975",
@@ -153,6 +153,14 @@ describe("auth gates", () => {
     expect(night.status).toBe(200);
     expect(nightJson.brightnessMode).toBe("night");
 
+    const dayWithCompatHeader = await request("/api/screens/93975/brightness-mode/day", env, {
+      method: "POST",
+      headers: { "X-Homey-Token": "homey-secret" }
+    });
+    const dayWithCompatHeaderJson = await dayWithCompatHeader.json() as Record<string, unknown>;
+    expect(dayWithCompatHeader.status).toBe(200);
+    expect(dayWithCompatHeaderJson.brightnessMode).toBe("day");
+
     const off = await request("/api/screens/93975/screen-state/deactivate", env, {
       method: "POST",
       headers: { Authorization: "Bearer homey-secret" }
@@ -168,6 +176,22 @@ describe("auth gates", () => {
     const publicOnJson = await publicOn.json() as Record<string, unknown>;
     expect(publicOn.status).toBe(200);
     expect(publicOnJson.active).toBe(true);
+
+    const publicNightWithBearer = await request("/public/homey/screens/93975/brightness-mode/night", env, {
+      method: "POST",
+      headers: { Authorization: "Bearer homey-secret" }
+    });
+    const publicNightWithBearerJson = await publicNightWithBearer.json() as Record<string, unknown>;
+    expect(publicNightWithBearer.status).toBe(200);
+    expect(publicNightWithBearerJson.brightnessMode).toBe("night");
+
+    const publicDayWithCompatHeader = await request("/public/homey/screens/93975/brightness-mode/day", env, {
+      method: "POST",
+      headers: { "X-Homey-Token": "homey-secret" }
+    });
+    const publicDayWithCompatHeaderJson = await publicDayWithCompatHeader.json() as Record<string, unknown>;
+    expect(publicDayWithCompatHeader.status).toBe(200);
+    expect(publicDayWithCompatHeaderJson.brightnessMode).toBe("day");
   });
 
   it("queues ota_update for realtime-state", async () => {

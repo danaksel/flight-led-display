@@ -66,6 +66,15 @@ type HomeyTokenRecord = {
   rotatedAt?: string | null;
 };
 
+type HomeyAuthResult = {
+  ok: boolean;
+  screenId?: string;
+  detectedHeader: "X-SkyFrame-Homey-Token" | "X-Homey-Token" | "Authorization" | "none";
+  screenLookupSucceeded: boolean;
+  tokenRecordFound: boolean;
+  failureReason?: "missing-screen-id" | "default-screen-not-supported" | "screen-owner-not-found" | "homey-token-not-found" | "token-mismatch";
+};
+
 type ProvisionRecord = {
   code: string;
   hardwareId: string;
@@ -758,20 +767,22 @@ async function listUserScreens(env: Env, userEmail: string): Promise<DeviceRecor
 async function authorizeRequest(request: Request, env: Env, pathname: string, context: RequestContext): Promise<Response | undefined> {
   const adminToken = normalizeSecretString(env.ADMIN_API_TOKEN);
   const deviceToken = normalizeSecretString(env.DEVICE_API_TOKEN);
+  const isPublicHomeyPath = isPublicHomeyAutomationPath(pathname);
 
   if (pathname === "/api/health") return undefined;
   if (pathname.startsWith("/public/provision/")) return undefined;
   if (pathname.startsWith("/public/logos-rgb565/") || pathname.startsWith("/public/logos/")) return undefined;
 
-  if (isScreenAutomationApiPath(pathname) || isPublicHomeyAutomationPath(pathname)) {
-    const hasHomeyToken = await requestHasHomeyToken(request, env, context);
+  if (isScreenAutomationApiPath(pathname) || isPublicHomeyPath) {
+    const homeyAuth = await requestHomeyAuthResult(request, env, context);
     const hasAdminToken = adminToken ? requestHasToken(request, adminToken, "X-Flight-Admin-Token") : false;
-    if (!hasHomeyToken && !hasAdminToken) {
+    if (!homeyAuth.ok && !hasAdminToken) {
       return jsonResponse({ error: "Unauthorized" }, 401, {
         "Cache-Control": "no-store",
         "WWW-Authenticate": "Bearer"
       });
     }
+    if (isPublicHomeyPath) return undefined;
   }
 
   if (adminToken && isLegacyAutomationApiPath(pathname) && !requestHasToken(request, adminToken, "X-Flight-Admin-Token")) {
@@ -1000,24 +1011,59 @@ function isAutomationRequestMethod(request: Request): boolean {
   return request.method === "POST";
 }
 
+function requestBearerToken(request: Request): string | undefined {
+  const authorization = request.headers.get("Authorization") || "";
+  const bearer = authorization.match(/^Bearer\s+(.+)$/i)?.[1];
+  return normalizeSecretString(bearer);
+}
+
 function requestHasToken(request: Request, expectedToken: string, headerName: string): boolean {
   const directToken = normalizeSecretString(request.headers.get(headerName) || undefined);
   if (constantTimeEquals(directToken, expectedToken)) return true;
 
-  const authorization = request.headers.get("Authorization") || "";
-  const bearer = authorization.match(/^Bearer\s+(.+)$/i)?.[1];
-  return constantTimeEquals(normalizeSecretString(bearer), expectedToken);
+  return constantTimeEquals(requestBearerToken(request), expectedToken);
 }
 
 async function requestHasHomeyToken(request: Request, env: Env, context?: RequestContext): Promise<boolean> {
+  return (await requestHomeyAuthResult(request, env, context)).ok;
+}
+
+async function requestHomeyAuthResult(request: Request, env: Env, context?: RequestContext): Promise<HomeyAuthResult> {
   const screenId = normalizeId(context?.screenId);
-  if (!screenId || screenId === DEFAULT_SCREEN_ID) return false;
+  const detectedHeader = detectedHomeyAuthHeader(request);
+  if (!screenId) {
+    return { ok: false, detectedHeader, screenLookupSucceeded: false, tokenRecordFound: false, failureReason: "missing-screen-id" };
+  }
+  if (screenId === DEFAULT_SCREEN_ID) {
+    return { ok: false, screenId, detectedHeader, screenLookupSucceeded: false, tokenRecordFound: false, failureReason: "default-screen-not-supported" };
+  }
   const ownerEmail = await ownerEmailForScreen(env, screenId);
-  if (!ownerEmail) return false;
+  if (!ownerEmail) {
+    return { ok: false, screenId, detectedHeader, screenLookupSucceeded: false, tokenRecordFound: false, failureReason: "screen-owner-not-found" };
+  }
   const record = await getHomeyTokenRecord(env, ownerEmail, false);
-  if (!record) return false;
-  return requestHasToken(request, record.token, "X-SkyFrame-Homey-Token")
-    || requestHasToken(request, record.token, "X-Homey-Token");
+  if (!record) {
+    return { ok: false, screenId, detectedHeader, screenLookupSucceeded: true, tokenRecordFound: false, failureReason: "homey-token-not-found" };
+  }
+
+  const ok = constantTimeEquals(normalizeSecretString(request.headers.get("X-SkyFrame-Homey-Token") || undefined), record.token)
+    || constantTimeEquals(normalizeSecretString(request.headers.get("X-Homey-Token") || undefined), record.token)
+    || constantTimeEquals(requestBearerToken(request), record.token);
+  return {
+    ok,
+    screenId,
+    detectedHeader,
+    screenLookupSucceeded: true,
+    tokenRecordFound: true,
+    failureReason: ok ? undefined : "token-mismatch"
+  };
+}
+
+function detectedHomeyAuthHeader(request: Request): HomeyAuthResult["detectedHeader"] {
+  if (normalizeSecretString(request.headers.get("X-SkyFrame-Homey-Token") || undefined)) return "X-SkyFrame-Homey-Token";
+  if (normalizeSecretString(request.headers.get("X-Homey-Token") || undefined)) return "X-Homey-Token";
+  if (requestBearerToken(request)) return "Authorization";
+  return "none";
 }
 
 function constantTimeEquals(a: string | undefined, b: string | undefined): boolean {
