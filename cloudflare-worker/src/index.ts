@@ -76,6 +76,7 @@ type HomeyAuthResult = {
 
 type AdminUiSettings = {
   showEmulator: boolean;
+  configRefreshSeconds: number;
   updatedAt?: string;
   updatedBy?: string;
 };
@@ -171,6 +172,11 @@ type ColorCustomSets = {
 
 type DisplayBehaviorMode = "airspace" | "hybrid" | "airport_board" | "clock";
 
+type AirportOption = {
+  code: string;
+  name: string;
+};
+
 type ScreenState = {
   active: boolean;
   brightnessMode: "day" | "night";
@@ -225,6 +231,7 @@ type FirmwareManifest = {
   url: string;
   sha256: string;
   size: number;
+  releaseNotes?: string[];
 };
 
 type AircraftCategoryCode = "P" | "C" | "M" | "J" | "T" | "H" | "B" | "G" | "D" | "V" | "O" | "N";
@@ -463,9 +470,26 @@ const SOUND_STATE_KEY = "sound-state:v1";
 const DEVICE_STATUS_KEY = "device-status:v1";
 const DEVICE_COMMAND_KEY = "device-command:v1";
 const ADMIN_UI_SETTINGS_KEY = "admin:ui:v1";
+const AVINOR_AIRPORT_OPTIONS_KEY = "avinor-airport-options:v1";
 const DEFAULT_SCREEN_ID = "main";
 const PROVISION_TTL_SECONDS = 15 * 60;
 const DEVICE_TOKEN_BYTES = 32;
+const AVINOR_NORWAY_AIRPORT_CODES = [
+  "AES", "ALF", "ANX", "BDU", "BGO", "BJF", "BNN", "BOO", "BVG", "EVE", "FDE", "FRO",
+  "HAA", "HFT", "HOV", "HVG", "KKN", "KRS", "KSU", "LKN", "LYR", "MEH", "MJF", "MOL",
+  "MQN", "NVK", "OSL", "OLA", "RRS", "RVK", "RST", "SDN", "SKN", "SOG", "SOJ", "SSJ",
+  "SVG", "SVJ", "TOS", "TRD", "VAW", "VDB", "VDS"
+] as const;
+const AVINOR_NORWAY_AIRPORT_FALLBACK_NAMES: Record<string, string> = {
+  AES: "Alesund", ALF: "Alta", ANX: "Andoya", BDU: "Bardufoss", BGO: "Bergen", BJF: "Batsfjord",
+  BNN: "Bronnoysund", BOO: "Bodo", BVG: "Berlevag", EVE: "Harstad/Narvik", FDE: "Forde",
+  FRO: "Floro", HAA: "Hasvik", HFT: "Hammerfest", HOV: "Orsta/Volda", HVG: "Honningsvag",
+  KKN: "Kirkenes", KRS: "Kristiansand", KSU: "Kristiansund", LKN: "Leknes", LYR: "Svalbard",
+  MEH: "Mehamn", MJF: "Mosjoen", MOL: "Molde", MQN: "Mo i Rana", NVK: "Narvik", OSL: "Oslo",
+  OLA: "Orland", RRS: "Roros", RVK: "Rorvik", RST: "Rost", SDN: "Sandane", SKN: "Stokmarknes",
+  SOG: "Sogndal", SOJ: "Sorkjosen", SSJ: "Sandnessjoen", SVG: "Stavanger", SVJ: "Svolvaer",
+  TOS: "Tromso", TRD: "Trondheim", VAW: "Vardo", VDB: "Fagernes", VDS: "Vadso"
+};
 const AIRPORT_CITY_OVERRIDES: Record<string, string> = {
   AAL: "Aalborg",
   AAR: "Aarhus",
@@ -657,7 +681,7 @@ export default {
       if (url.pathname === "/public/realtime") return realtimeResponse(request, env, context);
       if (url.pathname === "/public/realtime-state" && request.method === "GET") return realtimeStateResponse(env, context);
       if (url.pathname === "/public/device-status" && request.method === "POST") return saveDeviceStatus(request, env, context);
-      if (url.pathname === "/public/firmware/latest.json" && request.method === "GET") return firmwareAssetResponse(request, env, "/firmware/latest.json", "application/json; charset=utf-8");
+      if (url.pathname === "/public/firmware/latest.json" && request.method === "GET") return firmwareLatestPublicResponse(request, env, context);
       if (url.pathname.match(/^\/public\/firmware\/[^/]+\.bin$/) && request.method === "GET") return firmwareAssetResponse(request, env, url.pathname.replace(/^\/public/, ""), "application/octet-stream");
       if (url.pathname === "/public/device-config" && request.method === "GET") return deviceConfigResponse(env, context);
       if (url.pathname === "/public/sound-state" && request.method === "GET") return soundStateResponse(env, context);
@@ -666,6 +690,7 @@ export default {
       if (url.pathname.match(/^\/public\/homey\/screens\/[^/]+\/screen-state\/deactivate$/) && isAutomationRequestMethod(request)) return writeScreenState(env, { active: false }, "homey-api", context);
       if (url.pathname.match(/^\/public\/homey\/screens\/[^/]+\/brightness-mode\/day$/) && isAutomationRequestMethod(request)) return writeScreenState(env, { brightnessMode: "day" }, "homey-api", context);
       if (url.pathname.match(/^\/public\/homey\/screens\/[^/]+\/brightness-mode\/night$/) && isAutomationRequestMethod(request)) return writeScreenState(env, { brightnessMode: "night" }, "homey-api", context);
+      if (url.pathname.match(/^\/public\/homey\/screens\/[^/]+\/display-mode\/(?:airspace|hybrid|flight|airport-board|airport_board|clock)$/) && isAutomationRequestMethod(request)) return writeDisplayMode(env, displayModeFromPath(url.pathname), "homey-api", context);
       if (url.pathname.startsWith("/public/logos-rgb565/")) return logoRgb565Response(request, env);
       if (url.pathname.startsWith("/public/logos/")) return logoAssetResponse(request, env);
       if (url.pathname.startsWith("/logos-rgb565/")) return logoRgb565Response(request, env);
@@ -685,6 +710,7 @@ export default {
       if (url.pathname.match(/^\/api\/screens\/[^/]+\/screen-state\/deactivate$/) && isAutomationRequestMethod(request)) return writeScreenState(env, { active: false }, "homey-api", context);
       if (url.pathname.match(/^\/api\/screens\/[^/]+\/brightness-mode\/day$/) && isAutomationRequestMethod(request)) return writeScreenState(env, { brightnessMode: "day" }, "homey-api", context);
       if (url.pathname.match(/^\/api\/screens\/[^/]+\/brightness-mode\/night$/) && isAutomationRequestMethod(request)) return writeScreenState(env, { brightnessMode: "night" }, "homey-api", context);
+      if (url.pathname.match(/^\/api\/screens\/[^/]+\/display-mode\/(?:airspace|hybrid|flight|airport-board|airport_board|clock)$/) && isAutomationRequestMethod(request)) return writeDisplayMode(env, displayModeFromPath(url.pathname), "homey-api", context);
       if (url.pathname === "/api/config" && request.method === "GET") return configResponse(env, context);
       if (url.pathname === "/api/config" && request.method === "POST") return saveConfig(request, env, context);
       if (url.pathname === "/api/device-config" && request.method === "GET") return deviceConfigResponse(env, context);
@@ -693,6 +719,7 @@ export default {
       if (url.pathname === "/api/firmware/latest" && request.method === "GET") return firmwareLatestResponse(request, env);
       if (url.pathname === "/api/sound-state" && request.method === "GET") return soundStateResponse(env, context);
       if (url.pathname === "/api/logo-status" && request.method === "GET") return logoStatusResponse(env);
+      if (url.pathname === "/api/avinor-airports" && request.method === "GET") return avinorAirportsResponse(env);
       if (url.pathname === "/api/ui-settings" && request.method === "GET") return publicUiSettingsResponse(env);
       if (url.pathname === "/api/admin/screens" && request.method === "GET") return adminScreensResponse(request, env, context);
       if (url.pathname === "/api/admin/ui-settings" && request.method === "GET") return adminUiSettingsResponse(request, env, context);
@@ -773,6 +800,7 @@ async function authorizeRequest(request: Request, env: Env, pathname: string, co
 
   if (pathname === "/api/health") return undefined;
   if (pathname.startsWith("/public/provision/")) return undefined;
+  if (pathname.startsWith("/public/firmware/")) return undefined;
   if (pathname.startsWith("/public/logos-rgb565/") || pathname.startsWith("/public/logos/")) return undefined;
 
   if (isScreenAutomationApiPath(pathname) || isPublicHomeyPath) {
@@ -931,6 +959,23 @@ async function firmwareAssetResponse(request: Request, env: Env, assetPath: stri
   });
 }
 
+async function firmwareLatestPublicResponse(request: Request, env: Env, context?: RequestContext): Promise<Response> {
+  const manifest = await loadFirmwareManifest(request, env);
+  if (!manifest) return jsonResponse({ error: "Firmware manifest unavailable" }, 503, { "Cache-Control": "no-store" });
+
+  const command = await getDeviceCommand(env, context);
+  if (command?.command === "ota_update") {
+    return jsonResponse(manifest, 200, { "Cache-Control": "no-store" });
+  }
+
+  const deviceStatus = await getDeviceStatus(env, context);
+  return jsonResponse({
+    ...manifest,
+    version: deviceStatus?.firmwareVersion || "V0.0",
+    releaseNotes: ["Firmware installation requires a manual update command."]
+  }, 200, { "Cache-Control": "no-store" });
+}
+
 function normalizeFirmwareManifest(value: unknown): FirmwareManifest | null {
   const v = value && typeof value === "object" ? value as Partial<FirmwareManifest> : {};
   if (typeof v.version !== "string" || !v.version.trim()) return null;
@@ -941,7 +986,13 @@ function normalizeFirmwareManifest(value: unknown): FirmwareManifest | null {
     version: v.version.trim().slice(0, 40),
     url: v.url.trim(),
     sha256: v.sha256.trim().toLowerCase(),
-    size: Math.floor(v.size)
+    size: Math.floor(v.size),
+    ...(Array.isArray(v.releaseNotes) ? {
+      releaseNotes: v.releaseNotes
+        .filter((note): note is string => typeof note === "string" && note.trim().length > 0)
+        .map((note) => note.trim().slice(0, 140))
+        .slice(0, 4)
+    } : {})
   };
 }
 
@@ -998,11 +1049,11 @@ function isLegacyAutomationApiPath(pathname: string): boolean {
 }
 
 function isScreenAutomationApiPath(pathname: string): boolean {
-  return /^\/api\/screens\/[^/]+\/(?:screen-state\/(?:activate|deactivate)|brightness-mode\/(?:day|night))$/.test(pathname);
+  return /^\/api\/screens\/[^/]+\/(?:screen-state\/(?:activate|deactivate)|brightness-mode\/(?:day|night)|display-mode\/(?:airspace|hybrid|flight|airport-board|airport_board|clock))$/.test(pathname);
 }
 
 function isPublicHomeyAutomationPath(pathname: string): boolean {
-  return /^\/public\/homey\/screens\/[^/]+\/(?:screen-state\/(?:activate|deactivate)|brightness-mode\/(?:day|night))$/.test(pathname);
+  return /^\/public\/homey\/screens\/[^/]+\/(?:screen-state\/(?:activate|deactivate)|brightness-mode\/(?:day|night)|display-mode\/(?:airspace|hybrid|flight|airport-board|airport_board|clock))$/.test(pathname);
 }
 
 function isAutomationRequestMethod(request: Request): boolean {
@@ -1401,6 +1452,7 @@ function normalizeAdminUiSettings(value: unknown): AdminUiSettings {
   const v = value && typeof value === "object" ? value as Partial<AdminUiSettings> : {};
   return {
     showEmulator: v.showEmulator === true,
+    configRefreshSeconds: clampNumber((v as { configRefreshSeconds?: unknown }).configRefreshSeconds, 60, 3600, 300),
     updatedAt: typeof v.updatedAt === "string" && v.updatedAt ? v.updatedAt : undefined,
     updatedBy: typeof v.updatedBy === "string" && v.updatedBy ? v.updatedBy.slice(0, 120) : undefined
   };
@@ -1422,6 +1474,7 @@ async function publicUiSettingsResponse(env: Env): Promise<Response> {
   const settings = await getAdminUiSettings(env);
   return jsonResponse({
     showEmulator: settings.showEmulator,
+    configRefreshSeconds: settings.configRefreshSeconds,
     updatedAt: settings.updatedAt
   }, 200, { "Cache-Control": "no-store" });
 }
@@ -1433,7 +1486,8 @@ async function saveAdminUiSettings(request: Request, env: Env, context?: Request
   const previous = await getAdminUiSettings(env);
   const next: AdminUiSettings = {
     ...previous,
-    showEmulator: body.showEmulator === true,
+    showEmulator: typeof body.showEmulator === "boolean" ? body.showEmulator : previous.showEmulator,
+    configRefreshSeconds: clampNumber((body as { configRefreshSeconds?: unknown }).configRefreshSeconds, 60, 3600, previous.configRefreshSeconds),
     updatedAt: new Date().toISOString(),
     updatedBy: normalizeEmail(context?.userEmail) || "admin"
   };
@@ -1549,7 +1603,7 @@ async function saveConfig(request: Request, env: Env, context?: RequestContext):
   const config: Config = {
     lat: clamp(body.lat, -90, 90),
     lon: clamp(body.lon, -180, 180),
-    radiusKm: clamp(body.radiusKm, 1, 250),
+    radiusKm: clamp(body.radiusKm, 1, 100),
     homeAirportIata: normalizeAirportCode(body.homeAirportIata, env.HOME_AIRPORT_IATA || "OSL"),
     follow: normalizeFollowSettings((body as { follow?: unknown }).follow),
     label: typeof body.label === "string" ? body.label.slice(0, 80) : undefined,
@@ -1582,7 +1636,7 @@ async function saveConfig(request: Request, env: Env, context?: RequestContext):
 }
 
 async function deviceConfigResponse(env: Env, context?: RequestContext): Promise<Response> {
-  const [config, screenState, soundState, fr24] = await Promise.all([getConfig(env, context), getScreenState(env, context), getSoundState(env, context), fr24KeyStatus(env, context)]);
+  const [config, screenState, soundState, fr24, adminUiSettings] = await Promise.all([getConfig(env, context), getScreenState(env, context), getSoundState(env, context), fr24KeyStatus(env, context), getAdminUiSettings(env)]);
   const normalizedDevice = enforceFr24DeviceSettings(normalizeDeviceSettings(config.device), fr24.screenConfigured);
   const effectiveBrightness = screenState.brightnessMode === "night"
     ? normalizedDevice.nightMode.brightness
@@ -1593,6 +1647,7 @@ async function deviceConfigResponse(env: Env, context?: RequestContext): Promise
     follow: fr24.screenConfigured ? config.follow : { ...normalizeFollowSettings(config.follow), enabled: false },
     device: {
       ...normalizedDevice,
+      configRefreshSeconds: adminUiSettings.configRefreshSeconds,
       effectiveBrightness,
       effectiveBrightness8: scalePercentTo8Bit(effectiveBrightness),
       brightnessMode: screenState.brightnessMode,
@@ -1746,6 +1801,70 @@ async function logoStatusResponse(env: Env): Promise<Response> {
   }, 200, {
     "Cache-Control": "no-store"
   });
+}
+
+async function avinorAirportsResponse(env: Env): Promise<Response> {
+  const airports = await getAvinorNorwayAirportOptions(env);
+  return jsonResponse({
+    updatedAt: new Date().toISOString(),
+    source: "avinor-airport-names",
+    airports
+  }, 200, {
+    "Cache-Control": "public, max-age=3600"
+  });
+}
+
+async function getAvinorNorwayAirportOptions(env: Env): Promise<AirportOption[]> {
+  const cached = await env.FLIGHT_DISPLAY_KV.get<AirportOption[]>(AVINOR_AIRPORT_OPTIONS_KEY, "json").catch(() => null);
+  if (Array.isArray(cached) && cached.length) return cached;
+
+  const fallback = fallbackAvinorNorwayAirportOptions();
+  try {
+    const names = await fetchAvinorAirportNames(env);
+    const airports = AVINOR_NORWAY_AIRPORT_CODES
+      .map((code) => ({
+        code,
+        name: cleanAirportName(names.get(code) || AVINOR_NORWAY_AIRPORT_FALLBACK_NAMES[code] || code) || code
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name) || a.code.localeCompare(b.code));
+    await env.FLIGHT_DISPLAY_KV.put(AVINOR_AIRPORT_OPTIONS_KEY, JSON.stringify(airports), { expirationTtl: 86400 });
+    return airports;
+  } catch {
+    return fallback;
+  }
+}
+
+async function fetchAvinorAirportNames(env: Env): Promise<Map<string, string>> {
+  const baseUrl = env.AVINOR_AIRPORT_NAMES_BASE_URL || "https://asrv.avinor.no/airportNames/v1.0";
+  const url = new URL(baseUrl);
+  url.searchParams.set("shortname", "Y");
+  const response = await fetch(url.toString(), {
+    headers: {
+      Accept: "application/xml,text/xml"
+    }
+  });
+  if (!response.ok) throw new Error(`Avinor airport names failed with HTTP ${response.status}`);
+
+  const xml = await responseText(response);
+  const names = new Map<string, string>();
+  const airportPattern = /<airportName\b([^>]*)\/>/g;
+  let match: RegExpExecArray | null;
+  while ((match = airportPattern.exec(xml))) {
+    const attributes = match[1];
+    const code = xmlAttribute(attributes, "code").toUpperCase();
+    const name = xmlAttribute(attributes, "shortname15") || xmlAttribute(attributes, "name");
+    if (/^[A-Z0-9]{3,4}$/.test(code) && name) names.set(code, name);
+  }
+  return names;
+}
+
+function fallbackAvinorNorwayAirportOptions(): AirportOption[] {
+  return AVINOR_NORWAY_AIRPORT_CODES
+    .map((code) => ({
+      code,
+      name: AVINOR_NORWAY_AIRPORT_FALLBACK_NAMES[code] || code
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name) || a.code.localeCompare(b.code));
 }
 
 async function listR2Keys(bucket: R2Bucket, prefixes: string[], suffix: string): Promise<string[]> {
@@ -2441,8 +2560,13 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
 
 function normalizeDisplayBehaviorMode(value: unknown): DisplayBehaviorMode {
   if (value === "airspace" || value === "hybrid" || value === "airport_board" || value === "clock") return value;
+  if (value === "airport-board") return "airport_board";
   if (value === "flight") return "hybrid";
   return "hybrid";
+}
+
+function displayModeFromPath(pathname: string): DisplayBehaviorMode {
+  return normalizeDisplayBehaviorMode(pathname.split("/").pop() || "");
 }
 
 function airspaceMonitoringForMode(mode: DisplayBehaviorMode): boolean {
@@ -4718,30 +4842,42 @@ function renderAdminHtml(request: Request, userEmail: string): string {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SkyFrame admin</title>
   <style>
-    :root{color-scheme:light;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--bg:#f2ece8;--ink:#3c2415;--muted:#6b5d52;--line:rgba(60,36,21,.16);--panel:#fffaf5;--accent:#3478f6;--ok:#008f5a;--warn:#b36b00;--danger:#b42318}
-    *{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#f8f4ef,#ddd7d2);color:var(--ink)}main{width:min(1180px,100%);margin:0 auto;padding:28px 20px 48px}.top{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:22px}.skyframe-logo{width:245px;max-width:70vw;height:auto}h1{margin:10px 0 0;font-size:42px;line-height:1}.lead{margin:8px 0 0;color:var(--muted);font-size:15px}.user{display:grid;justify-items:end;gap:4px;border:1px solid var(--line);border-radius:8px;padding:9px 12px;background:rgba(255,255,255,.6);color:var(--muted);font-size:13px}.user a{font-size:12px}.toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:18px 0;flex-wrap:wrap}.toolbar-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.status{color:var(--muted);font-size:13px}button{border:0;border-radius:8px;background:var(--ink);color:white;font:inherit;font-weight:800;padding:10px 14px;cursor:pointer}.secondary{background:rgba(255,255,255,.62);color:var(--ink);border:1px solid var(--line)}.secondary.active{background:rgba(0,143,90,.13);color:var(--ok);border-color:rgba(0,143,90,.26)}.danger{background:rgba(180,35,24,.1);color:var(--danger);border:1px solid rgba(180,35,24,.22)}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:8px;background:rgba(255,250,245,.86);box-shadow:0 24px 64px rgba(34,20,12,.12)}table{width:100%;border-collapse:collapse;min-width:1040px}th,td{padding:12px 14px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;font-size:13px}th{background:#c1b4ac;color:var(--ink);font-size:12px;text-transform:uppercase;letter-spacing:.06em}tr:last-child td{border-bottom:0}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;overflow-wrap:anywhere}.muted{color:var(--muted)}.pill{display:inline-flex;align-items:center;border-radius:999px;padding:3px 8px;font-weight:800;font-size:11px;background:#eee;color:var(--muted)}.pill.ok{background:rgba(0,143,90,.12);color:var(--ok)}.pill.warn{background:rgba(179,107,0,.12);color:var(--warn)}.pill.danger{background:rgba(180,35,24,.1);color:var(--danger);border:0}a{color:var(--accent);font-weight:800;text-decoration:none}.vitals{display:grid;gap:4px;color:var(--muted)}@media(max-width:700px){.top{display:grid}.skyframe-logo{width:210px}h1{font-size:32px}}
+    :root{color-scheme:light;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--bg:#f5f6f8;--surface:#fff;--surface-2:#f9fafb;--ink:#17202a;--muted:#6c7683;--line:#dce1e7;--line-soft:#edf0f3;--accent:#2563eb;--accent-soft:#e8f0ff;--ok:#10845b;--ok-soft:#e7f6ef;--warn:#a15c00;--warn-soft:#fff3df;--danger:#b42318;--danger-soft:#fff0ed;--shadow:0 20px 48px rgba(31,41,55,.08)}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink)}main{width:min(1320px,100%);margin:0 auto;padding:24px 18px 48px}.shell{display:grid;gap:18px}.top{display:flex;align-items:flex-start;justify-content:space-between;gap:18px}.brand{display:grid;gap:8px}.skyframe-logo{width:240px;max-width:72vw;height:auto}.title-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}h1{margin:0;font-size:34px;line-height:1;font-weight:820;letter-spacing:0}.lead{margin:0;color:var(--muted);font-size:14px;line-height:1.45}.user{display:flex;align-items:center;gap:12px;border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:var(--surface);box-shadow:0 8px 24px rgba(31,41,55,.05);color:var(--muted);font-size:13px;white-space:nowrap}.user a,.link{color:var(--accent);font-weight:760;text-decoration:none}.summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.metric{border:1px solid var(--line);border-radius:8px;background:var(--surface);padding:14px;display:grid;gap:6px;min-height:86px}.metric-label{color:var(--muted);font-size:12px;font-weight:720;text-transform:uppercase;letter-spacing:.04em}.metric-value{font-size:26px;font-weight:820;line-height:1}.metric-detail{color:var(--muted);font-size:12px;line-height:1.35}.toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;border:1px solid var(--line);border-radius:8px;background:var(--surface);padding:12px}.toolbar-left{display:flex;align-items:center;gap:10px;flex:1 1 360px;min-width:0}.toolbar-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.status{color:var(--muted);font-size:13px;line-height:1.35}.search,.number-input{height:38px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--ink);padding:0 12px;font:inherit;font-size:14px}.search{min-width:220px;max-width:380px;width:100%}.number-input{width:96px}.admin-setting{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:12px;font-weight:760}button{border:0;border-radius:8px;background:var(--ink);color:white;font:inherit;font-size:14px;font-weight:760;padding:9px 13px;cursor:pointer;min-height:38px}button:disabled{opacity:.55;cursor:not-allowed}.secondary{background:var(--surface-2);color:var(--ink);border:1px solid var(--line)}.secondary.active{background:var(--ok-soft);color:var(--ok);border-color:#bde9d4}.danger{background:var(--danger-soft);color:var(--danger);border:1px solid #f0c5bf}.device-list{border:1px solid var(--line);border-radius:8px;background:var(--surface);box-shadow:var(--shadow);overflow:hidden}.device-head,.device-row{display:grid;grid-template-columns:minmax(170px,1.1fr) minmax(180px,1.1fr) minmax(150px,.8fr) minmax(120px,.65fr) minmax(170px,.9fr) minmax(240px,1.25fr) minmax(150px,.75fr);gap:0}.device-head{background:#eef1f5;color:#4d5966;font-size:11px;font-weight:820;text-transform:uppercase;letter-spacing:.06em}.device-head>div,.cell{padding:13px 14px;border-bottom:1px solid var(--line-soft);min-width:0}.device-row:last-child .cell{border-bottom:0}.cell-label{display:none;color:var(--muted);font-size:11px;font-weight:820;text-transform:uppercase;letter-spacing:.05em}.primary{font-weight:780}.sub{margin-top:3px;color:var(--muted);font-size:12px;line-height:1.35}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;overflow-wrap:anywhere}.pill{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:4px 9px;font-weight:780;font-size:12px;background:#eef1f5;color:#596575;max-width:100%}.pill::before{content:"";width:7px;height:7px;border-radius:999px;background:currentColor;flex:0 0 auto}.pill.ok{background:var(--ok-soft);color:var(--ok)}.pill.warn{background:var(--warn-soft);color:var(--warn)}.pill.danger{background:var(--danger-soft);color:var(--danger)}.kv{display:grid;grid-template-columns:auto minmax(0,1fr);column-gap:6px;row-gap:4px;color:var(--muted);font-size:12px;line-height:1.25}.kv strong{color:#4b5563;font-weight:760}.actions{display:grid;gap:8px}.empty{padding:32px;text-align:center;color:var(--muted)}@media(max-width:980px){main{padding:18px 12px 36px}.top{display:grid}.user{justify-content:space-between;white-space:normal}.summary{grid-template-columns:repeat(2,minmax(0,1fr))}.toolbar{align-items:stretch}.toolbar-left,.toolbar-actions{width:100%;flex:1 1 100%}.toolbar-left{display:grid;grid-template-columns:1fr}.toolbar-actions{display:grid;grid-template-columns:1fr 1fr}.admin-setting{justify-content:space-between}.number-input{width:120px}.device-head{display:none}.device-row{display:grid;grid-template-columns:1fr;border-bottom:1px solid var(--line);padding:6px 0}.device-row:last-child{border-bottom:0}.cell{display:grid;gap:5px;padding:10px 14px;border-bottom:0}.cell-label{display:block}.actions{grid-template-columns:1fr 1fr}.skyframe-logo{width:210px}h1{font-size:30px}}@media(max-width:560px){.summary{grid-template-columns:1fr}.toolbar-actions,.actions{grid-template-columns:1fr}.metric{min-height:0}.search{min-width:0;max-width:none}.user{display:grid;gap:5px}.device-list{border-radius:8px}.kv{grid-template-columns:1fr}.kv strong{display:block}}
   </style>
 </head>
 <body>
   <main>
-    <div class="top"><div>${skyFrameLogoMarkup()}<h1>Admin</h1><p class="lead">Screens, owners, FR24 status and device vitals.</p></div><div class="user"><span>${escapeHtml(userEmail)}</span><a href="${logoutUrl}">Log out</a></div></div>
-    <div class="toolbar"><div id="status" class="status">Loading screens...</div><div class="toolbar-actions"><button id="emulatorToggle" class="secondary" type="button">Show emulator: loading</button><button id="refresh" type="button">Refresh</button></div></div>
-    <div class="table-wrap"><table><thead><tr><th>Screen</th><th>Owner</th><th>Mode</th><th>FR24</th><th>Screen state</th><th>Vitals</th><th>Actions</th></tr></thead><tbody id="rows"></tbody></table></div>
+    <div class="shell">
+      <div class="top"><div class="brand">${skyFrameLogoMarkup()}<div class="title-row"><h1>Admin</h1></div><p class="lead">Screens, owners, FR24 status and device vitals.</p></div><div class="user"><span>${escapeHtml(userEmail)}</span><a href="${logoutUrl}">Log out</a></div></div>
+      <div id="summary" class="summary"></div>
+      <div class="toolbar"><div class="toolbar-left"><input id="filter" class="search" type="search" placeholder="Search screens, owners or IP"><div id="status" class="status">Loading screens...</div></div><div class="toolbar-actions"><label class="admin-setting">Config refresh <input id="configRefreshSeconds" class="number-input" type="number" min="60" max="3600" step="30"></label><button id="emulatorToggle" class="secondary" type="button">Show emulator: loading</button><button id="refresh" type="button">Refresh</button></div></div>
+      <section class="device-list" aria-label="Screens"><div class="device-head"><div>Screen</div><div>Owner</div><div>Mode</div><div>FR24</div><div>Screen state</div><div>Vitals</div><div>Actions</div></div><div id="rows"></div></section>
+    </div>
   </main>
   <script>
     const rows = document.querySelector("#rows");
     const status = document.querySelector("#status");
+    const summary = document.querySelector("#summary");
+    const filter = document.querySelector("#filter");
     const emulatorToggle = document.querySelector("#emulatorToggle");
+    const configRefreshInput = document.querySelector("#configRefreshSeconds");
     let uiSettings = { showEmulator: false };
+    let lastScreens = [];
+    let lastUpdatedAt = null;
     document.querySelector("#refresh").addEventListener("click", load);
+    filter.addEventListener("input", render);
     emulatorToggle.addEventListener("click", toggleEmulator);
+    configRefreshInput.addEventListener("change", saveConfigRefresh);
     function esc(value){return String(value ?? "").replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));}
     function date(value){if(!value)return "never";const d=new Date(value);return Number.isNaN(d.getTime())?"never":d.toLocaleString();}
     function mode(value){return ({airspace:"AirSpace",hybrid:"AirSpace + Airport Board",airport_board:"Airport Board",clock:"Clock"}[value]||"Not set");}
     function stateLabel(value){return value===false?"Screen off":"Screen on";}
     function source(value){return ({account:"Account key",missing:"No key"}[value]||value||"No key");}
     function freshness(value){if(!value)return ["No heartbeat","warn"];const t=Date.parse(value);if(!Number.isFinite(t))return ["Unknown","warn"];const mins=Math.round((Date.now()-t)/60000);if(mins<=4)return ["Online","ok"];return ["Last seen "+mins+" min ago","warn"];}
-    function vitalLine(label,value){return "<span><strong>"+esc(label)+":</strong> "+esc(value ?? "-")+"</span>";}
+    function vitalLine(label,value){return "<strong>"+esc(label)+"</strong><span>"+esc(value ?? "-")+"</span>";}
+    function metric(label,value,detail){return "<div class='metric'><div class='metric-label'>"+esc(label)+"</div><div class='metric-value'>"+esc(value)+"</div><div class='metric-detail'>"+esc(detail||"")+"</div></div>";}
+    function searchable(screen){const vitals=screen.deviceStatus||{};const wifi=vitals.wifi||{};return [screen.screenId,screen.deviceId,screen.ownerEmail,screen.label,screen.displayMode,wifi.ip,wifi.ssid,vitals.firmwareVersion].filter(Boolean).join(" ").toLowerCase();}
     rows.addEventListener("click", async (event)=>{
       const deleteButton=event.target.closest("[data-delete-screen]");
       const commandButton=event.target.closest("[data-command-screen]");
@@ -4769,11 +4905,23 @@ function renderAdminHtml(request: Request, userEmail: string): string {
     function renderUiSettings(){
       emulatorToggle.textContent = "Show emulator: " + (uiSettings.showEmulator ? "on" : "off");
       emulatorToggle.classList.toggle("active", Boolean(uiSettings.showEmulator));
+      configRefreshInput.value = String(uiSettings.configRefreshSeconds || 300);
     }
     async function loadUiSettings(){
       const res=await fetch("/api/admin/ui-settings");
       const data=await res.json().catch(()=>({}));
       if(!res.ok){emulatorToggle.textContent="Show emulator: unavailable";emulatorToggle.disabled=true;return;}
+      uiSettings=data;
+      renderUiSettings();
+    }
+    async function saveConfigRefresh(){
+      const seconds=Math.max(60,Math.min(3600,Number(configRefreshInput.value)||300));
+      configRefreshInput.value=String(seconds);
+      configRefreshInput.disabled=true;
+      const res=await fetch("/api/admin/ui-settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({configRefreshSeconds:seconds})});
+      const data=await res.json().catch(()=>({}));
+      configRefreshInput.disabled=false;
+      if(!res.ok){alert(data.error||"Could not update config refresh");renderUiSettings();return;}
       uiSettings=data;
       renderUiSettings();
     }
@@ -4787,27 +4935,48 @@ function renderAdminHtml(request: Request, userEmail: string): string {
       uiSettings=data;
       renderUiSettings();
     }
+    function renderSummary(screens){
+      const online=screens.filter((screen)=>freshness(screen.deviceStatus&&screen.deviceStatus.updatedAt)[1]==="ok").length;
+      const fr24=screens.filter((screen)=>screen.fr24&&screen.fr24.screenConfigured).length;
+      const updates=screens.filter((screen)=>screen.deviceStatus&&screen.deviceStatus.ota&&screen.deviceStatus.ota.status&&screen.deviceStatus.ota.status!=="up_to_date").length;
+      summary.innerHTML=[
+        metric("Screens",screens.length,lastUpdatedAt ? "Updated "+date(lastUpdatedAt) : "Inventory"),
+        metric("Online",online,online+" of "+screens.length+" reporting"),
+        metric("FR24 keys",fr24,fr24+" configured"),
+        metric("Firmware",updates,updates ? "Need attention" : "Up to date")
+      ].join("");
+    }
+    function render(){
+      const query=filter.value.trim().toLowerCase();
+      const screens=query ? lastScreens.filter((screen)=>searchable(screen).includes(query)) : lastScreens;
+      renderSummary(lastScreens);
+      status.textContent=screens.length+" of "+lastScreens.length+" screens · updated "+date(lastUpdatedAt);
+      rows.innerHTML=screens.map((screen)=>{
+        const state=screen.screenState||{};
+        const vitals=screen.deviceStatus||{};
+        const wifi=vitals.wifi||{};
+        const fr24=screen.fr24&&screen.fr24.screenConfigured;
+        const fresh=freshness(vitals.updatedAt);
+        const ota=vitals.ota&&[vitals.ota.status,vitals.ota.latestVersion,vitals.ota.lastError].filter(Boolean).join(" · ");
+        return "<article class='device-row'>"
+          +"<div class='cell'><span class='cell-label'>Screen</span><div class='primary'>"+esc(screen.label)+"</div><div class='sub mono'>"+esc(screen.screenId)+" · "+esc(screen.deviceId||"-")+"</div></div>"
+          +"<div class='cell'><span class='cell-label'>Owner</span><div class='primary'>"+esc(screen.ownerEmail||"-")+"</div><div class='sub mono'>Paired "+esc(date(screen.pairedAt))+"</div></div>"
+          +"<div class='cell'><span class='cell-label'>Mode</span><div class='primary'>"+esc(mode(screen.displayMode))+"</div></div>"
+          +"<div class='cell'><span class='cell-label'>FR24</span><span class='pill "+(fr24?"ok":"warn")+"'>"+esc(source(screen.fr24&&screen.fr24.source))+"</span></div>"
+          +"<div class='cell'><span class='cell-label'>Screen state</span><div class='primary'>"+esc(stateLabel(state.active))+"</div><div class='sub'>"+esc(state.brightnessMode==="night"?"Night brightness":"Day brightness")+"</div><div class='sub mono'>"+esc(date(state.updatedAt))+"</div></div>"
+          +"<div class='cell'><span class='cell-label'>Vitals</span><div class='kv'><strong>Status</strong><span><span class='pill "+fresh[1]+"'>"+esc(fresh[0])+"</span></span>"+vitalLine("IP address",wifi.ip)+vitalLine("Wi-Fi",wifi.ssid)+vitalLine("Signal",typeof wifi.rssi==="number"?wifi.rssi+" dBm":null)+vitalLine("Uptime",vitals.uptimeMs?Math.round(vitals.uptimeMs/1000)+" s":null)+vitalLine("Firmware",vitals.firmwareVersion)+vitalLine("OTA",ota)+vitalLine("Firmware mode",mode(vitals.displayMode))+"</div></div>"
+          +"<div class='cell'><span class='cell-label'>Actions</span><div class='actions'><button type='button' data-command-screen='"+esc(screen.screenId)+"' data-command='ota_update'>Update firmware</button><button class='danger' type='button' data-delete-screen='"+esc(screen.screenId)+"' data-label='"+esc(screen.label)+"'>Delete</button></div></div>"
+          +"</article>";
+      }).join("")||"<div class='empty'>No screens match this filter.</div>";
+    }
     async function load(){
       status.textContent="Loading screens...";
       const res=await fetch("/api/admin/screens");
       const data=await res.json().catch(()=>({}));
       if(!res.ok){status.textContent=data.error||"Could not load";return;}
-      status.textContent=data.count+" screens · updated "+date(data.updatedAt);
-      rows.innerHTML=(data.screens||[]).map((screen)=>{
-        const state=screen.screenState||{};
-        const vitals=screen.deviceStatus||{};
-        const fr24=screen.fr24&&screen.fr24.screenConfigured;
-        const fresh=freshness(vitals.updatedAt);
-        return "<tr>"
-          +"<td><div class='mono'>"+esc(screen.screenId)+"</div><div>"+esc(screen.label)+"</div></td>"
-          +"<td>"+esc(screen.ownerEmail||"-")+"<div class='mono'>paired "+esc(date(screen.pairedAt))+"</div></td>"
-          +"<td>"+esc(mode(screen.displayMode))+"</td>"
-          +"<td><span class='pill "+(fr24?"ok":"warn")+"'>"+esc(source(screen.fr24&&screen.fr24.source))+"</span></td>"
-          +"<td>"+esc(stateLabel(state.active))+" · "+esc(state.brightnessMode==="night"?"Night brightness":"Day brightness")+"<div class='mono'>"+esc(date(state.updatedAt))+"</div></td>"
-          +"<td><div class='vitals'><span class='pill "+fresh[1]+"'>"+esc(fresh[0])+"</span>"+vitalLine("IP address",vitals.wifi&&vitals.wifi.ip)+vitalLine("Wi-Fi",vitals.wifi&&vitals.wifi.ssid)+vitalLine("Signal",vitals.wifi&&typeof vitals.wifi.rssi==="number"?vitals.wifi.rssi+" dBm":null)+vitalLine("Uptime",vitals.uptimeMs?Math.round(vitals.uptimeMs/1000)+" s":null)+vitalLine("Firmware",vitals.firmwareVersion)+vitalLine("OTA",vitals.ota&&[vitals.ota.status,vitals.ota.latestVersion,vitals.ota.lastError].filter(Boolean).join(" · "))+vitalLine("Firmware mode",mode(vitals.displayMode))+"</div></td>"
-          +"<td><div class='vitals'><button type='button' data-command-screen='"+esc(screen.screenId)+"' data-command='ota_update'>Update firmware</button><button class='danger' type='button' data-delete-screen='"+esc(screen.screenId)+"' data-label='"+esc(screen.label)+"'>Delete</button></div></td>"
-          +"</tr>";
-      }).join("")||"<tr><td colspan='7'>No paired screens yet.</td></tr>";
+      lastScreens=data.screens||[];
+      lastUpdatedAt=data.updatedAt;
+      render();
     }
     load();
     loadUiSettings();

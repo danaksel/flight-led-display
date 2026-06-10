@@ -42,6 +42,13 @@ Example:
 
 ```text
 POST https://skyframe.danaksel.no/public/homey/screens/{screenId}/screen-state/activate
+POST https://skyframe.danaksel.no/public/homey/screens/{screenId}/screen-state/deactivate
+POST https://skyframe.danaksel.no/public/homey/screens/{screenId}/brightness-mode/night
+POST https://skyframe.danaksel.no/public/homey/screens/{screenId}/brightness-mode/day
+POST https://skyframe.danaksel.no/public/homey/screens/{screenId}/display-mode/airspace
+POST https://skyframe.danaksel.no/public/homey/screens/{screenId}/display-mode/hybrid
+POST https://skyframe.danaksel.no/public/homey/screens/{screenId}/display-mode/airport-board
+POST https://skyframe.danaksel.no/public/homey/screens/{screenId}/display-mode/clock
 X-SkyFrame-Homey-Token: <account-token>
 ```
 
@@ -55,11 +62,14 @@ Firmware binaries can be published as Worker assets under `public/firmware/`.
 
 ```json
 {
-  "version": "0.1.1",
-  "url": "https://skyframe.danaksel.no/public/firmware/skyframe-0.1.1.bin",
+  "version": "V1.4",
+  "url": "https://skyframe.danaksel.no/public/firmware/skyframe-v1.4.bin",
   "sha256": "<64 hex chars>",
-  "size": 1234567
+  "size": 1234567,
+  "releaseNotes": [
+    "Short user-facing fix or improvement."
+  ]
 }
 ```
 
-The current placeholder manifest advertises the same version as the checked-in firmware and does not trigger an update.
+Use `V<major>.<minor>` in `SKYFRAME_FW_VERSION`, `latest.json` and the lowercase binary filename, for example `skyframe-v1.4.bin`. Every firmware release must include short pointwise `releaseNotes` for the control panel update card. Firmware installation is manual: the display may report update availability from `latest.json`, but it must only download and install after an explicit `ota_update` command.

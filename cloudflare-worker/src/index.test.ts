@@ -210,6 +210,22 @@ describe("auth gates", () => {
     const publicDayWithCompatHeaderJson = await publicDayWithCompatHeader.json() as Record<string, unknown>;
     expect(publicDayWithCompatHeader.status).toBe(200);
     expect(publicDayWithCompatHeaderJson.brightnessMode).toBe("day");
+
+    const apiClock = await request("/api/screens/93975/display-mode/clock", env, {
+      method: "POST",
+      headers: { "X-SkyFrame-Homey-Token": "homey-secret" }
+    });
+    const apiClockJson = await apiClock.json() as Record<string, unknown>;
+    expect(apiClock.status).toBe(200);
+    expect(apiClockJson.displayMode).toBe("clock");
+
+    const publicAirportBoard = await request("/public/homey/screens/93975/display-mode/airport-board", env, {
+      method: "POST",
+      headers: { Authorization: "Bearer homey-secret" }
+    });
+    const publicAirportBoardJson = await publicAirportBoard.json() as Record<string, unknown>;
+    expect(publicAirportBoard.status).toBe(200);
+    expect(publicAirportBoardJson.displayMode).toBe("airport_board");
   });
 
   it("queues ota_update for realtime-state", async () => {
@@ -249,6 +265,96 @@ describe("auth gates", () => {
       headers: { "X-Flight-Device-Token": "device-secret" }
     });
     expect(authorized.status).toBe(200);
+
+    const publicFirmware = await request("/public/firmware/latest.json", env);
+    expect(publicFirmware.status).not.toBe(401);
+  });
+
+  it("preserves firmware release notes through the API manifest route", async () => {
+    const env = makeEnv({
+      ASSETS: {
+        fetch: vi.fn(async () => new Response(JSON.stringify({
+          version: "V1.3",
+          url: "https://skyframe.test/public/firmware/skyframe-v1.3.bin",
+          sha256: "a".repeat(64),
+          size: 1109696,
+          releaseNotes: [
+            "Splits followed-flight info 50/50 within the selected flight display duration."
+          ]
+        }), { headers: { "Content-Type": "application/json" } }))
+      } as unknown as Fetcher
+    });
+
+    const response = await request("/api/firmware/latest", env);
+    const json = await response.json() as Record<string, unknown>;
+
+    expect(response.status).toBe(200);
+    expect(json.releaseNotes).toEqual([
+      "Splits followed-flight info 50/50 within the selected flight display duration."
+    ]);
+  });
+
+  it("only exposes newer public firmware manifest to devices after ota_update command", async () => {
+    const env = makeEnv({
+      ASSETS: {
+        fetch: vi.fn(async () => new Response(JSON.stringify({
+          version: "V1.4",
+          url: "https://skyframe.test/public/firmware/skyframe-v1.4.bin",
+          sha256: "b".repeat(64),
+          size: 1109792,
+          releaseNotes: [
+            "Makes OTA firmware installation manual from the control panel."
+          ]
+        }), { headers: { "Content-Type": "application/json" } }))
+      } as unknown as Fetcher
+    }, {
+      "screen:93975:device-status:v1": {
+        firmwareVersion: "V1.2",
+        ota: { status: "up_to_date" }
+      }
+    });
+
+    const automatic = await request("/public/firmware/latest.json?screenId=93975", env);
+    const automaticJson = await automatic.json() as Record<string, unknown>;
+    expect(automatic.status).toBe(200);
+    expect(automaticJson.version).toBe("V1.2");
+
+    const command = await request("/api/device-command?screenId=93975", env, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-SkyFrame-User-Email": TEST_USER_EMAIL
+      },
+      body: JSON.stringify({ command: "ota_update" })
+    });
+    expect(command.status).toBe(200);
+
+    const manual = await request("/public/firmware/latest.json?screenId=93975", env);
+    const manualJson = await manual.json() as Record<string, unknown>;
+    expect(manual.status).toBe(200);
+    expect(manualJson.version).toBe("V1.4");
+  });
+
+  it("uses the admin global config refresh interval for device config", async () => {
+    const env = makeEnv({}, {
+      [CONFIG_KEY]: {
+        ...baseConfig(),
+        device: {
+          ...(baseConfig().device as Record<string, unknown>),
+          configRefreshSeconds: 60
+        }
+      },
+      "admin:ui:v1": {
+        showEmulator: false,
+        configRefreshSeconds: 420
+      }
+    });
+
+    const response = await request("/public/device-config", env);
+    const json = await response.json() as { device?: { configRefreshSeconds?: number } };
+
+    expect(response.status).toBe(200);
+    expect(json.device?.configRefreshSeconds).toBe(420);
   });
 });
 

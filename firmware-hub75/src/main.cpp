@@ -21,7 +21,7 @@ namespace
 constexpr uint16_t PanelWidth = 128;
 constexpr uint16_t PanelHeight = 64;
 constexpr uint8_t Brightness = 8;
-constexpr const char *SKYFRAME_FW_VERSION = "V1.2";
+constexpr const char *SKYFRAME_FW_VERSION = "V1.4";
 constexpr const char *DeviceConfigUrl = "https://skyframe.danaksel.no/public/device-config";
 constexpr const char *SoundStateUrl = "https://skyframe.danaksel.no/public/sound-state";
 constexpr const char *RealtimeStateUrl = "https://skyframe.danaksel.no/public/realtime-state";
@@ -2970,8 +2970,10 @@ void drawFlightPayload(JsonObject flight, const char *mode, size_t flightCount, 
     if (layout == "follow_cycle" || layout == "follow_status" || String(mode) == "follow")
     {
         const uint32_t phaseElapsed = millis() >= liveCycleStartedAt ? millis() - liveCycleStartedAt : 0;
-        const bool locationPhase = (phaseElapsed % 15000UL) >= 10000UL;
-        const uint32_t phaseStart = liveCycleStartedAt + (phaseElapsed / 15000UL) * 15000UL + (locationPhase ? 10000UL : 0UL);
+        const uint32_t phaseMs = max<uint32_t>(1000UL, (static_cast<uint32_t>(displayCycleSeconds) * 1000UL) / 2UL);
+        const uint32_t phaseIndex = phaseElapsed / phaseMs;
+        const bool locationPhase = (phaseIndex % 2UL) == 1UL;
+        const uint32_t phaseStart = liveCycleStartedAt + phaseIndex * phaseMs;
         JsonObject followStatus = flight["followStatus"];
         const String etaLine = valueOr(flight["arrTime"]);
         const String topLine = locationPhase && airline.length() ? airline : (flightId.length() ? flightId : callsign);
@@ -3491,6 +3493,11 @@ void checkFirmwareUpdate(bool forced)
     if (manifest.size == 0)
     {
         setOtaState("error", "manifest_missing_size");
+        return;
+    }
+    if (!forced)
+    {
+        setOtaState("update_available", "");
         return;
     }
 

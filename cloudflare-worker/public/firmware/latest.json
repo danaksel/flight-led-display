@@ -1,6 +1,10 @@
 {
-  "version": "V1.2",
-  "url": "https://skyframe.danaksel.no/public/firmware/skyframe-v1.2.bin",
-  "sha256": "93e1d0986957ecfe6b3df455720dcf45f1fcaed81a8d37e3b34e4a74bcf43394",
-  "size": 1109696
+  "version": "V1.4",
+  "url": "https://skyframe.danaksel.no/public/firmware/skyframe-v1.4.bin",
+  "sha256": "e0580a5c180d7e0acce64c2a3e0033c0df51da60cce69652bea3079bab55986f",
+  "size": 1109792,
+  "releaseNotes": [
+    "Makes OTA firmware installation manual from the control panel.",
+    "Keeps followed-flight info split 50/50 within the selected display duration."
+  ]
 }

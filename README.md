@@ -124,6 +124,25 @@ FR24 is intentionally per screen because the key costs money and belongs to the 
 - `/public/logos-rgb565/{CODE}.rgb565`
   Firmware-friendly 42 x 42 RGB565 airline logos.
 
+## Airline Logos
+
+The Worker can serve browser/preview PNG logos from R2 (`AIRLINE_LOGOS`), bundled assets in `cloudflare-worker/public/logos`, or an optional external `LOGO_BASE_URL`. The LED display does not use PNG directly. It downloads preconverted 42 x 42 RGB565 little-endian files from:
+
+```text
+GET https://skyframe.danaksel.no/public/logos-rgb565/{CODE}.rgb565
+```
+
+To add or fix a logo:
+
+```bash
+cd cloudflare-worker
+mkdir -p ../assets/airline-logos/r2-source ../assets/airline-logos/rgb565
+cp /path/to/CODE.png ../assets/airline-logos/r2-source/CODE.png
+npm run logos:rgb565 -- --input ../assets/airline-logos/r2-source --output ../assets/airline-logos/rgb565
+```
+
+Upload both `CODE.png` and `CODE.rgb565` to the `AIRLINE_LOGOS` R2 bucket. The RGB565 object can live at the bucket root or under `rgb565/`, `logos-rgb565/` or `airline-logos-rgb565/`. `UNKNOWN.rgb565` should always exist as the display fallback.
+
 ## Access Policy
 
 Recommended Cloudflare Access setup for `skyframe.danaksel.no`:
@@ -162,29 +181,40 @@ Admin screen deletion uses `unpair`, not full Wi-Fi reset. That lets a deleted s
 
 ## OTA Firmware Updates
 
-The ESP32-S3 firmware uses dual OTA app partitions. The current firmware version is compiled as `SKYFRAME_FW_VERSION`, and the display polls:
+The ESP32-S3 firmware uses dual OTA app partitions. The current firmware version is compiled as `SKYFRAME_FW_VERSION`, and the display polls for update availability:
 
 ```text
 GET https://skyframe.danaksel.no/public/firmware/latest.json
 ```
 
-The manifest shape is:
+Firmware release versions use `V<major>.<minor>` for customer-visible firmware images. Increment the minor version for compatible feature/config changes and the major version only for breaking hardware, partition or provisioning changes. The binary filename must match the manifest version in lowercase:
 
 ```json
 {
-  "version": "0.1.1",
-  "url": "https://skyframe.danaksel.no/public/firmware/skyframe-0.1.1.bin",
+  "version": "V1.4",
+  "url": "https://skyframe.danaksel.no/public/firmware/skyframe-v1.4.bin",
   "sha256": "<64 lowercase hex chars>",
-  "size": 1234567
+  "size": 1234567,
+  "releaseNotes": [
+    "Short user-facing fix or improvement."
+  ]
 }
 ```
+
+Every new firmware release must include a short pointwise `releaseNotes` summary in `latest.json`. Keep each point concise and user-facing; it is shown in the control panel update card.
+
+Firmware installation must be manual. The display may poll `latest.json` to report that an update is available, but it must only download and install firmware after an explicit `ota_update` command from the control panel or admin page.
+
+This repository currently uses `V1.4` for the firmware that makes OTA installation manual and keeps follow-mode flight display duration split 50/50 between the two info variants. For example, `displayCycleSeconds: 10` shows each follow variant for 5 seconds.
 
 Publishing flow:
 
 ```bash
+VERSION=v1.3
 pio run -d firmware-hub75
-shasum -a 256 firmware-hub75/.pio/build/waveshare_esp32_s3_rgb_matrix/firmware.bin
-cp firmware-hub75/.pio/build/waveshare_esp32_s3_rgb_matrix/firmware.bin cloudflare-worker/public/firmware/skyframe-<version>.bin
+cp firmware-hub75/.pio/build/waveshare_esp32_s3_rgb_matrix/firmware.bin cloudflare-worker/public/firmware/skyframe-$VERSION.bin
+shasum -a 256 cloudflare-worker/public/firmware/skyframe-$VERSION.bin
+wc -c cloudflare-worker/public/firmware/skyframe-$VERSION.bin
 ```
 
 Then update `cloudflare-worker/public/firmware/latest.json` and deploy the Worker. The firmware writes the downloaded binary to the inactive OTA partition, verifies SHA-256 before finalizing the update, and keeps running the current firmware if anything fails.
@@ -262,6 +292,10 @@ POST https://skyframe.danaksel.no/public/homey/screens/{screenId}/screen-state/a
 POST https://skyframe.danaksel.no/public/homey/screens/{screenId}/screen-state/deactivate
 POST https://skyframe.danaksel.no/public/homey/screens/{screenId}/brightness-mode/night
 POST https://skyframe.danaksel.no/public/homey/screens/{screenId}/brightness-mode/day
+POST https://skyframe.danaksel.no/public/homey/screens/{screenId}/display-mode/airspace
+POST https://skyframe.danaksel.no/public/homey/screens/{screenId}/display-mode/hybrid
+POST https://skyframe.danaksel.no/public/homey/screens/{screenId}/display-mode/airport-board
+POST https://skyframe.danaksel.no/public/homey/screens/{screenId}/display-mode/clock
 X-SkyFrame-Homey-Token: <account-token>
 ```
 

@@ -1,6 +1,6 @@
-import { type TouchEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type TouchEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import L from "leaflet";
-import { IconApi, IconClock, IconDisplay, IconMapPin, IconPlane, IconTimetable, SkyframeLogo } from "./components/Icons";
+import { IconApi, IconClock, IconDisplay, IconPlane, IconTimetable, SkyframeLogo } from "./components/Icons";
 
 type AircraftCategoryCode = "P" | "C" | "M" | "J" | "T" | "H" | "B" | "G" | "D" | "V" | "O" | "N";
 
@@ -128,6 +128,11 @@ type AccountScreen = {
   deviceId?: string;
   label?: string;
   pairedAt?: string;
+};
+
+type AirportOption = {
+  code: string;
+  name: string;
 };
 
 type AirspaceColors = Config["device"]["lineColors"];
@@ -288,6 +293,7 @@ type FirmwareLatest = {
   url: string;
   sha256: string;
   size: number;
+  releaseNotes?: string[];
 };
 
 type PreviewState = {
@@ -302,7 +308,7 @@ type PreviewState = {
   deviceStatus: DeviceStatus | null;
 };
 
-type SectionId = "location" | "display" | "clock" | "aircraft" | "timetable" | "api";
+type SectionId = "display" | "clock" | "aircraft" | "timetable" | "api";
 
 type Section = {
   id: SectionId;
@@ -315,11 +321,10 @@ const sections: Section[] = [
   { id: "aircraft", label: "AIRSPACE", icon: IconPlane },
   { id: "timetable", label: "AIRPORT BOARD", icon: IconTimetable },
   { id: "clock", label: "CLOCK", icon: IconClock },
-  { id: "location", label: "LOCATION", icon: IconMapPin },
   { id: "api", label: "Homey Integration", icon: IconApi }
 ];
 
-const slideOrder: SectionId[] = ["display", "aircraft", "timetable", "clock", "location", "api"];
+const slideOrder: SectionId[] = ["display", "aircraft", "timetable", "clock", "api"];
 
 function slideIndexForSection(sectionIndex: number): number {
   const section = sections[clamp(sectionIndex, 0, sections.length - 1)];
@@ -636,7 +641,7 @@ function normalizeConfig(input: Partial<Config> & Record<string, unknown>): Conf
     homeyToken: normalizeHomeyTokenStatus(input.homeyToken),
     lat: Number(input.lat ?? defaultConfig.lat),
     lon: Number(input.lon ?? defaultConfig.lon),
-    radiusKm: Number(input.radiusKm ?? defaultConfig.radiusKm),
+    radiusKm: clamp(Number(input.radiusKm ?? defaultConfig.radiusKm), 1, 100),
     homeAirportIata: String(input.homeAirportIata ?? defaultConfig.homeAirportIata),
     label: String(input.label ?? ""),
     updatedAt: typeof input.updatedAt === "string" ? input.updatedAt : undefined,
@@ -1748,6 +1753,98 @@ function SelectInput(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
   );
 }
 
+function AirportCombobox(props: { value: string; options: AirportOption[]; onChange: (code: string) => void }) {
+  const selected = props.options.find((airport) => airport.code === props.value.toUpperCase());
+  const selectedLabel = selected ? `${selected.code} - ${selected.name}` : props.value.toUpperCase();
+  const [draft, setDraft] = useState(selectedLabel);
+  const [open, setOpen] = useState(false);
+  const [showAll, setShowAll] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    setDraft(selectedLabel);
+  }, [selectedLabel]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (wrapperRef.current?.contains(event.target as Node)) return;
+      setOpen(false);
+      setDraft(selectedLabel);
+    };
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => window.removeEventListener("pointerdown", handlePointerDown);
+  }, [open, selectedLabel]);
+
+  const query = showAll || draft === selectedLabel ? "" : draft.trim().toUpperCase();
+  const filteredOptions = query
+    ? props.options.filter((airport) => airport.code.includes(query) || airport.name.toUpperCase().includes(query))
+    : props.options;
+
+  function applyInput(input: string) {
+    setDraft(input);
+    setShowAll(false);
+    setOpen(true);
+    const normalized = input.trim().toUpperCase();
+    const code = normalized.match(/^[A-Z0-9]{3,4}/)?.[0] || "";
+    const match = props.options.find((airport) => airport.code === code)
+      || props.options.find((airport) => airport.name.toUpperCase() === normalized);
+    if (match) props.onChange(match.code);
+  }
+
+  function selectAirport(airport: AirportOption) {
+    props.onChange(airport.code);
+    setDraft(`${airport.code} - ${airport.name}`);
+    setOpen(false);
+    setShowAll(false);
+  }
+
+  return (
+    <div ref={wrapperRef} style={{ position: "relative" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) 44px", border: "1px solid var(--border-mid)", borderRadius: "8px", background: "#fff", overflow: "hidden", boxShadow: open ? "0 0 0 4px rgba(52,120,246,0.12)" : "none" }}>
+        <input
+          value={draft}
+          placeholder="Search Avinor airport"
+          onFocus={() => {
+            setOpen(true);
+            setShowAll(true);
+          }}
+          onChange={(event) => applyInput(event.target.value)}
+          style={{ width: "100%", height: "46px", border: 0, background: "transparent", padding: "0 13px", outline: "none", font: "inherit", fontSize: "16px", color: "var(--foreground)", minWidth: 0 }}
+        />
+        <button
+          type="button"
+          aria-label="Show airport list"
+          onClick={() => {
+            setShowAll(true);
+            setOpen((value) => !value);
+          }}
+          style={{ height: "46px", border: 0, borderLeft: "1px solid var(--border-mid)", borderRadius: 0, background: "rgba(60, 36, 21, 0.06)", color: "var(--foreground)", fontSize: "18px", fontWeight: 900, padding: 0 }}
+        >
+          ˅
+        </button>
+      </div>
+      {open ? (
+        <div style={{ position: "absolute", zIndex: 80, top: "52px", left: 0, right: 0, maxHeight: "260px", overflowY: "auto", border: "1px solid var(--border-mid)", borderRadius: "8px", background: "rgba(255, 252, 248, 0.98)", boxShadow: "0 18px 40px rgba(34, 20, 12, 0.18)", padding: "6px" }}>
+          {filteredOptions.length ? filteredOptions.slice(0, 80).map((airport) => (
+            <button
+              key={airport.code}
+              type="button"
+              onClick={() => selectAirport(airport)}
+              style={{ width: "100%", minHeight: "42px", border: 0, borderRadius: "8px", background: airport.code === props.value.toUpperCase() ? "rgba(60, 36, 21, 0.1)" : "transparent", color: "var(--foreground)", display: "grid", gridTemplateColumns: "54px minmax(0, 1fr)", alignItems: "center", gap: "10px", padding: "8px 10px", textAlign: "left", font: "inherit" }}
+            >
+              <span style={{ fontFamily: '"JetBrains Mono", monospace', fontSize: "13px", fontWeight: 900 }}>{airport.code}</span>
+              <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: "14px", fontWeight: 700 }}>{airport.name}</span>
+            </button>
+          )) : (
+            <div style={{ padding: "12px", color: "var(--muted-foreground)", fontSize: "13px" }}>No Avinor airports match this search.</div>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function ToggleRow(props: { label: string; hint?: string; checked: boolean; onChange: (value: boolean) => void }) {
   return (
     <div style={{ ...cardStyle("12px 14px"), display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
@@ -2023,6 +2120,24 @@ function DisplayModePicker(props: { value: DisplayBehaviorMode; fr24Enabled: boo
   );
 }
 
+function DiagnosticStatusRow(props: { label: string; active: boolean; tone?: "good" | "idle" | "warn" | "error" }) {
+  const tone = props.tone || (props.active ? "good" : "idle");
+  const palette = {
+    good: { background: "rgba(0, 249, 0, 0.12)", color: "#145f1b", symbol: "✓" },
+    idle: { background: "rgba(60, 36, 21, 0.06)", color: "var(--muted-foreground)", symbol: "×" },
+    warn: { background: "rgba(255, 147, 0, 0.13)", color: "#7a3f00", symbol: "!" },
+    error: { background: "rgba(255, 38, 0, 0.1)", color: "#8b1f12", symbol: "×" }
+  }[tone];
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "24px minmax(0,1fr)", gap: "9px", alignItems: "center", minWidth: 0 }}>
+      <span style={{ width: "22px", height: "22px", borderRadius: "999px", display: "grid", placeItems: "center", background: palette.background, color: palette.color, fontSize: "13px", fontWeight: 900, lineHeight: 1 }}>
+        {palette.symbol}
+      </span>
+      <span style={{ minWidth: 0, color: palette.color, fontSize: "13px", fontWeight: 750, lineHeight: 1.25 }}>{props.label}</span>
+    </div>
+  );
+}
+
 function DisplayStatusCard(props: { config: Config; screenState: ScreenState; preview: PreviewState; statusTone: "idle" | "dirty" | "error" | "success" }) {
   const mode = props.config.device.displayMode;
   const aircraftActive = props.preview.mode === "nearby" || props.preview.mode === "follow" || props.preview.flights.length > 0;
@@ -2057,15 +2172,15 @@ function DisplayStatusCard(props: { config: Config; screenState: ScreenState; pr
         <StatusPill label={props.screenState.active ? "On" : "Off"} tone={powerTone} />
       </div>
 
-      <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
-        <StatusPill label={statusTitle} tone={props.screenState.active ? "good" : "idle"} />
-        <StatusPill label={monitoringActive ? "Monitoring Active" : "Airspace Monitoring Disabled"} tone={monitoringActive ? "good" : "idle"} />
-        {boardActive ? <StatusPill label="Airport Board Active" tone="good" /> : null}
-        {mode === "clock" ? <StatusPill label="Airport Board Disabled" tone="idle" /> : null}
-        <StatusPill label={props.screenState.brightnessMode === "night" ? "Night Mode Active" : "Day Mode Active"} tone="good" />
-        <StatusPill label={liveSource?.ok === false ? "Flight Data Unavailable" : "Flight Data Available"} tone={liveSourceTone} />
-        <StatusPill label={deviceStatus && deviceFresh ? "Screen Connected" : "Screen Not Seen"} tone={deviceTone} />
-        <StatusPill label={props.preview.updatedAt ? "Display Service Online" : "Display Service Waiting"} tone={signalTone} />
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: "10px 14px" }}>
+        <DiagnosticStatusRow label={statusTitle} active={props.screenState.active} tone={props.screenState.active ? "good" : "idle"} />
+        <DiagnosticStatusRow label={monitoringActive ? "Airspace monitoring enabled" : "Airspace monitoring disabled"} active={monitoringActive} />
+        <DiagnosticStatusRow label={boardActive ? "Airport board active" : "Airport board inactive"} active={boardActive} />
+        <DiagnosticStatusRow label={props.screenState.brightnessMode === "night" ? "Night brightness active" : "Day brightness active"} active />
+        <DiagnosticStatusRow label={liveSource?.ok === false ? "Flight data unavailable" : "Flight data available"} active={liveSource?.ok !== false} tone={liveSourceTone} />
+        <DiagnosticStatusRow label={deviceStatus && deviceFresh ? "Screen connected" : "Screen not seen recently"} active={Boolean(deviceStatus && deviceFresh)} tone={deviceTone} />
+        <DiagnosticStatusRow label={props.preview.updatedAt ? "Display service online" : "Display service waiting"} active={Boolean(props.preview.updatedAt)} tone={signalTone} />
+        <DiagnosticStatusRow label={mode === "clock" ? "Clock mode selected" : "Live content mode selected"} active />
       </div>
 
       {props.preview.error ? <div style={{ borderRadius: "12px", background: "rgba(255, 38, 0, 0.08)", color: "#8b1f12", padding: "10px 12px", fontSize: "12px", lineHeight: 1.45 }}>{props.preview.error}</div> : null}
@@ -2109,10 +2224,37 @@ function MapPicker(props: { lat: number; lon: number; radiusKm: number; onChange
   const mapRef = useRef<L.Map | null>(null);
   const markerRef = useRef<L.CircleMarker | null>(null);
   const circleRef = useRef<L.Circle | null>(null);
+  const latestOnChangeRef = useRef(props.onChange);
+  const latestMapPropsRef = useRef({ lat: props.lat, lon: props.lon, radiusKm: props.radiusKm });
+  const isDraggingMapRef = useRef(false);
+  const isFittingMapRef = useRef(false);
+  const lastMapUpdateRef = useRef<{ lat: number; lon: number } | null>(null);
+
+  latestOnChangeRef.current = props.onChange;
+  latestMapPropsRef.current = { lat: props.lat, lon: props.lon, radiusKm: props.radiusKm };
+
+  const fitRadiusToMap = useCallback((map: L.Map, lat: number, lon: number, radiusKm: number, animate = false) => {
+    const center = L.latLng(lat, lon);
+    const bounds = center.toBounds(Math.max(1, radiusKm) * 2000);
+    const zoom = map.getBoundsZoom(bounds, false, [28, 28]);
+    isFittingMapRef.current = true;
+    map.setView(center, Math.min(13, zoom), {
+      animate,
+      duration: 0.18
+    });
+    window.setTimeout(() => {
+      isFittingMapRef.current = false;
+    }, animate ? 240 : 0);
+  }, []);
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
-    const map = L.map(containerRef.current, { zoomControl: false }).setView([props.lat, props.lon], 11);
+    const map = L.map(containerRef.current, {
+      zoomControl: false,
+      dragging: true,
+      touchZoom: true,
+      scrollWheelZoom: true
+    });
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19
     }).addTo(map);
@@ -2130,24 +2272,97 @@ function MapPicker(props: { lat: number; lon: number; radiusKm: number; onChange
       fillColor: "#c1b4ac",
       fillOpacity: 0.22
     }).addTo(map);
+    fitRadiusToMap(map, props.lat, props.lon, props.radiusKm, false);
+    map.on("movestart", () => {
+      isDraggingMapRef.current = true;
+    });
+    map.on("move", () => {
+      if (isFittingMapRef.current) return;
+      const center = map.getCenter();
+      markerRef.current?.setLatLng(center);
+      circleRef.current?.setLatLng(center);
+    });
+    map.on("moveend", () => {
+      if (isFittingMapRef.current) {
+        const latest = latestMapPropsRef.current;
+        markerRef.current?.setLatLng([latest.lat, latest.lon]);
+        circleRef.current?.setLatLng([latest.lat, latest.lon]);
+        return;
+      }
+      const center = map.getCenter();
+      const next = { lat: Number(center.lat.toFixed(6)), lon: Number(center.lng.toFixed(6)) };
+      lastMapUpdateRef.current = next;
+      markerRef.current?.setLatLng(center);
+      circleRef.current?.setLatLng(center);
+      latestOnChangeRef.current(next.lat, next.lon);
+      window.setTimeout(() => {
+        isDraggingMapRef.current = false;
+      }, 0);
+    });
     map.on("click", (event) => {
-      props.onChange(event.latlng.lat, event.latlng.lng);
+      lastMapUpdateRef.current = { lat: Number(event.latlng.lat.toFixed(6)), lon: Number(event.latlng.lng.toFixed(6)) };
+      map.panTo(event.latlng);
+      latestOnChangeRef.current(event.latlng.lat, event.latlng.lng);
     });
     mapRef.current = map;
     return () => {
       map.remove();
       mapRef.current = null;
     };
-  }, [props]);
+  }, [fitRadiusToMap]);
 
   useEffect(() => {
     if (!mapRef.current || !markerRef.current || !circleRef.current) return;
+    const lastMapUpdate = lastMapUpdateRef.current;
+    const isSameMapUpdate = lastMapUpdate && lastMapUpdate.lat === props.lat && lastMapUpdate.lon === props.lon;
+    if (isDraggingMapRef.current || isSameMapUpdate) {
+      lastMapUpdateRef.current = null;
+      return;
+    }
     markerRef.current.setLatLng([props.lat, props.lon]);
     circleRef.current.setLatLng([props.lat, props.lon]);
     circleRef.current.setRadius(props.radiusKm * 1000);
-  }, [props.lat, props.lon, props.radiusKm]);
+    fitRadiusToMap(mapRef.current, props.lat, props.lon, props.radiusKm, true);
+  }, [fitRadiusToMap, props.lat, props.lon, props.radiusKm]);
 
   return <div ref={containerRef} style={{ height: "220px", overflow: "hidden", borderRadius: "15px", border: "1px solid rgba(60, 36, 21, 0.2)" }} />;
+}
+
+function LocationSettings(props: {
+  config: Config;
+  updateConfig: React.Dispatch<React.SetStateAction<Config>>;
+}) {
+  return (
+    <div style={{ display: "grid", gap: "14px" }}>
+      <MapPicker
+        lat={props.config.lat}
+        lon={props.config.lon}
+        radiusKm={props.config.radiusKm}
+        onChange={(lat, lon) => props.updateConfig((current) => ({ ...current, lat: Number(lat.toFixed(6)), lon: Number(lon.toFixed(6)) }))}
+      />
+      <button
+        type="button"
+        onClick={() => navigator.geolocation?.getCurrentPosition((position) => props.updateConfig((current) => ({ ...current, lat: Number(position.coords.latitude.toFixed(6)), lon: Number(position.coords.longitude.toFixed(6)) })))}
+        style={{ height: "42px", borderRadius: "8px", border: 0, background: "var(--primary)", color: "#fff", fontSize: "16px", textTransform: "uppercase" }}
+      >
+        Use my location
+      </button>
+      <div style={{ display: "grid", gap: "14px", gridTemplateColumns: "1fr 1fr" }}>
+        <Field label="Latitude">
+          <TextInput value={props.config.lat} inputMode="decimal" onChange={(event) => props.updateConfig((current) => ({ ...current, lat: Number(event.target.value) || 0 }))} />
+        </Field>
+        <Field label="Longitude">
+          <TextInput value={props.config.lon} inputMode="decimal" onChange={(event) => props.updateConfig((current) => ({ ...current, lon: Number(event.target.value) || 0 }))} />
+        </Field>
+      </div>
+      <div style={{ display: "grid", gap: "6px" }}>
+        <SliderField label="Radius" value={props.config.radiusKm} min={1} max={100} suffix=" km" onChange={(value) => props.updateConfig((current) => ({ ...current, radiusKm: value }))} />
+        <div style={{ fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>
+          Measured from the center point to the edge. A 10 km radius covers about 20 km across.
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function EmulatorPreview(props: { config: Config; preview: PreviewState; screenState: ScreenState }) {
@@ -2380,6 +2595,7 @@ export default function App() {
   const [initialLoading, setInitialLoading] = useState(true);
   const [accountModalOpen, setAccountModalOpen] = useState(false);
   const [adminUiSettings, setAdminUiSettings] = useState<AdminUiSettings | null>(null);
+  const [airportOptions, setAirportOptions] = useState<AirportOption[]>([]);
   const [fr24Usage, setFr24Usage] = useState<Fr24UsageSummary | null>(null);
   const [fr24UsageLoading, setFr24UsageLoading] = useState(false);
   const [pullRefresh, setPullRefresh] = useState({ distance: 0, refreshing: false });
@@ -2392,7 +2608,7 @@ export default function App() {
 
   useEffect(() => {
     let mounted = true;
-    void Promise.allSettled([loadConfig(), loadPreview(), loadDeviceStatus(), loadFirmwareLatest(), loadAdminUiSettings()]).finally(() => {
+    void Promise.allSettled([loadConfig(), loadPreview(), loadDeviceStatus(), loadFirmwareLatest(), loadAdminUiSettings(), loadAirportOptions()]).finally(() => {
       if (mounted) setInitialLoading(false);
     });
     const deviceStatusTimer = window.setInterval(() => {
@@ -2498,6 +2714,15 @@ export default function App() {
       setFirmwareLatest(data);
     } catch {
       setFirmwareLatest((current) => current);
+    }
+  }
+
+  async function loadAirportOptions() {
+    try {
+      const data = await apiFetch<{ airports?: AirportOption[] }>("/api/avinor-airports");
+      setAirportOptions(Array.isArray(data.airports) ? data.airports : []);
+    } catch {
+      setAirportOptions([]);
     }
   }
 
@@ -2733,7 +2958,11 @@ export default function App() {
     { label: "Screen on", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/screen-state/activate` },
     { label: "Screen off", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/screen-state/deactivate` },
     { label: "Night mode on", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/brightness-mode/night` },
-    { label: "Night mode off", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/brightness-mode/day` }
+    { label: "Night mode off", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/brightness-mode/day` },
+    { label: "Airspace mode", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/display-mode/airspace` },
+    { label: "Hybrid mode", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/display-mode/hybrid` },
+    { label: "Airport Board mode", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/display-mode/airport-board` },
+    { label: "Clock mode", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/display-mode/clock` }
   ] : [];
   async function rotateHomeyToken() {
     const confirmed = window.confirm("Rotate Homey token? Existing Homey flows must be updated with the new token.");
@@ -3019,44 +3248,8 @@ export default function App() {
           <LoadingSkeleton />
         ) : (
         <div ref={slidesRef} style={appStyles.slides}>
-          <section data-refresh-slide style={slideStyle("location")}>
-            <div style={{ display: "grid", gap: "14px" }}>
-              <MapPicker
-                lat={config.lat}
-                lon={config.lon}
-                radiusKm={config.radiusKm}
-                onChange={(lat, lon) => updateConfig((current) => ({ ...current, lat: Number(lat.toFixed(6)), lon: Number(lon.toFixed(6)) }))}
-              />
-              <button
-                type="button"
-                onClick={() => navigator.geolocation?.getCurrentPosition((position) => updateConfig((current) => ({ ...current, lat: Number(position.coords.latitude.toFixed(6)), lon: Number(position.coords.longitude.toFixed(6)) })))}
-                style={{ height: "42px", borderRadius: "8px", border: 0, background: "var(--primary)", color: "#fff", fontSize: "16px", textTransform: "uppercase" }}
-              >
-                Use my location
-              </button>
-              <div style={{ display: "grid", gap: "14px", gridTemplateColumns: "1fr 1fr" }}>
-                <Field label="Latitude">
-                  <TextInput value={config.lat} inputMode="decimal" onChange={(event) => updateConfig((current) => ({ ...current, lat: Number(event.target.value) || 0 }))} />
-                </Field>
-                <Field label="Longitude">
-                  <TextInput value={config.lon} inputMode="decimal" onChange={(event) => updateConfig((current) => ({ ...current, lon: Number(event.target.value) || 0 }))} />
-                </Field>
-              </div>
-              <Field label="Airport for timetable">
-                <TextInput value={config.homeAirportIata} maxLength={4} onChange={(event) => updateConfig((current) => ({ ...current, homeAirportIata: event.target.value.toUpperCase() }))} />
-              </Field>
-              <Field label="Timezone">
-                <TextInput value={config.device.timezone} onChange={(event) => updateConfig((current) => ({ ...current, device: { ...current.device, timezone: event.target.value } }))} />
-              </Field>
-              <SliderField label="Radius" value={config.radiusKm} min={1} max={250} suffix=" km" onChange={(value) => updateConfig((current) => ({ ...current, radiusKm: value }))} />
-            </div>
-          </section>
-
           <section data-refresh-slide style={slideStyle("display")}>
             <div style={{ display: "grid", gap: "14px" }}>
-              <Field label="Device name">
-                <TextInput value={config.label} placeholder="Kitchen, office, cabin" onChange={(event) => updateConfig((current) => ({ ...current, label: event.target.value }))} />
-              </Field>
               <div style={{ ...cardStyle("14px"), display: "grid", gap: "12px" }}>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
                   <div style={{ minWidth: 0 }}>
@@ -3075,8 +3268,16 @@ export default function App() {
               />
               <SliderField label="Day brightness" value={config.device.brightness} min={1} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, brightness: value } }))} />
               <SliderField label="Night brightness" value={config.device.nightMode.brightness} min={0} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, nightMode: { ...current.device.nightMode, brightness: value } } }))} />
-              <SliderField label="Config refresh" value={config.device.configRefreshSeconds} min={60} max={3600} step={30} suffix=" s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, configRefreshSeconds: value } }))} />
               <DisplayStatusCard config={config} screenState={screenState} preview={preview} statusTone={statusTone} />
+              <div style={{ ...cardStyle(), display: "grid", gap: "12px" }}>
+                <div style={{ fontSize: "14px", fontWeight: 750 }}>Device details</div>
+                <Field label="Device name">
+                  <TextInput value={config.label} placeholder="Kitchen, office, cabin" onChange={(event) => updateConfig((current) => ({ ...current, label: event.target.value }))} />
+                </Field>
+                <Field label="Timezone">
+                  <TextInput value={config.device.timezone} onChange={(event) => updateConfig((current) => ({ ...current, device: { ...current.device, timezone: event.target.value } }))} />
+                </Field>
+              </div>
               <div style={{ ...cardStyle(), display: "grid", gap: "12px" }}>
                 <div>
                   <div style={{ fontSize: "14px", fontWeight: 750 }}>Screen maintenance</div>
@@ -3090,6 +3291,13 @@ export default function App() {
                     <div style={{ fontSize: "12px", lineHeight: 1.45 }}>
                       This screen is running {firmwareVersion}. Latest firmware is {firmwareLatest.version}.
                     </div>
+                    {Array.isArray(firmwareLatest.releaseNotes) && firmwareLatest.releaseNotes.length ? (
+                      <ul style={{ margin: "3px 0 0", paddingLeft: "18px", fontSize: "12px", lineHeight: 1.45 }}>
+                        {firmwareLatest.releaseNotes.slice(0, 4).map((note) => (
+                          <li key={note}>{note}</li>
+                        ))}
+                      </ul>
+                    ) : null}
                   </div>
                 ) : null}
                 <div style={{ display: "grid", gap: "10px", gridTemplateColumns: "1fr 1fr" }}>
@@ -3163,12 +3371,6 @@ export default function App() {
 
           <section data-refresh-slide style={slideStyle("aircraft")}>
             <div style={{ display: "grid", gap: "14px" }}>
-              <SliderField label="Fetch interval" value={config.device.pollSeconds} min={30} max={900} step={5} suffix=" s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, pollSeconds: value } }))} />
-              <SliderField label="Audio volume" value={config.device.audioVolumePercent} min={0} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, audioVolumePercent: value } }))} />
-              <button type="button" onClick={() => void triggerSoundTest()} style={{ height: "42px", borderRadius: "8px", border: "1px solid var(--border-mid)", background: "var(--card)", color: "var(--foreground)" }}>
-                Test flight sound
-              </button>
-              <div style={{ fontSize: "12px", color: "var(--muted-foreground)" }}>Last sound test: {formatTimestamp(soundState.lastTriggeredAt)}</div>
               <div style={{ ...cardStyle(), display: "grid", gap: "12px" }}>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
                   <span style={{ minWidth: 0, flex: "1 1 auto" }}>
@@ -3198,6 +3400,18 @@ export default function App() {
                   />
                 </Field>
               </div>
+              <LocationSettings config={config} updateConfig={updateConfig} />
+              <div style={{ display: "grid", gap: "6px" }}>
+                <SliderField label="Fetch interval" value={config.device.pollSeconds} min={10} max={300} step={5} suffix=" s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, pollSeconds: value } }))} />
+                <div style={{ fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>
+                  Lower intervals check FR24 more often and can increase API credit usage significantly.
+                </div>
+              </div>
+              <SliderField label="Audio volume" value={config.device.audioVolumePercent} min={0} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, audioVolumePercent: value } }))} />
+              <button type="button" onClick={() => void triggerSoundTest()} style={{ height: "42px", borderRadius: "8px", border: "1px solid var(--border-mid)", background: "var(--card)", color: "var(--foreground)" }}>
+                Test flight sound
+              </button>
+              <div style={{ fontSize: "12px", color: "var(--muted-foreground)" }}>Last sound test: {formatTimestamp(soundState.lastTriggeredAt)}</div>
               <Advanced title="Aircraft filters">
                 <div style={{ display: "grid", gap: "10px" }}>
                   {Object.entries(categoryLabels).map(([code, info]) => {
@@ -3267,7 +3481,7 @@ export default function App() {
                     </SelectInput>
                   </Field>
                 </div>
-                <SliderField label="Cycle seconds" value={config.device.displayCycleSeconds} min={2} max={30} suffix=" s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, displayCycleSeconds: value } }))} />
+                <SliderField label="Flight display duration" value={config.device.displayCycleSeconds} min={2} max={30} suffix=" s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, displayCycleSeconds: value } }))} />
                 <SliderField label="Scroll speed" value={config.device.scrollPixelsPerSecond} min={2} max={30} suffix=" px/s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, scrollPixelsPerSecond: value } }))} />
                 <ColorPresetManager<AirspaceColors>
                   defaultValues={defaultAirspaceColors}
@@ -3293,6 +3507,13 @@ export default function App() {
 
           <section data-refresh-slide style={slideStyle("timetable")}>
             <div style={{ display: "grid", gap: "14px" }}>
+              <Field label="Airport for board">
+                <AirportCombobox
+                  value={config.homeAirportIata}
+                  options={airportOptions}
+                  onChange={(code) => updateConfig((current) => ({ ...current, homeAirportIata: code }))}
+                />
+              </Field>
               <SliderField label="Hold each board page" value={config.device.timetableCycleSeconds} min={2} max={60} suffix=" s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, timetableCycleSeconds: value } }))} />
               <SliderField label="Scroll speed" value={config.device.timetableScrollPixelsPerSecond} min={4} max={100} suffix=" px/s" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, timetableScrollPixelsPerSecond: value } }))} />
               <SliderField label="Page transition" value={config.device.timetableTransitionMs / 1000} min={0.2} max={1} step={0.1} suffix=" s" formatValue={(value) => value.toFixed(1)} onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, timetableTransitionMs: Math.round(value * 1000) } }))} />
