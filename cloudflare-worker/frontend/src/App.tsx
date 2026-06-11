@@ -257,10 +257,24 @@ type DisplayPayload = {
   mode?: string;
   flights?: DisplayFlight[];
   idleScreens?: IdleScreen[];
+  radar?: MarineRadarPayload;
   screenState?: ScreenState;
   airspaceMonitoring?: boolean;
   liveSourceStatus?: LiveSourceStatus;
   deviceStatus?: DeviceStatus | null;
+};
+
+type MarineLandMask = {
+  width: number;
+  height: number;
+  encoding: string;
+  data: string;
+};
+
+type MarineRadarPayload = {
+  aspect?: number;
+  forwardBearingDeg?: number;
+  landMask?: MarineLandMask;
 };
 
 type AvinorRawFlight = {
@@ -319,6 +333,7 @@ type PreviewState = {
   idleScreens: IdleScreen[];
   avinorRows: AvinorRawFlight[];
   mode: string;
+  radar: MarineRadarPayload | null;
   updatedAt: string | null;
   error: string | null;
   liveSourceStatus: LiveSourceStatus | null;
@@ -1783,7 +1798,28 @@ function drawMarineVesselMarker(ctx: CanvasRenderingContext2D, x: number, y: num
   if (!active || Math.floor(Date.now() / 450) % 2 === 0) ctx.fillRect(x, y, 1, 1);
 }
 
-function drawMarineLayoutExact(ctx: CanvasRenderingContext2D, flight: DisplayFlight, flights: DisplayFlight[], config: Config, tickerStartedAt: number, now: number) {
+function drawMarineLandMask(ctx: CanvasRenderingContext2D, radar: MarineRadarPayload | null | undefined, boxX: number, boxY: number, boxW: number, boxH: number) {
+  const mask = radar?.landMask;
+  if (!mask || mask.encoding !== "base64-land-bits-v1" || !mask.data || mask.width <= 0 || mask.height <= 0) return;
+  let binary = "";
+  try {
+    binary = atob(mask.data);
+  } catch {
+    return;
+  }
+  const width = Math.min(mask.width, boxW);
+  const height = Math.min(mask.height, boxH);
+  ctx.fillStyle = "#000000";
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const bitIndex = y * mask.width + x;
+      const byte = binary.charCodeAt(Math.floor(bitIndex / 8));
+      if (Number.isFinite(byte) && (byte & (1 << (bitIndex % 8)))) ctx.fillRect(boxX + x, boxY + y, 1, 1);
+    }
+  }
+}
+
+function drawMarineLayoutExact(ctx: CanvasRenderingContext2D, flight: DisplayFlight, flights: DisplayFlight[], config: Config, tickerStartedAt: number, now: number, radar?: MarineRadarPayload | null) {
   const colors = config.device.lineColors;
   const boxX = 1;
   const boxY = 1;
@@ -1798,6 +1834,7 @@ function drawMarineLayoutExact(ctx: CanvasRenderingContext2D, flight: DisplayFli
   ctx.fillRect(0, 0, 128, 64);
   ctx.fillStyle = radarBackground;
   ctx.fillRect(boxX, boxY, boxW, boxH);
+  drawMarineLandMask(ctx, radar, boxX, boxY, boxW, boxH);
 
   const activeId = flight.cs || flight.flt || flight.callsign || flight.flight || "";
   flights.slice(0, 12).forEach((item) => {
@@ -2984,7 +3021,7 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
         }
         drawClockLayoutExact(renderCtx, props.config, clockFallingMinuteIndexRef.current, clockFallingStartedAtRef.current, now);
       } else if (activeFlight && (normalizeProductMode(props.config.productMode) === "marine" || props.preview.mode === "marine")) {
-        drawMarineLayoutExact(renderCtx, activeFlight, flights, props.config, tickerStartedAtRef.current, now);
+        drawMarineLayoutExact(renderCtx, activeFlight, flights, props.config, tickerStartedAtRef.current, now, props.preview.radar);
       } else if (activeFlight) {
         const isFollowLayout = activeFlight.layout === "follow_cycle" || activeFlight.layout === "follow_status";
         const detailCycleStartedAt = isFollowLayout ? followPhaseStartedAtRef.current : currentFlightCycleStartedAt;
@@ -3096,7 +3133,7 @@ export default function App() {
   const [savedConfigSignature, setSavedConfigSignature] = useState(() => configSignature(defaultConfig));
   const [screenState, setScreenState] = useState<ScreenState>(defaultScreenState);
   const [soundState, setSoundState] = useState<SoundState>(defaultSoundState);
-  const [preview, setPreview] = useState<PreviewState>({ meta: "", flights: [], idleScreens: [], avinorRows: [], mode: "idle", updatedAt: null, error: null, liveSourceStatus: null, deviceStatus: null });
+  const [preview, setPreview] = useState<PreviewState>({ meta: "", flights: [], idleScreens: [], avinorRows: [], mode: "idle", radar: null, updatedAt: null, error: null, liveSourceStatus: null, deviceStatus: null });
   const [firmwareLatest, setFirmwareLatest] = useState<FirmwareLatest | null>(null);
   const [status, setStatus] = useState("Laster innstillinger...");
   const [statusTone, setStatusTone] = useState<"idle" | "dirty" | "error" | "success">("idle");
@@ -3204,6 +3241,7 @@ export default function App() {
         idleScreens: Array.isArray(data.idleScreens) ? data.idleScreens : [],
         avinorRows: [],
         mode: data.mode || "idle",
+        radar: data.radar ?? null,
         updatedAt: data.updatedAt ?? new Date().toISOString(),
         error: null,
         liveSourceStatus: data.liveSourceStatus ?? null,

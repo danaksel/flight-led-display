@@ -31,6 +31,7 @@ export interface Env {
   BARENTSWATCH_SCOPE?: string;
   BARENTSWATCH_TOKEN_URL?: string;
   BARENTSWATCH_LATEST_URL?: string;
+  MARINE_LANDMASK_URL?: string;
 }
 
 type Config = {
@@ -335,6 +336,27 @@ type BarentsWatchCredentials = {
   clientId: string;
   clientSecret: string;
 };
+
+type MarineLandMask = {
+  width: number;
+  height: number;
+  encoding: "base64-land-bits-v1";
+  data: string;
+};
+
+type MarineLandDataset = {
+  version: string;
+  features: MarineLandFeature[];
+};
+
+type MarineLandFeature = {
+  bbox?: [number, number, number, number];
+  rings: MarineLngLat[][];
+};
+
+type MarineLngLat = [number, number];
+
+let marineLandDatasetCache: { url: string; loadedAt: number; dataset: MarineLandDataset | null } | null = null;
 
 type ClockPayload = {
   style: "gorgy";
@@ -3461,6 +3483,7 @@ async function marineDisplayResponse(env: Env, config: Config, screenState: Scre
 
   const limit = Math.max(1, Math.min(24, parseNumber(env.DISPLAY_LIMIT, 8)));
   const displayFlights = vessels.slice(0, limit).map((vessel) => marineVesselToDisplayFlight(vessel));
+  const landMask = await marineLandMaskFor(env, config);
   const payload = await displayPayload(env, config, screenState, compact, displayFlights.length ? "marine" : "marine_waiting", [], [], displayFlights, [], liveSourceStatus, context);
 
   return jsonResponse({
@@ -3470,7 +3493,8 @@ async function marineDisplayResponse(env: Env, config: Config, screenState: Scre
     distanceOrigin: getDistanceOrigin(config),
     radar: {
       aspect: 126 / 46,
-      forwardBearingDeg: marineForwardBearing(config)
+      forwardBearingDeg: marineForwardBearing(config),
+      ...(landMask ? { landMask } : {})
     },
     vessels
   }, 200, {
@@ -3658,6 +3682,194 @@ function marineForwardBearing(config: Config): number {
   const originDistanceKm = haversineKm(distanceOrigin.lat, distanceOrigin.lon, config.lat, config.lon);
   if (originDistanceKm > 0.01) return bearing(distanceOrigin.lat, distanceOrigin.lon, config.lat, config.lon);
   return clampNumber(config.povDeg, 0, 359, 0);
+}
+
+async function marineLandMaskFor(env: Env, config: Config): Promise<MarineLandMask | undefined> {
+  const dataset = await loadMarineLandDataset(env);
+  if (!dataset || !dataset.features.length) return undefined;
+  const width = 126;
+  const height = 46;
+  const forwardBearingDeg = marineForwardBearing(config);
+  const keyParts = [
+    "marine-landmask:v1",
+    dataset.version,
+    round(config.lat, 5),
+    round(config.lon, 5),
+    round(getDistanceOrigin(config).lat, 5),
+    round(getDistanceOrigin(config).lon, 5),
+    round(config.radiusKm, 2),
+    Math.round(forwardBearingDeg),
+    `${width}x${height}`
+  ];
+  const cacheKey = keyParts.join(":");
+  const cached = await env.FLIGHT_DISPLAY_KV.get(cacheKey, "json");
+  if (isMarineLandMask(cached, width, height)) return cached;
+
+  const mask = buildMarineLandMask(dataset, config, width, height, forwardBearingDeg);
+  await env.FLIGHT_DISPLAY_KV.put(cacheKey, JSON.stringify(mask), { expirationTtl: 60 * 60 * 24 * 30 });
+  return mask;
+}
+
+async function loadMarineLandDataset(env: Env): Promise<MarineLandDataset | null> {
+  const url = (env.MARINE_LANDMASK_URL || "/marine/land-polygons.json").trim();
+  if (marineLandDatasetCache && marineLandDatasetCache.url === url && Date.now() - marineLandDatasetCache.loadedAt < 10 * 60 * 1000) {
+    return marineLandDatasetCache.dataset;
+  }
+
+  try {
+    const request = url.startsWith("http")
+      ? new Request(url)
+      : new Request(`https://skyframe-assets.local${url.startsWith("/") ? url : `/${url}`}`);
+    const response = url.startsWith("http") ? await fetch(request) : await env.ASSETS.fetch(request);
+    if (!response.ok) {
+      marineLandDatasetCache = { url, loadedAt: Date.now(), dataset: null };
+      return null;
+    }
+    const parsed = await response.json();
+    const dataset = normalizeMarineLandDataset(parsed);
+    marineLandDatasetCache = { url, loadedAt: Date.now(), dataset };
+    return dataset;
+  } catch {
+    marineLandDatasetCache = { url, loadedAt: Date.now(), dataset: null };
+    return null;
+  }
+}
+
+function normalizeMarineLandDataset(value: unknown): MarineLandDataset | null {
+  if (!value || typeof value !== "object") return null;
+  const input = value as Record<string, unknown>;
+  if (Array.isArray(input.features)) {
+    const features = input.features
+      .flatMap((feature) => normalizeMarineLandFeature(feature))
+      .filter((feature): feature is MarineLandFeature => Boolean(feature));
+    return {
+      version: typeof input.version === "string" ? input.version : typeof input.name === "string" ? input.name : "geojson",
+      features
+    };
+  }
+  return null;
+}
+
+function normalizeMarineLandFeature(value: unknown): MarineLandFeature[] {
+  if (!value || typeof value !== "object") return [];
+  const feature = value as Record<string, unknown>;
+  if (Array.isArray(feature.rings)) {
+    const rings = normalizeMarineRings(feature.rings);
+    if (!rings.length) return [];
+    return [{ bbox: normalizeMarineBbox(feature.bbox), rings }];
+  }
+  const geometry = feature.type === "Feature" && feature.geometry && typeof feature.geometry === "object"
+    ? feature.geometry as Record<string, unknown>
+    : feature;
+  if (geometry.type === "Polygon") {
+    const rings = normalizeMarineRings(geometry.coordinates);
+    return rings.length ? [{ bbox: normalizeMarineBbox(feature.bbox) || marineFeatureBbox(rings), rings }] : [];
+  }
+  if (geometry.type === "MultiPolygon" && Array.isArray(geometry.coordinates)) {
+    return geometry.coordinates.flatMap((polygon) => {
+      const rings = normalizeMarineRings(polygon);
+      return rings.length ? [{ bbox: marineFeatureBbox(rings), rings }] : [];
+    });
+  }
+  return [];
+}
+
+function normalizeMarineRings(value: unknown): MarineLngLat[][] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((ring) => Array.isArray(ring)
+      ? ring
+        .map((point) => Array.isArray(point) && Number.isFinite(Number(point[0])) && Number.isFinite(Number(point[1]))
+          ? [Number(point[0]), Number(point[1])] as MarineLngLat
+          : undefined)
+        .filter((point): point is MarineLngLat => Boolean(point))
+      : [])
+    .filter((ring) => ring.length >= 3);
+}
+
+function normalizeMarineBbox(value: unknown): [number, number, number, number] | undefined {
+  if (!Array.isArray(value) || value.length < 4) return undefined;
+  const bbox = value.slice(0, 4).map(Number);
+  return bbox.every(Number.isFinite) ? bbox as [number, number, number, number] : undefined;
+}
+
+function marineFeatureBbox(rings: MarineLngLat[][]): [number, number, number, number] | undefined {
+  let minLon = Infinity;
+  let minLat = Infinity;
+  let maxLon = -Infinity;
+  let maxLat = -Infinity;
+  rings.forEach((ring) => ring.forEach(([lon, lat]) => {
+    minLon = Math.min(minLon, lon);
+    minLat = Math.min(minLat, lat);
+    maxLon = Math.max(maxLon, lon);
+    maxLat = Math.max(maxLat, lat);
+  }));
+  return Number.isFinite(minLon) ? [minLon, minLat, maxLon, maxLat] : undefined;
+}
+
+function buildMarineLandMask(dataset: MarineLandDataset, config: Config, width: number, height: number, forwardBearingDeg: number): MarineLandMask {
+  const bytes = new Uint8Array(Math.ceil(width * height / 8));
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const [lat, lon] = marineRadarPixelLatLon(config, x, y, width, height, forwardBearingDeg);
+      if (marinePointIsLand(lon, lat, dataset.features)) {
+        const bitIndex = y * width + x;
+        bytes[Math.floor(bitIndex / 8)] |= 1 << (bitIndex % 8);
+      }
+    }
+  }
+  return {
+    width,
+    height,
+    encoding: "base64-land-bits-v1",
+    data: bytesToStandardBase64(bytes)
+  };
+}
+
+function marineRadarPixelLatLon(config: Config, x: number, y: number, width: number, height: number, forwardBearingDeg: number): [number, number] {
+  const halfHeightKm = Math.max(0.5, config.radiusKm);
+  const halfWidthKm = halfHeightKm * (width / height);
+  const rightKm = (((x + 0.5) / width) - 0.5) * 2 * halfWidthKm;
+  const forwardKm = (0.5 - ((y + 0.5) / height)) * 2 * halfHeightKm;
+  const forwardRad = toRad(forwardBearingDeg);
+  const eastKm = rightKm * Math.cos(forwardRad) + forwardKm * Math.sin(forwardRad);
+  const northKm = rightKm * -Math.sin(forwardRad) + forwardKm * Math.cos(forwardRad);
+  const distanceKm = Math.sqrt(eastKm ** 2 + northKm ** 2);
+  if (distanceKm < 0.000001) return [config.lat, config.lon];
+  return destinationPoint(config.lat, config.lon, toDeg(Math.atan2(eastKm, northKm)), distanceKm);
+}
+
+function marinePointIsLand(lon: number, lat: number, features: MarineLandFeature[]): boolean {
+  return features.some((feature) => {
+    if (feature.bbox) {
+      const [minLon, minLat, maxLon, maxLat] = feature.bbox;
+      if (lon < minLon || lon > maxLon || lat < minLat || lat > maxLat) return false;
+    }
+    if (!pointInRing(lon, lat, feature.rings[0])) return false;
+    return !feature.rings.slice(1).some((ring) => pointInRing(lon, lat, ring));
+  });
+}
+
+function pointInRing(lon: number, lat: number, ring: MarineLngLat[]): boolean {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i];
+    const [xj, yj] = ring[j];
+    if (((yi > lat) !== (yj > lat)) && lon < ((xj - xi) * (lat - yi)) / ((yj - yi) || 1e-12) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+function isMarineLandMask(value: unknown, width: number, height: number): value is MarineLandMask {
+  if (!value || typeof value !== "object") return false;
+  const mask = value as Partial<MarineLandMask>;
+  return mask.width === width && mask.height === height && mask.encoding === "base64-land-bits-v1" && typeof mask.data === "string";
+}
+
+function bytesToStandardBase64(values: Uint8Array): string {
+  let binary = "";
+  values.forEach((value) => { binary += String.fromCharCode(value); });
+  return btoa(binary);
 }
 
 function compactMarineRaw(row: Record<string, unknown>): Record<string, unknown> {
@@ -5844,6 +6056,20 @@ function bearing(lat1: number, lon1: number, lat2: number, lon2: number): number
   const y = Math.sin(dLon) * Math.cos(toRad(lat2));
   const x = Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) - Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(dLon);
   return (toDeg(Math.atan2(y, x)) + 360) % 360;
+}
+
+function destinationPoint(lat: number, lon: number, bearingDeg: number, distanceKm: number): [number, number] {
+  const earthKm = 6371;
+  const angularDistance = distanceKm / earthKm;
+  const bearingRad = toRad(bearingDeg);
+  const latRad = toRad(lat);
+  const lonRad = toRad(lon);
+  const destLat = Math.asin(Math.sin(latRad) * Math.cos(angularDistance) + Math.cos(latRad) * Math.sin(angularDistance) * Math.cos(bearingRad));
+  const destLon = lonRad + Math.atan2(
+    Math.sin(bearingRad) * Math.sin(angularDistance) * Math.cos(latRad),
+    Math.cos(angularDistance) - Math.sin(latRad) * Math.sin(destLat)
+  );
+  return [toDeg(destLat), ((toDeg(destLon) + 540) % 360) - 180];
 }
 
 function jsonResponse(body: unknown, status = 200, headers: HeadersInit = {}): Response {

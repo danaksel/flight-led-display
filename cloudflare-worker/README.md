@@ -93,6 +93,19 @@ Marine radar projection uses a viewer-relative coordinate system:
 - Positive right is the viewer's right side from the same POV and maps to the right side of the LED radar.
 - `radarHeadingDeg` is a heading relative to that radar coordinate system, used by firmware and emulator to draw the vessel direction marker.
 
+Optional land/sea outline support uses a preprocessed OSMCoastline extract. Put the regional extract at `public/marine/land-polygons.json`, or set `MARINE_LANDMASK_URL` to a hosted JSON file. The Worker accepts GeoJSON `FeatureCollection` with `Polygon`/`MultiPolygon` geometry, or the compact form:
+
+```json
+{
+  "version": "norway-coast-2026-06-11",
+  "features": [
+    { "bbox": [10.1, 59.0, 10.9, 59.8], "rings": [[[10.1, 59.0], [10.9, 59.0], [10.9, 59.8], [10.1, 59.8], [10.1, 59.0]]] }
+  ]
+}
+```
+
+Do not ship the full global OSMCoastline file in Worker assets. Trim it to the product's operating region first.
+
 Do not introduce mock AIS data in customer-facing responses. Local tests should use explicit fixtures or local-only test helpers instead of falling back inside production display code.
 
 Example:

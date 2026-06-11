@@ -21,7 +21,7 @@ namespace
 constexpr uint16_t PanelWidth = 128;
 constexpr uint16_t PanelHeight = 64;
 constexpr uint8_t Brightness = 8;
-constexpr const char *SKYFRAME_FW_VERSION = "V1.8";
+constexpr const char *SKYFRAME_FW_VERSION = "V1.9";
 constexpr const char *DeviceConfigUrl = "https://skyframe.danaksel.no/public/device-config";
 constexpr const char *SoundStateUrl = "https://skyframe.danaksel.no/public/sound-state";
 constexpr const char *RealtimeStateUrl = "https://skyframe.danaksel.no/public/realtime-state";
@@ -2976,6 +2976,61 @@ void drawMarineVesselMarker(int16_t x, int16_t y, float headingDeg, uint16_t col
     if (!active || ((millis() / 450) % 2 == 0)) display->drawPixel(x, y, color);
 }
 
+int8_t base64Value(char c)
+{
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+void drawMarineLandMask(int16_t boxX, int16_t boxY, int16_t boxW, int16_t boxH)
+{
+    JsonObject radar = currentDisplayDoc["radar"];
+    JsonObject mask = radar["landMask"];
+    if (mask.isNull()) return;
+    const int width = mask["width"] | 0;
+    const int height = mask["height"] | 0;
+    const char *encoding = mask["encoding"] | "";
+    const char *data = mask["data"] | "";
+    if (width <= 0 || height <= 0 || width > boxW || height > boxH) return;
+    if (strcmp(encoding, "base64-land-bits-v1") != 0 || !data[0]) return;
+
+    const uint16_t landColor = panelColor(0, 0, 0);
+    uint32_t buffer = 0;
+    uint8_t bits = 0;
+    uint16_t byteIndex = 0;
+    const uint16_t totalBits = width * height;
+
+    for (const char *p = data; *p; p++)
+    {
+        if (*p == '=') break;
+        const int8_t value = base64Value(*p);
+        if (value < 0) continue;
+        buffer = (buffer << 6) | static_cast<uint8_t>(value);
+        bits += 6;
+        while (bits >= 8)
+        {
+            bits -= 8;
+            const uint8_t decoded = static_cast<uint8_t>((buffer >> bits) & 0xFF);
+            for (uint8_t bit = 0; bit < 8; bit++)
+            {
+                const uint16_t bitIndex = byteIndex * 8 + bit;
+                if (bitIndex >= totalBits) return;
+                if (decoded & (1 << bit))
+                {
+                    const int16_t x = bitIndex % width;
+                    const int16_t y = bitIndex / width;
+                    display->drawPixel(boxX + x, boxY + y, landColor);
+                }
+            }
+            byteIndex++;
+        }
+    }
+}
+
 void drawMarineRadar(JsonObject activeItem)
 {
     constexpr int16_t boxX = 1;
@@ -2987,6 +3042,7 @@ void drawMarineRadar(JsonObject activeItem)
     const uint16_t activeColor = lineAirlineColor ? lineAirlineColor : panelColor(0xFF, 0xC7, 0x77);
 
     display->fillRect(boxX, boxY, boxW, boxH, sea);
+    drawMarineLandMask(boxX, boxY, boxW, boxH);
 
     const String activeId = valueOr(activeItem["cs"], valueOr(activeItem["flt"]));
     JsonArray vessels = currentDisplayDoc["vessels"].as<JsonArray>();

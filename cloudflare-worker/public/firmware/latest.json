@@ -1,11 +1,11 @@
 {
-  "version": "V1.8",
-  "url": "https://skyframe.danaksel.no/public/firmware/skyframe-v1.8.bin",
-  "sha256": "27e40d0a6d88d4650dcf4d057dc3c2363e34a5ab9a88a9c99c00365d27ec211f",
-  "size": 1121456,
+  "version": "V1.9",
+  "url": "https://skyframe.danaksel.no/public/firmware/skyframe-v1.9.bin",
+  "sha256": "7f1c972baee099068dc8c6ae9171da2d6e4bbb218993e2088faa788f02922fa2",
+  "size": 1122000,
   "releaseNotes": [
-    "Draws a larger active-vessel direction marker in all eight directions.",
-    "Aligns marine text rows to preserve 1 px bottom margin.",
-    "Keeps emulator and firmware marine radar rendering in sync."
+    "Adds optional marine land/sea mask rendering inside the radar area.",
+    "Draws land as black/off LEDs while preserving the configured radar sea color.",
+    "Keeps emulator and firmware marine landmask rendering in sync."
   ]
 }
