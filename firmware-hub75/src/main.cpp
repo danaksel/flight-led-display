@@ -21,7 +21,7 @@ namespace
 constexpr uint16_t PanelWidth = 128;
 constexpr uint16_t PanelHeight = 64;
 constexpr uint8_t Brightness = 8;
-constexpr const char *SKYFRAME_FW_VERSION = "V1.10";
+constexpr const char *SKYFRAME_FW_VERSION = "V1.11";
 constexpr const char *DeviceConfigUrl = "https://skyframe.danaksel.no/public/device-config";
 constexpr const char *SoundStateUrl = "https://skyframe.danaksel.no/public/sound-state";
 constexpr const char *RealtimeStateUrl = "https://skyframe.danaksel.no/public/realtime-state";
@@ -3064,12 +3064,20 @@ void drawMarineRadar(JsonObject activeItem)
         drawn++;
     }
 
-    const float activeRadarX = jsonFloat(activeItem["radarX"], 0.5f);
-    const float activeRadarY = jsonFloat(activeItem["radarY"], 0.5f);
-    const float activeBearingDeg = jsonFloat(activeItem["b"], 0.0f);
-    const int16_t activeX = clampPixel(boxX + activeRadarX * (boxW - 1), boxX + 4, boxX + boxW - 5, boxX + boxW / 2);
-    const int16_t activeY = clampPixel(boxY + activeRadarY * (boxH - 1), boxY + 4, boxY + boxH - 5, boxY + boxH / 2);
-    drawMarineVesselMarker(activeX, activeY, jsonFloat(activeItem["radarHeadingDeg"], jsonFloat(activeItem["trk"], activeBearingDeg)), activeColor, true);
+    const bool hasActiveVessel = !activeItem.isNull()
+        && (valueOr(activeItem["cs"]).length()
+            || valueOr(activeItem["flt"]).length()
+            || !activeItem["radarX"].isNull()
+            || !activeItem["radarY"].isNull());
+    if (hasActiveVessel)
+    {
+        const float activeRadarX = jsonFloat(activeItem["radarX"], 0.5f);
+        const float activeRadarY = jsonFloat(activeItem["radarY"], 0.5f);
+        const float activeBearingDeg = jsonFloat(activeItem["b"], 0.0f);
+        const int16_t activeX = clampPixel(boxX + activeRadarX * (boxW - 1), boxX + 4, boxX + boxW - 5, boxX + boxW / 2);
+        const int16_t activeY = clampPixel(boxY + activeRadarY * (boxH - 1), boxY + 4, boxY + boxH - 5, boxY + boxH / 2);
+        drawMarineVesselMarker(activeX, activeY, jsonFloat(activeItem["radarHeadingDeg"], jsonFloat(activeItem["trk"], activeBearingDeg)), activeColor, true);
+    }
 }
 
 void drawMarinePayload(JsonObject flight, size_t itemCount)
@@ -3082,6 +3090,11 @@ void drawMarinePayload(JsonObject flight, size_t itemCount)
     display->setTextWrap(false);
 
     drawMarineRadar(flight);
+    if (flight.isNull())
+    {
+        presentFrame();
+        return;
+    }
 
     JsonObject lines = flight["lines"];
     const String name = valueOr(lines["airline"], valueOr(flight["air"], valueOr(flight["cs"], "VESSEL")));
@@ -3195,17 +3208,24 @@ void drawFlightPayload(JsonObject flight, const char *mode, size_t flightCount, 
 
 void drawCurrentLiveFlight()
 {
+    const char *mode = currentDisplayDoc["mode"] | "";
     JsonArray flights = currentDisplayDoc["flights"].as<JsonArray>();
     const size_t flightCount = flights.size();
     if (flightCount == 0)
     {
+        if (String(mode) == "marine")
+        {
+            JsonObject emptyFlight;
+            drawMarinePayload(emptyFlight, 0);
+            liveLayoutActive = true;
+            return;
+        }
         liveLayoutActive = false;
         return;
     }
 
     if (currentLiveFlight >= flightCount) currentLiveFlight = 0;
     JsonObject flight = flights[currentLiveFlight];
-    const char *mode = currentDisplayDoc["mode"] | "";
     if (String(mode) == "marine")
     {
         drawMarinePayload(flight, flightCount);
@@ -3243,6 +3263,20 @@ void drawDisplayPayload(JsonDocument &doc)
         liveFlightsPreviouslyVisible = false;
         drawClockMode();
         Serial.println("Display OK. mode=clock");
+        return;
+    }
+
+    if (String(mode) == "marine")
+    {
+        liveFlightsPreviouslyVisible = flightCount > 0;
+        if (currentLiveFlight >= flightCount) currentLiveFlight = 0;
+        liveCycleStartedAt = millis();
+        JsonObject flight = flightCount > 0 ? flights[currentLiveFlight].as<JsonObject>() : JsonObject();
+        drawMarinePayload(flight, flightCount);
+        nextLiveCycleAt = flightCount > 0 ? millis() + static_cast<uint32_t>(displayCycleSeconds) * 1000UL : 0;
+        lastLiveRenderAt = millis();
+        Serial.print("Display OK. mode=marine flights=");
+        Serial.println(flightCount);
         return;
     }
 

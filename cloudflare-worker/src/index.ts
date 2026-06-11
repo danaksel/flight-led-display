@@ -3498,7 +3498,7 @@ async function marineDisplayResponse(env: Env, config: Config, screenState: Scre
   const limit = Math.max(1, Math.min(24, parseNumber(env.DISPLAY_LIMIT, 8)));
   const displayFlights = vessels.slice(0, limit).map((vessel) => marineVesselToDisplayFlight(vessel));
   const landMask = await marineLandMaskFor(env, config);
-  const payload = await displayPayload(env, config, screenState, compact, displayFlights.length ? "marine" : "marine_waiting", [], [], displayFlights, [], liveSourceStatus, context);
+  const payload = await displayPayload(env, config, screenState, compact, "marine", [], [], displayFlights, [], liveSourceStatus, context);
 
   return jsonResponse({
     ...payload,

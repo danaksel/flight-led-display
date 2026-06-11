@@ -97,6 +97,8 @@ Marine radius is configurable from 0.5 km to 3.0 km in 0.1 km steps. Normal AIS 
 
 Marine radar can draw a land/sea outline from a preprocessed landmask extract. The deployed dataset is `public/marine/land-polygons.json`, generated from MapTiler/OpenMapTiles vector `water` polygons for inner Oslofjord. The Worker can also use `MARINE_LANDMASK_URL` if configured. At runtime the Worker converts the current rotated `126 x 46` radar rectangle to a compact `base64-land-bits-v1` mask and caches it in KV. Firmware and emulator draw set bits with the configured marine land color, defaulting to black/off LEDs, and leave unset bits as the configured radar background color.
 
+When no vessels are inside the selected marine radar area, the display still renders the radar background and landmask. The vessel marker and both text lines remain blank.
+
 Mock AIS data must not be used in the customer-facing control panel or display payload. If BarentsWatch credentials are missing, the API fails, or there are no vessels in the selected radar area, the UI should show that state explicitly.
 
 ## Project Structure

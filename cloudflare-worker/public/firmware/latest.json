@@ -1,11 +1,11 @@
 {
-  "version": "V1.10",
-  "url": "https://skyframe.danaksel.no/public/firmware/skyframe-v1.10.bin",
-  "sha256": "035780d7b9c83b88eca023589f96730feffb574a2a1e849f2a176f32a2010157",
-  "size": 1122288,
+  "version": "V1.11",
+  "url": "https://skyframe.danaksel.no/public/firmware/skyframe-v1.11.bin",
+  "sha256": "d14b0831e03aea68af7f64eb1faca46834b11b3d5a2fb16f19cefea08e6a3b05",
+  "size": 1123152,
   "releaseNotes": [
-    "Adds configurable marine land color in the control panel.",
-    "Keeps emulator and firmware landmask colors in sync.",
-    "Preserves black/off land pixels as the default for existing screens."
+    "Keeps the marine radar visible when no vessels are nearby.",
+    "Leaves both marine text lines blank until a vessel is present.",
+    "Keeps emulator and firmware empty-radar behavior in sync."
   ]
 }

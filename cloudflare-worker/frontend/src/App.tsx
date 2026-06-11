@@ -1856,6 +1856,13 @@ function drawMarineLayoutExact(ctx: CanvasRenderingContext2D, flight: DisplayFli
     drawMarineVesselMarker(ctx, x, y, Number(item.radarHeadingDeg ?? item.trk ?? item.b ?? 0), inactiveColor, false);
   });
 
+  const hasActiveVessel = flights.length > 0 && (
+    Boolean(activeId)
+    || typeof flight.radarX === "number"
+    || typeof flight.radarY === "number"
+  );
+  if (!hasActiveVessel) return;
+
   const activeRadarX = typeof flight.radarX === "number" ? flight.radarX : 0.5;
   const activeRadarY = typeof flight.radarY === "number" ? flight.radarY : 0.5;
   const activeX = clamp(Math.round(boxX + activeRadarX * (boxW - 1)), boxX + 4, boxX + boxW - 5);
@@ -3029,8 +3036,8 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
           clockLastMinuteRef.current = completedMinutes;
         }
         drawClockLayoutExact(renderCtx, props.config, clockFallingMinuteIndexRef.current, clockFallingStartedAtRef.current, now);
-      } else if (activeFlight && (normalizeProductMode(props.config.productMode) === "marine" || props.preview.mode === "marine")) {
-        drawMarineLayoutExact(renderCtx, activeFlight, flights, props.config, tickerStartedAtRef.current, now, props.preview.radar);
+      } else if (normalizeProductMode(props.config.productMode) === "marine" || props.preview.mode === "marine") {
+        drawMarineLayoutExact(renderCtx, activeFlight ?? ({} as DisplayFlight), flights, props.config, tickerStartedAtRef.current, now, props.preview.radar);
       } else if (activeFlight) {
         const isFollowLayout = activeFlight.layout === "follow_cycle" || activeFlight.layout === "follow_status";
         const detailCycleStartedAt = isFollowLayout ? followPhaseStartedAtRef.current : currentFlightCycleStartedAt;
