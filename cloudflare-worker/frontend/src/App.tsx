@@ -3600,16 +3600,22 @@ export default function App() {
   const firmwareVersion = preview.deviceStatus?.firmwareVersion || "unknown";
   const firmwareUpdateAvailable = firmwareLatest ? isVersionNewer(firmwareLatest.version, firmwareVersion) : false;
   const firmwareDisplayStatus = firmwareStatusLabel(firmwareVersion, firmwareLatest, preview.deviceStatus?.ota?.status);
-  const homeyLinks = apiScreenId ? [
+  const homeyBaseLinks = apiScreenId ? [
     { label: "Screen on", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/screen-state/activate` },
     { label: "Screen off", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/screen-state/deactivate` },
     { label: "Night mode on", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/brightness-mode/night` },
-    { label: "Night mode off", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/brightness-mode/day` },
+    { label: "Night mode off", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/brightness-mode/day` }
+  ] : [];
+  const homeyDisplayLinks = apiScreenId && productMode === "marine" ? [
+    { label: "Marine radar", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/display-mode/hybrid` },
+    { label: "Clock mode", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/display-mode/clock` }
+  ] : apiScreenId ? [
     { label: "Airspace mode", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/display-mode/airspace` },
     { label: "Hybrid mode", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/display-mode/hybrid` },
     { label: "Airport Board mode", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/display-mode/airport-board` },
     { label: "Clock mode", href: `${publicOrigin}/public/homey/screens/${encodeURIComponent(apiScreenId)}/display-mode/clock` }
   ] : [];
+  const homeyLinks = [...homeyBaseLinks, ...homeyDisplayLinks];
   async function rotateHomeyToken() {
     const confirmed = window.confirm("Rotate Homey token? Existing Homey flows must be updated with the new token.");
     if (!confirmed) return;

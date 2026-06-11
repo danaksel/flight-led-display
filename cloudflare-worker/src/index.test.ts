@@ -831,4 +831,54 @@ describe("display polling contract", () => {
     expect(firstFlight?.lines?.aircraft).toContain("OSLO");
   });
 
+  it("rejects flight-only Homey display modes for marine screens", async () => {
+    const screenId = "93975";
+    const env = makeEnv({ DEVICE_API_TOKEN: "device-secret" }, {
+      "device:v1:dev_marine": {
+        deviceId: "dev_marine",
+        screenId,
+        tokenHash: "a".repeat(64),
+        pairedAt: "2026-06-07T08:30:00.000Z",
+        ownerEmail: TEST_USER_EMAIL
+      },
+      [`account:${TEST_USER_EMAIL}:${HOMEY_TOKEN_KEY}`]: {
+        token: "homey-secret",
+        createdAt: "2026-06-07T09:00:00.000Z",
+        rotatedAt: null
+      },
+      [`screen:${screenId}:${CONFIG_KEY}`]: {
+        productMode: "marine",
+        updatedAt: "2026-06-11T10:00:00.000Z"
+      },
+      [`screen:${screenId}:${CONFIG_KEY}:marine`]: {
+        ...baseConfig(),
+        productMode: "marine",
+        radiusKm: 1,
+        device: {
+          ...(baseConfig().device as Record<string, unknown>),
+          displayMode: "hybrid"
+        }
+      }
+    });
+
+    const rejected = await request(`/public/homey/screens/${screenId}/display-mode/airport-board`, env, {
+      method: "POST",
+      headers: { "X-SkyFrame-Homey-Token": "homey-secret" }
+    });
+    const rejectedJson = await rejected.json() as Record<string, unknown>;
+    expect(rejected.status).toBe(400);
+    expect(rejectedJson).toMatchObject({
+      productMode: "marine",
+      displayMode: "hybrid"
+    });
+
+    const clock = await request(`/public/homey/screens/${screenId}/display-mode/clock`, env, {
+      method: "POST",
+      headers: { "X-SkyFrame-Homey-Token": "homey-secret" }
+    });
+    const clockJson = await clock.json() as Record<string, unknown>;
+    expect(clock.status).toBe(200);
+    expect(clockJson.displayMode).toBe("clock");
+  });
+
 });

@@ -362,6 +362,8 @@ POST https://skyframe.danaksel.no/public/homey/screens/{screenId}/display-mode/c
 X-SkyFrame-Homey-Token: <account-token>
 ```
 
+For Marine screens, display-mode automation only accepts `hybrid` (marine radar/live) and `clock`. Flight-only modes such as `airspace` and `airport-board` return `400`.
+
 The Worker validates `X-SkyFrame-Homey-Token`. `/api/screens/{screenId}/...` aliases also exist, but those require a Cloudflare Access bypass before Homey can reach the Worker.
 
 ## Verification Checklist

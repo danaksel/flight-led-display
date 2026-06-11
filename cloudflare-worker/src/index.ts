@@ -1906,6 +1906,13 @@ async function writeDisplayMode(env: Env, displayMode: DeviceSettings["displayMo
   const config = await getConfig(env, context);
   const normalizedDevice = normalizeDeviceSettings(config.device);
   const requestedDisplayMode = normalizeDisplayBehaviorMode(displayMode);
+  if (normalizeProductMode(config.productMode) === "marine" && !isMarineAutomationDisplayMode(requestedDisplayMode)) {
+    return jsonResponse({
+      error: "Marine screens only support radar/live and clock display modes.",
+      displayMode: normalizedDevice.displayMode,
+      productMode: "marine"
+    }, 400, { "Cache-Control": "no-store" });
+  }
   const fr24 = await fr24KeyStatus(env, context);
   const normalizedDisplayMode = !fr24.screenConfigured && modeRequiresFr24(requestedDisplayMode) ? "airport_board" : requestedDisplayMode;
   const updatedAt = new Date().toISOString();
@@ -2816,6 +2823,10 @@ function airspaceMonitoringForMode(mode: DisplayBehaviorMode): boolean {
 
 function modeRequiresFr24(mode: unknown): boolean {
   return mode === "airspace" || mode === "hybrid";
+}
+
+function isMarineAutomationDisplayMode(mode: DisplayBehaviorMode): boolean {
+  return mode === "hybrid" || mode === "clock";
 }
 
 function enforceFr24DeviceSettings(device: DeviceSettings, hasScreenFr24Key: boolean): DeviceSettings {
