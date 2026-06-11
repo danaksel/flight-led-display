@@ -1,20 +1,24 @@
 import { type TouchEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import L from "leaflet";
-import { IconApi, IconClock, IconDisplay, IconPlane, IconTimetable, SkyframeLogo } from "./components/Icons";
+import { IconApi, IconClock, IconDisplay, IconMapPin, IconPlane, IconTimetable, SkyframeLogo } from "./components/Icons";
 
 type AircraftCategoryCode = "P" | "C" | "M" | "J" | "T" | "H" | "B" | "G" | "D" | "V" | "O" | "N";
 
 type Config = {
   screenId?: string;
+  productMode: ProductMode;
   account?: {
     email?: string | null;
     screens?: AccountScreen[];
   };
   fr24Key?: Fr24KeyStatus;
+  barentsWatchKey?: Fr24KeyStatus;
   homeyToken?: HomeyTokenStatus | null;
   lat: number;
   lon: number;
   radiusKm: number;
+  distanceOrigin: DistanceOrigin;
+  povDeg: number;
   homeAirportIata: string;
   label: string;
   updatedAt?: string;
@@ -81,6 +85,14 @@ type Config = {
   };
 };
 
+type ProductMode = "flight" | "marine";
+
+type DistanceOrigin = {
+  lat: number;
+  lon: number;
+  label?: string;
+};
+
 type Fr24KeyStatus = {
   configured: boolean;
   screenConfigured: boolean;
@@ -127,6 +139,7 @@ type AccountScreen = {
   screenId: string;
   deviceId?: string;
   label?: string;
+  productMode?: ProductMode;
   pairedAt?: string;
 };
 
@@ -217,6 +230,10 @@ type DisplayFlight = {
   spd?: number;
   trk?: number;
   vr?: number;
+  radarX?: number | null;
+  radarY?: number | null;
+  radarHeadingDeg?: number | null;
+  b?: number | null;
 };
 
 type IdleRow = {
@@ -308,7 +325,7 @@ type PreviewState = {
   deviceStatus: DeviceStatus | null;
 };
 
-type SectionId = "display" | "clock" | "aircraft" | "timetable" | "api";
+type SectionId = "display" | "clock" | "aircraft" | "timetable" | "vessels" | "marine_area" | "radar" | "api";
 
 type Section = {
   id: SectionId;
@@ -316,7 +333,7 @@ type Section = {
   icon: (props: { className?: string }) => JSX.Element;
 };
 
-const sections: Section[] = [
+const flightSections: Section[] = [
   { id: "display", label: "GENERAL", icon: IconDisplay },
   { id: "aircraft", label: "AIRSPACE", icon: IconPlane },
   { id: "timetable", label: "AIRPORT BOARD", icon: IconTimetable },
@@ -324,16 +341,25 @@ const sections: Section[] = [
   { id: "api", label: "Homey Integration", icon: IconApi }
 ];
 
-const slideOrder: SectionId[] = ["display", "aircraft", "timetable", "clock", "api"];
+const marineSections: Section[] = [
+  { id: "display", label: "GENERAL", icon: IconDisplay },
+  { id: "vessels", label: "VESSELS", icon: IconDisplay },
+  { id: "marine_area", label: "AREA", icon: IconMapPin },
+  { id: "radar", label: "RADAR", icon: IconTimetable },
+  { id: "clock", label: "CLOCK", icon: IconClock },
+  { id: "api", label: "Homey Integration", icon: IconApi }
+];
 
-function slideIndexForSection(sectionIndex: number): number {
-  const section = sections[clamp(sectionIndex, 0, sections.length - 1)];
-  return Math.max(0, slideOrder.indexOf(section.id));
+const slideOrder: SectionId[] = ["display", "aircraft", "timetable", "vessels", "marine_area", "radar", "clock", "api"];
+
+function slideIndexForSection(sectionIndex: number, activeSections: Section[]): number {
+  const section = activeSections[clamp(sectionIndex, 0, activeSections.length - 1)];
+  return Math.max(0, activeSections.findIndex((item) => item.id === section.id));
 }
 
-function sectionIndexForSlide(slideIndex: number): number {
-  const sectionId = slideOrder[clamp(slideIndex, 0, slideOrder.length - 1)];
-  return Math.max(0, sections.findIndex((section) => section.id === sectionId));
+function sectionIndexForSlide(slideIndex: number, activeSections: Section[]): number {
+  const section = activeSections[clamp(slideIndex, 0, activeSections.length - 1)];
+  return Math.max(0, activeSections.findIndex((item) => item.id === section.id));
 }
 
 function slideStyle(sectionId: SectionId) {
@@ -369,6 +395,15 @@ const lineColorLabels: Record<keyof Config["device"]["lineColors"], string> = {
   routeProgress: "Route progress"
 };
 
+const marineColorLabels: Record<keyof Config["device"]["lineColors"], string> = {
+  airline: "Active ship on radar",
+  route: "Text lines",
+  aircraft: "Text detail",
+  context: "Text context",
+  progress: "Inactive ships on radar",
+  routeProgress: "Radar background"
+};
+
 const timetableColorLabels: Record<keyof Config["device"]["timetableColors"], string> = {
   header: "Header",
   data: "Text",
@@ -398,6 +433,15 @@ const defaultAirspaceColors: AirspaceColors = {
   routeProgress: "#00f900"
 };
 
+const defaultMarineColors: AirspaceColors = {
+  airline: "#ffc777",
+  route: "#ffc777",
+  aircraft: "#ffc777",
+  context: "#ffc777",
+  progress: "#a6a6a6",
+  routeProgress: "#17265d"
+};
+
 const defaultClockColors: ClockColors = {
   clockTopColor: "#ffc777",
   clockColor: "#f8ff00"
@@ -418,12 +462,16 @@ const defaultAirportBoardColors: AirportBoardColors = {
 
 const defaultConfig: Config = {
   screenId: "main",
+  productMode: "flight",
   account: { email: null, screens: [] },
   fr24Key: { configured: false, screenConfigured: false, source: "missing" },
+  barentsWatchKey: { configured: false, screenConfigured: false, source: "missing" },
   homeyToken: null,
   lat: 59.9139,
   lon: 10.7522,
   radiusKm: 10,
+  distanceOrigin: { lat: 59.9139, lon: 10.7522, label: "Window" },
+  povDeg: 0,
   homeAirportIata: "OSL",
   label: "",
   follow: { enabled: false, flights: [] },
@@ -621,6 +669,7 @@ function normalizeConfig(input: Partial<Config> & Record<string, unknown>): Conf
 
   return {
     screenId: typeof input.screenId === "string" ? input.screenId : defaultConfig.screenId,
+    productMode: normalizeProductMode(input.productMode),
     account: input.account && typeof input.account === "object"
       ? {
           email: typeof (input.account as { email?: unknown }).email === "string" ? (input.account as { email: string }).email : null,
@@ -631,6 +680,7 @@ function normalizeConfig(input: Partial<Config> & Record<string, unknown>): Conf
                   screenId: typeof item.screenId === "string" ? item.screenId : "",
                   deviceId: typeof item.deviceId === "string" ? item.deviceId : undefined,
                   label: typeof item.label === "string" ? item.label : undefined,
+                  productMode: normalizeProductMode(item.productMode),
                   pairedAt: typeof item.pairedAt === "string" ? item.pairedAt : undefined
                 };
               }).filter((screen) => screen.screenId)
@@ -638,10 +688,13 @@ function normalizeConfig(input: Partial<Config> & Record<string, unknown>): Conf
     }
       : { email: null, screens: [] },
     fr24Key: normalizeFr24KeyStatus(input.fr24Key),
+    barentsWatchKey: normalizeFr24KeyStatus(input.barentsWatchKey),
     homeyToken: normalizeHomeyTokenStatus(input.homeyToken),
     lat: Number(input.lat ?? defaultConfig.lat),
     lon: Number(input.lon ?? defaultConfig.lon),
-    radiusKm: clamp(Number(input.radiusKm ?? defaultConfig.radiusKm), 1, 100),
+    radiusKm: normalizeRadiusKm(Number(input.radiusKm ?? defaultConfig.radiusKm), normalizeProductMode(input.productMode)),
+    distanceOrigin: normalizeDistanceOrigin(input.distanceOrigin, input),
+    povDeg: clamp(Number(input.povDeg ?? defaultConfig.povDeg), 0, 359),
     homeAirportIata: String(input.homeAirportIata ?? defaultConfig.homeAirportIata),
     label: String(input.label ?? ""),
     updatedAt: typeof input.updatedAt === "string" ? input.updatedAt : undefined,
@@ -712,6 +765,101 @@ function normalizeHomeyTokenStatus(value: unknown): HomeyTokenStatus | null {
     createdAt: typeof v.createdAt === "string" ? v.createdAt : undefined,
     rotatedAt: typeof v.rotatedAt === "string" ? v.rotatedAt : null
   };
+}
+
+function normalizeProductMode(value: unknown): ProductMode {
+  return value === "marine" ? "marine" : "flight";
+}
+
+function normalizeRadiusKm(value: number, mode: ProductMode): number {
+  const fallback = Number.isFinite(value) ? value : defaultConfig.radiusKm;
+  return mode === "marine" ? clamp(fallback, 0.5, 3) : clamp(fallback, 1, 100);
+}
+
+function productModeLabel(value: ProductMode | undefined): string {
+  return normalizeProductMode(value) === "marine" ? "Marine Display" : "Flight Display";
+}
+
+function mapPinIcon(kind: "center" | "origin") {
+  const color = kind === "origin" ? "#0f62a3" : "#3c2415";
+  const label = kind === "origin" ? "P" : "R";
+  return L.divIcon({
+    className: "",
+    html: `<div style="width:20px;height:20px;border-radius:50%;border:3px solid ${color};background:#fff;color:${color};display:grid;place-items:center;font-size:10px;font-weight:900;box-shadow:0 1px 5px rgba(0,0,0,.25);">${label}</div>`,
+    iconSize: [20, 20],
+    iconAnchor: [10, 10]
+  });
+}
+
+function normalizeDistanceOrigin(value: unknown, fallback: { lat?: unknown; lon?: unknown }): DistanceOrigin {
+  const v = value && typeof value === "object" ? value as Partial<DistanceOrigin> : {};
+  const fallbackLat = Number(fallback.lat ?? defaultConfig.lat);
+  const fallbackLon = Number(fallback.lon ?? defaultConfig.lon);
+  return {
+    lat: clamp(Number(v.lat ?? fallbackLat), -90, 90),
+    lon: clamp(Number(v.lon ?? fallbackLon), -180, 180),
+    label: typeof v.label === "string" && v.label.trim() ? v.label : "Window"
+  };
+}
+
+function toRadClient(deg: number) {
+  return deg * Math.PI / 180;
+}
+
+function toDegClient(rad: number) {
+  return rad * 180 / Math.PI;
+}
+
+function distanceBetweenKmClient(lat1: number, lon1: number, lat2: number, lon2: number) {
+  const radius = 6371;
+  const dLat = toRadClient(lat2 - lat1);
+  const dLon = toRadClient(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRadClient(lat1)) * Math.cos(toRadClient(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * radius * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function bearingBetweenClient(lat1: number, lon1: number, lat2: number, lon2: number) {
+  const y = Math.sin(toRadClient(lon2 - lon1)) * Math.cos(toRadClient(lat2));
+  const x = Math.cos(toRadClient(lat1)) * Math.sin(toRadClient(lat2)) - Math.sin(toRadClient(lat1)) * Math.cos(toRadClient(lat2)) * Math.cos(toRadClient(lon2 - lon1));
+  return (toDegClient(Math.atan2(y, x)) + 360) % 360;
+}
+
+function destinationPointClient(lat: number, lon: number, bearingDeg: number, distanceKm: number): [number, number] {
+  const radius = 6371;
+  const angularDistance = distanceKm / radius;
+  const bearingRad = toRadClient(bearingDeg);
+  const latRad = toRadClient(lat);
+  const lonRad = toRadClient(lon);
+  const nextLat = Math.asin(Math.sin(latRad) * Math.cos(angularDistance) + Math.cos(latRad) * Math.sin(angularDistance) * Math.cos(bearingRad));
+  const nextLon = lonRad + Math.atan2(Math.sin(bearingRad) * Math.sin(angularDistance) * Math.cos(latRad), Math.cos(angularDistance) - Math.sin(latRad) * Math.sin(nextLat));
+  return [toDegClient(nextLat), ((toDegClient(nextLon) + 540) % 360) - 180];
+}
+
+function marineForwardBearingClient(config: Pick<Config, "lat" | "lon" | "distanceOrigin" | "povDeg">) {
+  const origin = config.distanceOrigin;
+  const distanceKm = distanceBetweenKmClient(origin.lat, origin.lon, config.lat, config.lon);
+  return distanceKm > 0.01 ? bearingBetweenClient(origin.lat, origin.lon, config.lat, config.lon) : config.povDeg;
+}
+
+function marineRadarPolygon(config: Pick<Config, "lat" | "lon" | "radiusKm" | "distanceOrigin" | "povDeg">): Array<[number, number]> {
+  const forwardBearing = marineForwardBearingClient(config);
+  const forwardRad = toRadClient(forwardBearing);
+  const forwardUnit = { east: Math.sin(forwardRad), north: Math.cos(forwardRad) };
+  const rightUnit = { east: Math.cos(forwardRad), north: -Math.sin(forwardRad) };
+  const halfHeightKm = Math.max(0.5, Number(config.radiusKm) || 1);
+  const halfWidthKm = halfHeightKm * (126 / 46);
+  return [
+    { right: -halfWidthKm, forward: halfHeightKm },
+    { right: halfWidthKm, forward: halfHeightKm },
+    { right: halfWidthKm, forward: -halfHeightKm },
+    { right: -halfWidthKm, forward: -halfHeightKm }
+  ].map((corner) => {
+    const east = corner.right * rightUnit.east + corner.forward * forwardUnit.east;
+    const north = corner.right * rightUnit.north + corner.forward * forwardUnit.north;
+    const distanceKm = Math.sqrt(east ** 2 + north ** 2);
+    const absoluteBearing = (toDegClient(Math.atan2(east, north)) + 360) % 360;
+    return destinationPointClient(config.lat, config.lon, absoluteBearing, distanceKm);
+  });
 }
 
 function normalizeDisplayBehaviorMode(value: unknown): DisplayBehaviorMode {
@@ -788,6 +936,19 @@ function formatTimestamp(value: string | null | undefined): string {
 
 function configSignature(config: Config): string {
   return JSON.stringify(normalizeConfig(config));
+}
+
+function configForSave(config: Config): Partial<Config> {
+  const productMode = normalizeProductMode(config.productMode);
+  const base: Partial<Config> = {
+    ...config,
+    productMode,
+    radiusKm: normalizeRadiusKm(config.radiusKm, productMode)
+  };
+  if (productMode !== "marine") {
+    delete base.distanceOrigin;
+  }
+  return base;
 }
 
 function shortTime(value: string | null | undefined): string {
@@ -1602,6 +1763,78 @@ function drawProgressValue(ctx: CanvasRenderingContext2D, progress: number, y: n
   ctx.fillRect(0, y, width, 1);
 }
 
+function drawMarineVesselMarker(ctx: CanvasRenderingContext2D, x: number, y: number, headingDeg: number, color: string, active: boolean) {
+  const directions = [
+    [0, -1], [1, -1], [1, 0], [1, 1],
+    [0, 1], [-1, 1], [-1, 0], [-1, -1]
+  ];
+  const index = Math.round((((headingDeg % 360) + 360) % 360) / 45) % 8;
+  const [dx, dy] = directions[index];
+  const backX = -dx;
+  const backY = -dy;
+  const perpX = -dy;
+  const perpY = dx;
+  ctx.fillStyle = color;
+  ctx.fillRect(x + backX, y + backY, 1, 1);
+  if (active) {
+    ctx.fillRect(x + backX * 2 + perpX, y + backY * 2 + perpY, 1, 1);
+    ctx.fillRect(x + backX * 2 - perpX, y + backY * 2 - perpY, 1, 1);
+  }
+  if (!active || Math.floor(Date.now() / 450) % 2 === 0) ctx.fillRect(x, y, 1, 1);
+}
+
+function drawMarineLayoutExact(ctx: CanvasRenderingContext2D, flight: DisplayFlight, flights: DisplayFlight[], config: Config, tickerStartedAt: number, now: number) {
+  const colors = config.device.lineColors;
+  const boxX = 1;
+  const boxY = 1;
+  const boxW = 126;
+  const boxH = 46;
+  const radarBackground = colors.routeProgress || defaultMarineColors.routeProgress;
+  const activeColor = colors.airline || defaultMarineColors.airline;
+  const inactiveColor = colors.progress || defaultMarineColors.progress;
+  const textColor = colors.route || defaultMarineColors.route;
+
+  ctx.fillStyle = "#000000";
+  ctx.fillRect(0, 0, 128, 64);
+  ctx.fillStyle = radarBackground;
+  ctx.fillRect(boxX, boxY, boxW, boxH);
+
+  const activeId = flight.cs || flight.flt || flight.callsign || flight.flight || "";
+  flights.slice(0, 12).forEach((item) => {
+    const itemId = item.cs || item.flt || item.callsign || item.flight || "";
+    if (itemId && activeId && itemId === activeId) return;
+    if (typeof item.radarX !== "number" || typeof item.radarY !== "number") return;
+    if (item.radarX < 0 || item.radarX > 1 || item.radarY < 0 || item.radarY > 1) return;
+    const x = clamp(Math.round(boxX + item.radarX * (boxW - 1)), boxX + 3, boxX + boxW - 4);
+    const y = clamp(Math.round(boxY + item.radarY * (boxH - 1)), boxY + 3, boxY + boxH - 4);
+    drawMarineVesselMarker(ctx, x, y, Number(item.radarHeadingDeg ?? item.trk ?? item.b ?? 0), inactiveColor, false);
+  });
+
+  const activeRadarX = typeof flight.radarX === "number" ? flight.radarX : 0.5;
+  const activeRadarY = typeof flight.radarY === "number" ? flight.radarY : 0.5;
+  const activeX = clamp(Math.round(boxX + activeRadarX * (boxW - 1)), boxX + 4, boxX + boxW - 5);
+  const activeY = clamp(Math.round(boxY + activeRadarY * (boxH - 1)), boxY + 4, boxY + boxH - 5);
+  drawMarineVesselMarker(ctx, activeX, activeY, Number(flight.radarHeadingDeg ?? flight.trk ?? flight.b ?? 0), activeColor, true);
+
+  const name = flight.lines?.airline || flight.air || flight.cs || flight.flt || "VESSEL";
+  const destination = normalizeMarineTextPart(flight.to || flight.destination);
+  const course = Number.isFinite(flight.trk) ? `${Math.round(Number(flight.trk))} DEG` : "";
+  const speed = Number.isFinite(flight.spd) ? `${Number(flight.spd).toFixed(1)} KN` : "-- KN";
+  const status = normalizeMarineTextPart(flight.status);
+  const details = flight.lines?.aircraft || [course, speed, destination, status].filter(Boolean).join(" - ");
+  drawTickerLine(ctx, name, 1, 48, textColor, 126, config, tickerStartedAt, now);
+  drawTickerLine(ctx, details, 1, 56, textColor, 126, config, tickerStartedAt, now);
+}
+
+function normalizeMarineTextPart(value: unknown): string {
+  if (typeof value !== "string" && typeof value !== "number") return "";
+  const text = String(value).trim();
+  if (!text) return "";
+  const normalized = text.toLowerCase();
+  if (normalized === "unknown" || normalized === "unknown dest." || normalized === "ukjent" || normalized === "n/a" || normalized === "null") return "";
+  return text;
+}
+
 function drawLiveFlightLayoutExact(ctx: CanvasRenderingContext2D, flight: DisplayFlight, config: Config, logo: HTMLImageElement | null | undefined, cycleStartedAt: number, tickerStartedAt: number, now: number, flightCount: number) {
   ctx.fillStyle = "#000000";
   ctx.fillRect(0, 0, 128, 64);
@@ -1664,6 +1897,13 @@ function makeFlightSignature(flight: DisplayFlight | undefined) {
     flight.lines?.airline,
     flight.lines?.route,
     flight.lines?.aircraft,
+    flight.lines?.context,
+    flight.ctxValue,
+    flight.to,
+    flight.spd,
+    flight.trk,
+    flight.radarX,
+    flight.radarY,
     flight.followStatus?.text,
     flight.followStatus?.detail
   ].filter(Boolean).join("|");
@@ -2219,26 +2459,161 @@ function DisplayStatusCard(props: { config: Config; screenState: ScreenState; pr
   );
 }
 
-function MapPicker(props: { lat: number; lon: number; radiusKm: number; onChange: (lat: number, lon: number) => void }) {
+function MarineDisplayModeCard(props: { value: DisplayBehaviorMode; onChange: (value: DisplayBehaviorMode) => void }) {
+  const liveSelected = props.value !== "clock";
+  return (
+    <div style={{ display: "grid", gap: "10px" }}>
+      <div>
+        <div style={{ fontSize: "14px", fontWeight: 750 }}>Display Mode</div>
+        <div style={{ marginTop: "4px", fontSize: "12px", color: "var(--muted-foreground)" }}>Choose the marine display behavior.</div>
+      </div>
+      <div style={{ display: "grid", gap: "10px" }}>
+        {[
+          { value: "hybrid" as DisplayBehaviorMode, title: "Vessel Radar", description: "Show nearby vessel traffic from AIS." },
+          { value: "clock" as DisplayBehaviorMode, title: "Clock", description: "Show a full-screen clock." }
+        ].map((option) => {
+          const selected = option.value === "clock" ? props.value === "clock" : liveSelected;
+          return (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => props.onChange(option.value)}
+              style={{
+                ...cardStyle("13px 14px"),
+                display: "grid",
+                gridTemplateColumns: "auto 1fr",
+                gap: "12px",
+                alignItems: "start",
+                textAlign: "left",
+                border: selected ? "1px solid var(--primary)" : "1px solid var(--border-soft)",
+                background: selected ? "rgba(72, 215, 200, 0.14)" : "var(--card)",
+                color: "var(--foreground)",
+                cursor: "pointer"
+              }}
+            >
+              <span style={{ width: "18px", height: "18px", borderRadius: "999px", border: `2px solid ${selected ? "var(--primary)" : "rgba(60, 36, 21, 0.28)"}`, display: "grid", placeItems: "center", marginTop: "1px" }}>
+                {selected ? <span style={{ width: "8px", height: "8px", borderRadius: "999px", background: "var(--primary)" }} /> : null}
+              </span>
+              <span>
+                <span style={{ display: "block", fontSize: "14px", fontWeight: 750 }}>{option.title}</span>
+                <span style={{ display: "block", marginTop: "4px", fontSize: "12px", lineHeight: 1.4, color: "var(--muted-foreground)" }}>{option.description}</span>
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function MarineStatusCard(props: { config: Config; screenState: ScreenState; preview: PreviewState; statusTone: "idle" | "dirty" | "error" | "success" }) {
+  const liveSource = props.preview.liveSourceStatus;
+  const sourceLabel = liveSource?.source === "barentswatch" ? "BarentsWatch AIS" : "AIS";
+  const deviceStatus = props.preview.deviceStatus;
+  const deviceFresh = isRecentTimestamp(deviceStatus?.updatedAt, 4 * 60 * 1000);
+  const deviceTone = deviceStatus && deviceFresh ? deviceStatus.ok ? "good" : "error" : deviceStatus ? "warn" : "idle";
+  const signalTone = props.statusTone === "error" || props.preview.error ? "error" : props.preview.updatedAt ? "good" : "warn";
+  return (
+    <div style={{ ...cardStyle("16px"), display: "grid", gap: "14px" }}>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "12px" }}>
+        <div>
+          <div style={{ fontSize: "14px", fontWeight: 750, letterSpacing: "-0.01em" }}>Marine Status</div>
+          <div style={{ marginTop: "4px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>
+            {props.screenState.active ? "Ready to show vessel traffic." : "The display is currently turned off."}
+          </div>
+        </div>
+        <StatusPill label={props.screenState.active ? "On" : "Off"} tone={props.screenState.active ? "good" : "idle"} />
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: "10px 14px" }}>
+        <DiagnosticStatusRow label={props.config.device.displayMode === "clock" ? "Clock mode selected" : "Vessel radar selected"} active />
+        <DiagnosticStatusRow label={liveSource?.ok === false ? `Missing ${sourceLabel}` : `${sourceLabel} source`} active={liveSource?.ok !== false} tone={liveSource?.ok === false ? "error" : liveSource ? "good" : "idle"} />
+        <DiagnosticStatusRow label={`${props.preview.flights.length} vessel${props.preview.flights.length === 1 ? "" : "s"} in payload`} active={props.preview.flights.length > 0} tone={props.preview.flights.length > 0 ? "good" : "warn"} />
+        <DiagnosticStatusRow label={`${props.config.radiusKm.toFixed(props.config.radiusKm < 10 ? 1 : 0)} km search radius`} active />
+        <DiagnosticStatusRow label={deviceStatus && deviceFresh ? "Screen connected" : "Screen not seen recently"} active={Boolean(deviceStatus && deviceFresh)} tone={deviceTone} />
+        <DiagnosticStatusRow label={props.preview.updatedAt ? "Display service online" : "Display service waiting"} active={Boolean(props.preview.updatedAt)} tone={signalTone} />
+      </div>
+      {props.preview.error ? <div style={{ borderRadius: "12px", background: "rgba(255, 38, 0, 0.08)", color: "#8b1f12", padding: "10px 12px", fontSize: "12px", lineHeight: 1.45 }}>{props.preview.error}</div> : null}
+      {liveSource?.ok === false && liveSource.error ? <div style={{ borderRadius: "12px", background: "rgba(255, 38, 0, 0.08)", color: "#8b1f12", padding: "10px 12px", fontSize: "12px", lineHeight: 1.45 }}>{liveSource.error}</div> : null}
+    </div>
+  );
+}
+
+function MapPicker(props: {
+  lat: number;
+  lon: number;
+  radiusKm: number;
+  mode?: ProductMode;
+  distanceOrigin?: DistanceOrigin;
+  povDeg?: number;
+  onChange: (lat: number, lon: number) => void;
+  onDistanceOriginChange?: (lat: number, lon: number) => void;
+}) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
-  const markerRef = useRef<L.CircleMarker | null>(null);
+  const markerRef = useRef<L.Marker | null>(null);
+  const distanceMarkerRef = useRef<L.Marker | null>(null);
   const circleRef = useRef<L.Circle | null>(null);
+  const radarPolygonRef = useRef<L.Polygon | null>(null);
   const latestOnChangeRef = useRef(props.onChange);
-  const latestMapPropsRef = useRef({ lat: props.lat, lon: props.lon, radiusKm: props.radiusKm });
-  const isDraggingMapRef = useRef(false);
+  const latestDistanceOriginChangeRef = useRef(props.onDistanceOriginChange);
+  const latestMapPropsRef = useRef({ lat: props.lat, lon: props.lon, radiusKm: props.radiusKm, distanceOrigin: props.distanceOrigin, povDeg: props.povDeg, mode: props.mode });
   const isFittingMapRef = useRef(false);
   const lastMapUpdateRef = useRef<{ lat: number; lon: number } | null>(null);
+  const [pinMode, setPinMode] = useState<"center" | "origin" | null>(null);
+  const pinModeRef = useRef<"center" | "origin" | null>(null);
 
   latestOnChangeRef.current = props.onChange;
-  latestMapPropsRef.current = { lat: props.lat, lon: props.lon, radiusKm: props.radiusKm };
+  latestDistanceOriginChangeRef.current = props.onDistanceOriginChange;
+  latestMapPropsRef.current = { lat: props.lat, lon: props.lon, radiusKm: props.radiusKm, distanceOrigin: props.distanceOrigin, povDeg: props.povDeg, mode: props.mode };
+
+  const updateRadarShape = useCallback((lat: number, lon: number, radiusKm: number, distanceOrigin?: DistanceOrigin, povDeg = 0, mode: ProductMode = "flight") => {
+    if (mode === "marine") {
+      circleRef.current?.setStyle({ opacity: 0, fillOpacity: 0 });
+      const origin = distanceOrigin || { lat, lon, label: "Window" };
+      const polygon = marineRadarPolygon({ lat, lon, radiusKm, distanceOrigin: origin, povDeg });
+      if (radarPolygonRef.current) {
+        radarPolygonRef.current.setLatLngs(polygon);
+      }
+      distanceMarkerRef.current?.setLatLng([origin.lat, origin.lon]);
+      if (!distanceMarkerRef.current && mapRef.current) {
+        distanceMarkerRef.current = L.marker([origin.lat, origin.lon], {
+          draggable: true,
+          icon: mapPinIcon("origin"),
+          title: "POV point"
+        }).addTo(mapRef.current);
+        distanceMarkerRef.current.on("dragend", () => {
+          const position = distanceMarkerRef.current?.getLatLng();
+          if (!position) return;
+          const next = { lat: Number(position.lat.toFixed(6)), lon: Number(position.lng.toFixed(6)) };
+          const latest = latestMapPropsRef.current;
+          const nextOrigin = { ...(latest.distanceOrigin || { label: "Window" }), lat: next.lat, lon: next.lon };
+          updateRadarShape(latest.lat, latest.lon, latest.radiusKm, nextOrigin, latest.povDeg, latest.mode);
+          latestDistanceOriginChangeRef.current?.(next.lat, next.lon);
+        });
+      }
+    } else {
+      circleRef.current?.setStyle({ opacity: 1, fillOpacity: 0.22 });
+      circleRef.current?.setLatLng([lat, lon]);
+      circleRef.current?.setRadius(radiusKm * 1000);
+      radarPolygonRef.current?.setLatLngs([]);
+      distanceMarkerRef.current?.remove();
+      distanceMarkerRef.current = null;
+    }
+  }, []);
 
   const fitRadiusToMap = useCallback((map: L.Map, lat: number, lon: number, radiusKm: number, animate = false) => {
     const center = L.latLng(lat, lon);
-    const bounds = center.toBounds(Math.max(1, radiusKm) * 2000);
+    const distanceOrigin = latestMapPropsRef.current.distanceOrigin;
+    const mode = latestMapPropsRef.current.mode;
+    const polygon = mode === "marine"
+      ? marineRadarPolygon({ lat, lon, radiusKm, distanceOrigin: distanceOrigin || { lat, lon }, povDeg: latestMapPropsRef.current.povDeg || 0 })
+      : [];
+    const bounds = polygon.length
+      ? L.latLngBounds([...polygon, ...(distanceOrigin ? [[distanceOrigin.lat, distanceOrigin.lon] as [number, number]] : [])])
+      : center.toBounds(Math.max(1, radiusKm) * 2000);
     const zoom = map.getBoundsZoom(bounds, false, [28, 28]);
     isFittingMapRef.current = true;
-    map.setView(center, Math.min(13, zoom), {
+    map.setView(bounds.getCenter(), Math.min(13, zoom), {
       animate,
       duration: 0.18
     });
@@ -2258,13 +2633,18 @@ function MapPicker(props: { lat: number; lon: number; radiusKm: number; onChange
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19
     }).addTo(map);
-    markerRef.current = L.circleMarker([props.lat, props.lon], {
-      radius: 8,
-      weight: 3,
-      color: "#3c2415",
-      fillColor: "#ffffff",
-      fillOpacity: 1
+    markerRef.current = L.marker([props.lat, props.lon], {
+      draggable: true,
+      icon: mapPinIcon("center"),
+      title: "Radar center"
     }).addTo(map);
+    if (props.mode === "marine") {
+      distanceMarkerRef.current = L.marker([props.distanceOrigin?.lat || props.lat, props.distanceOrigin?.lon || props.lon], {
+        draggable: true,
+        icon: mapPinIcon("origin"),
+        title: "POV point"
+      }).addTo(map);
+    }
     circleRef.current = L.circle([props.lat, props.lon], {
       radius: props.radiusKm * 1000,
       color: "#3c2415",
@@ -2272,60 +2652,88 @@ function MapPicker(props: { lat: number; lon: number; radiusKm: number; onChange
       fillColor: "#c1b4ac",
       fillOpacity: 0.22
     }).addTo(map);
+    radarPolygonRef.current = L.polygon([], {
+      color: "#0f62a3",
+      weight: 2,
+      fillColor: "#17265d",
+      fillOpacity: 0.18
+    }).addTo(map);
+    updateRadarShape(props.lat, props.lon, props.radiusKm, props.distanceOrigin, props.povDeg, props.mode);
     fitRadiusToMap(map, props.lat, props.lon, props.radiusKm, false);
-    map.on("movestart", () => {
-      isDraggingMapRef.current = true;
-    });
-    map.on("move", () => {
-      if (isFittingMapRef.current) return;
-      const center = map.getCenter();
-      markerRef.current?.setLatLng(center);
-      circleRef.current?.setLatLng(center);
-    });
-    map.on("moveend", () => {
-      if (isFittingMapRef.current) {
-        const latest = latestMapPropsRef.current;
-        markerRef.current?.setLatLng([latest.lat, latest.lon]);
-        circleRef.current?.setLatLng([latest.lat, latest.lon]);
-        return;
-      }
-      const center = map.getCenter();
-      const next = { lat: Number(center.lat.toFixed(6)), lon: Number(center.lng.toFixed(6)) };
+    markerRef.current.on("dragend", () => {
+      const position = markerRef.current?.getLatLng();
+      if (!position) return;
+      const next = { lat: Number(position.lat.toFixed(6)), lon: Number(position.lng.toFixed(6)) };
       lastMapUpdateRef.current = next;
-      markerRef.current?.setLatLng(center);
-      circleRef.current?.setLatLng(center);
+      updateRadarShape(next.lat, next.lon, latestMapPropsRef.current.radiusKm, latestMapPropsRef.current.distanceOrigin, latestMapPropsRef.current.povDeg, latestMapPropsRef.current.mode);
       latestOnChangeRef.current(next.lat, next.lon);
-      window.setTimeout(() => {
-        isDraggingMapRef.current = false;
-      }, 0);
+    });
+    distanceMarkerRef.current?.on("dragend", () => {
+      const position = distanceMarkerRef.current?.getLatLng();
+      if (!position) return;
+      const next = { lat: Number(position.lat.toFixed(6)), lon: Number(position.lng.toFixed(6)) };
+      const latest = latestMapPropsRef.current;
+      const nextOrigin = { ...(latest.distanceOrigin || { label: "Window" }), lat: next.lat, lon: next.lon };
+      updateRadarShape(latest.lat, latest.lon, latest.radiusKm, nextOrigin, latest.povDeg, latest.mode);
+      latestDistanceOriginChangeRef.current?.(next.lat, next.lon);
     });
     map.on("click", (event) => {
+      if (!pinModeRef.current) return;
       lastMapUpdateRef.current = { lat: Number(event.latlng.lat.toFixed(6)), lon: Number(event.latlng.lng.toFixed(6)) };
-      map.panTo(event.latlng);
-      latestOnChangeRef.current(event.latlng.lat, event.latlng.lng);
+      if (pinModeRef.current === "origin" && latestMapPropsRef.current.mode === "marine") {
+        distanceMarkerRef.current?.setLatLng(event.latlng);
+        latestDistanceOriginChangeRef.current?.(event.latlng.lat, event.latlng.lng);
+      } else {
+        markerRef.current?.setLatLng(event.latlng);
+        updateRadarShape(event.latlng.lat, event.latlng.lng, latestMapPropsRef.current.radiusKm, latestMapPropsRef.current.distanceOrigin, latestMapPropsRef.current.povDeg, latestMapPropsRef.current.mode);
+        latestOnChangeRef.current(event.latlng.lat, event.latlng.lng);
+      }
     });
     mapRef.current = map;
     return () => {
       map.remove();
       mapRef.current = null;
     };
-  }, [fitRadiusToMap]);
+  }, [fitRadiusToMap, props.distanceOrigin, props.lat, props.lon, props.mode, props.povDeg, props.radiusKm, updateRadarShape]);
 
   useEffect(() => {
     if (!mapRef.current || !markerRef.current || !circleRef.current) return;
     const lastMapUpdate = lastMapUpdateRef.current;
     const isSameMapUpdate = lastMapUpdate && lastMapUpdate.lat === props.lat && lastMapUpdate.lon === props.lon;
-    if (isDraggingMapRef.current || isSameMapUpdate) {
+    if (isSameMapUpdate) {
       lastMapUpdateRef.current = null;
       return;
     }
     markerRef.current.setLatLng([props.lat, props.lon]);
-    circleRef.current.setLatLng([props.lat, props.lon]);
-    circleRef.current.setRadius(props.radiusKm * 1000);
-    fitRadiusToMap(mapRef.current, props.lat, props.lon, props.radiusKm, true);
-  }, [fitRadiusToMap, props.lat, props.lon, props.radiusKm]);
+    if (props.mode === "marine") {
+      distanceMarkerRef.current?.setLatLng([props.distanceOrigin?.lat || props.lat, props.distanceOrigin?.lon || props.lon]);
+    }
+    updateRadarShape(props.lat, props.lon, props.radiusKm, props.distanceOrigin, props.povDeg, props.mode);
+  }, [props.distanceOrigin, props.lat, props.lon, props.mode, props.povDeg, props.radiusKm, updateRadarShape]);
 
-  return <div ref={containerRef} style={{ height: "220px", overflow: "hidden", borderRadius: "15px", border: "1px solid rgba(60, 36, 21, 0.2)" }} />;
+  return (
+    <div style={{ display: "grid", gap: "8px" }}>
+      {props.mode === "marine" ? (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
+          {(["center", "origin"] as const).map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              onClick={() => {
+                const nextMode = pinMode === mode ? null : mode;
+                pinModeRef.current = nextMode;
+                setPinMode(nextMode);
+              }}
+              style={{ minHeight: "32px", borderRadius: "8px", border: "1px solid var(--border-mid)", background: pinMode === mode ? "var(--primary)" : "rgba(255,255,255,0.6)", color: pinMode === mode ? "#fff" : "var(--foreground)", fontSize: "12px", fontWeight: 800 }}
+            >
+              {mode === "center" ? "Move radar center" : "Move POV point"}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      <div ref={containerRef} style={{ height: "220px", overflow: "hidden", borderRadius: "15px", border: "1px solid rgba(60, 36, 21, 0.2)" }} />
+    </div>
+  );
 }
 
 function LocationSettings(props: {
@@ -2338,7 +2746,11 @@ function LocationSettings(props: {
         lat={props.config.lat}
         lon={props.config.lon}
         radiusKm={props.config.radiusKm}
+        mode={props.config.productMode}
+        distanceOrigin={props.config.distanceOrigin}
+        povDeg={props.config.povDeg}
         onChange={(lat, lon) => props.updateConfig((current) => ({ ...current, lat: Number(lat.toFixed(6)), lon: Number(lon.toFixed(6)) }))}
+        onDistanceOriginChange={(lat, lon) => props.updateConfig((current) => ({ ...current, distanceOrigin: { ...current.distanceOrigin, lat: Number(lat.toFixed(6)), lon: Number(lon.toFixed(6)) } }))}
       />
       <button
         type="button"
@@ -2348,19 +2760,114 @@ function LocationSettings(props: {
         Use my location
       </button>
       <div style={{ display: "grid", gap: "14px", gridTemplateColumns: "1fr 1fr" }}>
-        <Field label="Latitude">
+        <Field label={props.config.productMode === "marine" ? "Radar center lat" : "Latitude"}>
           <TextInput value={props.config.lat} inputMode="decimal" onChange={(event) => props.updateConfig((current) => ({ ...current, lat: Number(event.target.value) || 0 }))} />
         </Field>
-        <Field label="Longitude">
+        <Field label={props.config.productMode === "marine" ? "Radar center lon" : "Longitude"}>
           <TextInput value={props.config.lon} inputMode="decimal" onChange={(event) => props.updateConfig((current) => ({ ...current, lon: Number(event.target.value) || 0 }))} />
         </Field>
       </div>
+      {props.config.productMode === "marine" ? (
+        <>
+          <div style={{ display: "grid", gap: "14px", gridTemplateColumns: "1fr 1fr" }}>
+            <Field label="POV lat">
+              <TextInput value={props.config.distanceOrigin.lat} inputMode="decimal" onChange={(event) => props.updateConfig((current) => ({ ...current, distanceOrigin: { ...current.distanceOrigin, lat: Number(event.target.value) || 0 } }))} />
+            </Field>
+            <Field label="POV lon">
+              <TextInput value={props.config.distanceOrigin.lon} inputMode="decimal" onChange={(event) => props.updateConfig((current) => ({ ...current, distanceOrigin: { ...current.distanceOrigin, lon: Number(event.target.value) || 0 } }))} />
+            </Field>
+          </div>
+          <div style={{ padding: "10px 12px", borderRadius: "8px", border: "1px solid var(--border-mid)", background: "rgba(255,255,255,0.46)", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>
+            Radar heading {Math.round(marineForwardBearingClient(props.config))} deg. Distance text is measured from the POV point to each vessel.
+          </div>
+        </>
+      ) : null}
       <div style={{ display: "grid", gap: "6px" }}>
-        <SliderField label="Radius" value={props.config.radiusKm} min={1} max={100} suffix=" km" onChange={(value) => props.updateConfig((current) => ({ ...current, radiusKm: value }))} />
+        <SliderField
+          label="Radius"
+          value={props.config.radiusKm}
+          min={props.config.productMode === "marine" ? 0.5 : 1}
+          max={props.config.productMode === "marine" ? 3 : 100}
+          step={props.config.productMode === "marine" ? 0.1 : 1}
+          suffix=" km"
+          formatValue={(value) => props.config.productMode === "marine" ? value.toFixed(1) : String(Math.round(value))}
+          onChange={(value) => props.updateConfig((current) => ({ ...current, radiusKm: normalizeRadiusKm(value, current.productMode) }))}
+        />
         <div style={{ fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>
-          Measured from the center point to the edge. A 10 km radius covers about 20 km across.
+          {props.config.productMode === "marine" ? "Marine radar radius can be tuned from 500 m to 3 km." : "Measured from the center point to the edge. A 10 km radius covers about 20 km across."}
         </div>
       </div>
+    </div>
+  );
+}
+
+function MarineVesselsSettings(props: {
+  config: Config;
+  preview: PreviewState;
+  busy: boolean;
+  onForceFetch: () => void;
+  updateConfig: React.Dispatch<React.SetStateAction<Config>>;
+}) {
+  const liveSource = props.preview.liveSourceStatus;
+  const source = liveSource?.ok === false ? "Missing AIS" : "BarentsWatch AIS";
+  return (
+    <div style={{ display: "grid", gap: "14px" }}>
+      <div style={{ ...cardStyle(), display: "grid", gap: "10px" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
+          <div>
+            <div style={{ fontSize: "14px", fontWeight: 750 }}>AIS source</div>
+            <div style={{ marginTop: "4px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>
+              {liveSource?.ok === false ? liveSource.error || "BarentsWatch AIS credentials are missing." : props.preview.flights.length ? `${props.preview.flights.length} vessels in the latest payload.` : "No vessels in the selected radar area."}
+            </div>
+          </div>
+          <StatusPill label={source} tone={liveSource?.ok === false ? "error" : "good"} />
+        </div>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: "10px", alignItems: "stretch" }}>
+        <SliderField label="Fetch interval" value={props.config.device.pollSeconds} min={30} max={900} step={15} suffix=" s" onChange={(value) => props.updateConfig((current) => ({ ...current, device: { ...current.device, pollSeconds: value } }))} />
+        <button
+          type="button"
+          onClick={props.onForceFetch}
+          disabled={props.busy}
+          style={{ minWidth: "92px", borderRadius: "8px", border: "1px solid var(--border-mid)", background: "var(--card)", color: "var(--foreground)", fontSize: "13px", fontWeight: 850, opacity: props.busy ? 0.55 : 1 }}
+        >
+          Fetch now
+        </button>
+      </div>
+      <SliderField label="Vessel display duration" value={props.config.device.displayCycleSeconds} min={2} max={30} suffix=" s" onChange={(value) => props.updateConfig((current) => ({ ...current, device: { ...current.device, displayCycleSeconds: value } }))} />
+      <SliderField label="Text scroll speed" value={props.config.device.scrollPixelsPerSecond} min={2} max={30} suffix=" px/s" onChange={(value) => props.updateConfig((current) => ({ ...current, device: { ...current.device, scrollPixelsPerSecond: value } }))} />
+    </div>
+  );
+}
+
+function MarineRadarSettings(props: {
+  config: Config;
+  updateConfig: React.Dispatch<React.SetStateAction<Config>>;
+  saveCustomColorSet: <T extends object>(group: keyof ColorCustomSets, values: T) => void;
+}) {
+  const visibleColorKeys: Array<keyof Config["device"]["lineColors"]> = ["routeProgress", "airline", "progress", "route"];
+  return (
+    <div style={{ display: "grid", gap: "14px" }}>
+      <ColorPresetManager<AirspaceColors>
+        defaultValues={defaultMarineColors}
+        customValues={props.config.device.colorPresets.airspace}
+        currentValues={props.config.device.lineColors}
+        onApply={(values) => props.updateConfig((current) => ({ ...current, device: { ...current.device, lineColors: values } }))}
+        onSaveCustom={(values) => props.saveCustomColorSet("airspace", values)}
+      >
+        <div style={{ display: "grid", gap: "12px", gridTemplateColumns: "1fr 1fr" }}>
+          {visibleColorKeys.map((key) => (
+            <ColorPicker
+              key={key}
+              label={marineColorLabels[key] ?? key}
+              value={props.config.device.lineColors[key]}
+              onChange={(nextValue) => props.updateConfig((current) => ({ ...current, device: { ...current.device, lineColors: { ...current.device.lineColors, [key]: nextValue } } }))}
+            />
+          ))}
+        </div>
+      </ColorPresetManager>
+      <SliderField label="Radar POV" value={props.config.povDeg} min={0} max={359} suffix=" deg" onChange={(value) => props.updateConfig((current) => ({ ...current, povDeg: value }))} />
+      <SliderField label="Radar refresh hold" value={props.config.device.displayCycleSeconds} min={2} max={30} suffix=" s" onChange={(value) => props.updateConfig((current) => ({ ...current, device: { ...current.device, displayCycleSeconds: value } }))} />
     </div>
   );
 }
@@ -2418,6 +2925,8 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
     renderCanvas.height = panelHeight;
     const renderCtx = renderCanvas.getContext("2d");
     if (!renderCtx) return;
+    ctx.imageSmoothingEnabled = false;
+    renderCtx.imageSmoothingEnabled = false;
 
     renderCtx.clearRect(0, 0, panelWidth, panelHeight);
     renderCtx.fillStyle = props.screenState.active ? "#000000" : "#111111";
@@ -2474,6 +2983,8 @@ function EmulatorPreview(props: { config: Config; preview: PreviewState; screenS
           clockLastMinuteRef.current = completedMinutes;
         }
         drawClockLayoutExact(renderCtx, props.config, clockFallingMinuteIndexRef.current, clockFallingStartedAtRef.current, now);
+      } else if (activeFlight && (normalizeProductMode(props.config.productMode) === "marine" || props.preview.mode === "marine")) {
+        drawMarineLayoutExact(renderCtx, activeFlight, flights, props.config, tickerStartedAtRef.current, now);
       } else if (activeFlight) {
         const isFollowLayout = activeFlight.layout === "follow_cycle" || activeFlight.layout === "follow_status";
         const detailCycleStartedAt = isFollowLayout ? followPhaseStartedAtRef.current : currentFlightCycleStartedAt;
@@ -2590,6 +3101,8 @@ export default function App() {
   const [status, setStatus] = useState("Laster innstillinger...");
   const [statusTone, setStatusTone] = useState<"idle" | "dirty" | "error" | "success">("idle");
   const [fr24Input, setFr24Input] = useState("");
+  const [barentsWatchClientIdInput, setBarentsWatchClientIdInput] = useState("");
+  const [barentsWatchClientSecretInput, setBarentsWatchClientSecretInput] = useState("");
   const [activeSection, setActiveSection] = useState(0);
   const [busy, setBusy] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
@@ -2605,6 +3118,9 @@ export default function App() {
   const pullRefreshRef = useRef({ active: false, startY: 0, startX: 0, distance: 0, slide: null as HTMLElement | null });
   const isDirty = configSignature(config) !== savedConfigSignature;
   const fr24Enabled = Boolean(config.fr24Key?.screenConfigured);
+  const barentsWatchEnabled = Boolean(config.barentsWatchKey?.screenConfigured);
+  const productMode = normalizeProductMode(config.productMode);
+  const activeSections = productMode === "marine" ? marineSections : flightSections;
 
   useEffect(() => {
     let mounted = true;
@@ -2626,17 +3142,18 @@ export default function App() {
     if (!node) return;
     const handleScroll = () => {
       const slideIndex = Math.round(node.scrollLeft / node.clientWidth);
-      setActiveSection(sectionIndexForSlide(slideIndex));
+      setActiveSection(sectionIndexForSlide(slideIndex, activeSections));
     };
     node.addEventListener("scroll", handleScroll, { passive: true });
     return () => node.removeEventListener("scroll", handleScroll);
-  }, [initialLoading]);
+  }, [activeSections, initialLoading]);
 
   useEffect(() => {
     const node = slidesRef.current;
     if (!node) return;
-    node.scrollLeft = slideIndexForSection(0) * node.clientWidth;
-  }, [initialLoading]);
+    setActiveSection(0);
+    node.scrollLeft = slideIndexForSection(0, activeSections) * node.clientWidth;
+  }, [activeSections, initialLoading]);
 
   useEffect(() => {
     if (!justPairedFromLocation()) return;
@@ -2696,6 +3213,25 @@ export default function App() {
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not load display data";
       setPreview((current) => ({ ...current, meta: message, error: message }));
+    }
+  }
+
+  async function forceDisplayFetch() {
+    setBusy(true);
+    try {
+      await apiFetch<{ ok: boolean; updatedAt?: string }>("/api/display-refresh", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}"
+      });
+      await loadPreview();
+      setStatus(`AIS hentet ${new Date().toLocaleTimeString("nb-NO")}`);
+      setStatusTone("success");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not fetch AIS data");
+      setStatusTone("error");
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -2777,7 +3313,7 @@ export default function App() {
       const saved = await apiFetch<Partial<Config> & { screenState?: ScreenState; soundState?: SoundState }>("/api/config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(config)
+        body: JSON.stringify(configForSave(config))
       });
       const nextConfig = normalizeConfig(saved);
       setConfig(nextConfig);
@@ -2811,6 +3347,62 @@ export default function App() {
       setStatusTone("success");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Could not save FR24 key");
+      setStatusTone("error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveBarentsWatchKey(clientId: string, clientSecret: string) {
+    setBusy(true);
+    try {
+      const saved = await apiFetch<Fr24KeyStatus>("/api/account/barentswatch-key", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clientId, clientSecret })
+      });
+      setConfig((current) => ({
+        ...current,
+        barentsWatchKey: { ...saved, configured: true, screenConfigured: true, source: "account" }
+      }));
+      setStatus("BarentsWatch key saved");
+      setStatusTone("success");
+      await loadPreview();
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not save BarentsWatch key");
+      setStatusTone("error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveScreenProductMode(screenId: string, productMode: ProductMode) {
+    setBusy(true);
+    try {
+      const saved = await apiFetch<{ screenId: string; productMode: ProductMode }>(`/api/screens/${encodeURIComponent(screenId)}/product-mode`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ productMode })
+      });
+      setConfig((current) => ({
+        ...current,
+        productMode: current.screenId === saved.screenId ? saved.productMode : current.productMode,
+        account: current.account
+          ? {
+              ...current.account,
+              screens: (current.account.screens || []).map((screen) => (
+                screen.screenId === saved.screenId ? { ...screen, productMode: saved.productMode } : screen
+              ))
+            }
+          : current.account
+      }));
+      setStatus(`SkyFrame mode set to ${productModeLabel(saved.productMode)}`);
+      setStatusTone("success");
+      if (displayScreenId === saved.screenId) {
+        await Promise.allSettled([loadConfig(), loadPreview()]);
+      }
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not update screen mode");
       setStatusTone("error");
     } finally {
       setBusy(false);
@@ -2899,7 +3491,7 @@ export default function App() {
   }
 
   function activateSection(index: number) {
-    slidesRef.current?.scrollTo({ left: slideIndexForSection(index) * (slidesRef.current?.clientWidth ?? 0), behavior: "auto" });
+    slidesRef.current?.scrollTo({ left: slideIndexForSection(index, activeSections) * (slidesRef.current?.clientWidth ?? 0), behavior: "auto" });
     setActiveSection(index);
   }
 
@@ -3103,17 +3695,69 @@ export default function App() {
             </section>
 
             <section style={{ ...cardStyle("14px"), display: "grid", gap: "12px" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
+                <div>
+                  <div style={{ fontSize: "14px", fontWeight: 800 }}>BarentsWatch AIS</div>
+                  <div style={{ marginTop: "3px", fontSize: "12px", color: "var(--muted-foreground)", lineHeight: 1.45 }}>Personal AIS credentials for marine screens on this account.</div>
+                </div>
+                <StatusPill label={barentsWatchEnabled ? "Connected" : "Missing"} tone={barentsWatchEnabled ? "good" : "warn"} />
+              </div>
+              <Field label={barentsWatchEnabled ? "Replace BarentsWatch credentials" : "Account BarentsWatch credentials"}>
+                <TextInput value={barentsWatchClientIdInput} placeholder="Client ID" onChange={(event) => setBarentsWatchClientIdInput(event.target.value)} />
+              </Field>
+              <Field label="Client secret">
+                <TextInput value={barentsWatchClientSecretInput} placeholder="Client secret" onChange={(event) => setBarentsWatchClientSecretInput(event.target.value)} />
+              </Field>
+              <button
+                type="button"
+                disabled={busy || !barentsWatchClientIdInput.trim() || !barentsWatchClientSecretInput.trim()}
+                onClick={() => {
+                  const clientId = barentsWatchClientIdInput.trim();
+                  const clientSecret = barentsWatchClientSecretInput.trim();
+                  setBarentsWatchClientIdInput("");
+                  setBarentsWatchClientSecretInput("");
+                  void saveBarentsWatchKey(clientId, clientSecret);
+                }}
+                style={{ height: "42px", borderRadius: "8px", border: 0, background: "var(--primary)", color: "#fff", fontSize: "14px", fontWeight: 800, opacity: busy || !barentsWatchClientIdInput.trim() || !barentsWatchClientSecretInput.trim() ? 0.55 : 1 }}
+              >
+                Save BarentsWatch key
+              </button>
+            </section>
+
+            <section style={{ ...cardStyle("14px"), display: "grid", gap: "12px" }}>
               <div>
                 <div style={{ fontSize: "14px", fontWeight: 800 }}>My screens</div>
                 <div style={{ marginTop: "3px", fontSize: "12px", color: "var(--muted-foreground)" }}>{accountScreens.length ? `${accountScreens.length} paired screen${accountScreens.length === 1 ? "" : "s"}` : "No paired screens yet"}</div>
               </div>
               <div style={{ display: "grid", gap: "8px" }}>
-                {accountScreens.map((screen) => (
-                  <button key={screen.screenId} type="button" onClick={() => { window.location.href = `/?screenId=${encodeURIComponent(screen.screenId)}`; }} style={{ textAlign: "left", display: "grid", gap: "3px", padding: "10px 12px", borderRadius: "8px", border: "1px solid var(--border-mid)", background: screen.screenId === displayScreenId ? "rgba(70, 41, 24, 0.1)" : "rgba(255,255,255,0.52)", color: "var(--foreground)", cursor: "pointer" }}>
-                    <span style={{ fontSize: "13px", fontWeight: 800 }}>{screen.label || "Unnamed device"}</span>
-                    <span style={{ fontSize: "11px", color: "var(--muted-foreground)" }}>Screen {screen.screenId}</span>
-                  </button>
-                ))}
+                {accountScreens.map((screen) => {
+                  const screenProductMode = normalizeProductMode(screen.productMode);
+                  const isActiveScreen = screen.screenId === displayScreenId;
+                  return (
+                    <div key={screen.screenId} style={{ display: "grid", gap: "10px", padding: "10px 12px", borderRadius: "8px", border: "1px solid var(--border-mid)", background: isActiveScreen ? "rgba(70, 41, 24, 0.1)" : "rgba(255,255,255,0.52)", color: "var(--foreground)" }}>
+                      <button type="button" onClick={() => { window.location.href = `/?screenId=${encodeURIComponent(screen.screenId)}`; }} style={{ textAlign: "left", display: "grid", gap: "3px", padding: 0, border: 0, background: "transparent", color: "var(--foreground)", cursor: "pointer" }}>
+                        <span style={{ fontSize: "13px", fontWeight: 800 }}>{screen.label || "Unnamed device"}</span>
+                        <span style={{ fontSize: "11px", color: "var(--muted-foreground)" }}>Screen {screen.screenId} · {productModeLabel(screenProductMode)}</span>
+                      </button>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }} aria-label={`SkyFrame mode for ${screen.label || screen.screenId}`}>
+                        {(["flight", "marine"] as ProductMode[]).map((mode) => {
+                          const selected = screenProductMode === mode;
+                          return (
+                            <button
+                              key={mode}
+                              type="button"
+                              disabled={busy || selected}
+                              onClick={() => void saveScreenProductMode(screen.screenId, mode)}
+                              style={{ minHeight: "34px", borderRadius: "999px", border: selected ? "1px solid rgba(0,184,112,0.34)" : "1px solid var(--border-mid)", background: selected ? "rgba(0,184,112,0.12)" : "rgba(255,255,255,0.54)", color: selected ? "#116b3b" : "var(--foreground)", fontSize: "12px", fontWeight: 850, cursor: busy || selected ? "default" : "pointer", opacity: busy && !selected ? 0.6 : 1 }}
+                            >
+                              {mode === "flight" ? "Flight" : "Marine"}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </section>
 
@@ -3174,7 +3818,7 @@ export default function App() {
         }}
       >
         <div style={appStyles.navTrack}>
-          {sections.map((section, index) => (
+          {activeSections.map((section, index) => (
             <button
               data-section-index={index}
               key={section.id}
@@ -3261,14 +3905,23 @@ export default function App() {
                   <SimpleSwitchControl checked={screenState.active} disabled={busy} label={screenState.active ? "Turn screen off" : "Turn screen on"} onChange={() => void toggleScreen()} />
                 </div>
               </div>
-              <DisplayModePicker
-                value={config.device.displayMode}
-                fr24Enabled={fr24Enabled}
-                onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, displayMode: value, airspaceMonitoringEnabled: airspaceMonitoringForMode(value) } }))}
-              />
+              {productMode === "marine" ? (
+                <MarineDisplayModeCard
+                  value={config.device.displayMode}
+                  onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, displayMode: value, airspaceMonitoringEnabled: value !== "clock" } }))}
+                />
+              ) : (
+                <DisplayModePicker
+                  value={config.device.displayMode}
+                  fr24Enabled={fr24Enabled}
+                  onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, displayMode: value, airspaceMonitoringEnabled: airspaceMonitoringForMode(value) } }))}
+                />
+              )}
               <SliderField label="Day brightness" value={config.device.brightness} min={1} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, brightness: value } }))} />
               <SliderField label="Night brightness" value={config.device.nightMode.brightness} min={0} max={100} suffix="%" onChange={(value) => updateConfig((current) => ({ ...current, device: { ...current.device, nightMode: { ...current.device.nightMode, brightness: value } } }))} />
-              <DisplayStatusCard config={config} screenState={screenState} preview={preview} statusTone={statusTone} />
+              {productMode === "marine"
+                ? <MarineStatusCard config={config} screenState={screenState} preview={preview} statusTone={statusTone} />
+                : <DisplayStatusCard config={config} screenState={screenState} preview={preview} statusTone={statusTone} />}
               <div style={{ ...cardStyle(), display: "grid", gap: "12px" }}>
                 <div style={{ fontSize: "14px", fontWeight: 750 }}>Device details</div>
                 <Field label="Device name">
@@ -3369,6 +4022,27 @@ export default function App() {
             </div>
           </section>
 
+          {productMode === "marine" ? (
+          <section data-refresh-slide style={slideStyle("vessels")}>
+            <MarineVesselsSettings config={config} preview={preview} busy={busy} onForceFetch={() => void forceDisplayFetch()} updateConfig={updateConfig} />
+          </section>
+          ) : null}
+
+          {productMode === "marine" ? (
+          <section data-refresh-slide style={slideStyle("marine_area")}>
+            <div style={{ display: "grid", gap: "14px" }}>
+              <LocationSettings config={config} updateConfig={updateConfig} />
+            </div>
+          </section>
+          ) : null}
+
+          {productMode === "marine" ? (
+          <section data-refresh-slide style={slideStyle("radar")}>
+            <MarineRadarSettings config={config} updateConfig={updateConfig} saveCustomColorSet={saveCustomColorSet} />
+          </section>
+          ) : null}
+
+          {productMode === "flight" ? (
           <section data-refresh-slide style={slideStyle("aircraft")}>
             <div style={{ display: "grid", gap: "14px" }}>
               <div style={{ ...cardStyle(), display: "grid", gap: "12px" }}>
@@ -3504,7 +4178,9 @@ export default function App() {
               </Advanced>
             </div>
           </section>
+          ) : null}
 
+          {productMode === "flight" ? (
           <section data-refresh-slide style={slideStyle("timetable")}>
             <div style={{ display: "grid", gap: "14px" }}>
               <Field label="Airport for board">
@@ -3543,6 +4219,7 @@ export default function App() {
               </Advanced>
             </div>
           </section>
+          ) : null}
 
           <section data-refresh-slide style={slideStyle("api")}>
             <div style={{ display: "grid", gap: "14px" }}>

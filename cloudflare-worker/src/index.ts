@@ -28,17 +28,31 @@ export interface Env {
   LOGO_BASE_URL?: string;
   GEOCODER_REVERSE_URL?: string;
   GEOCODER_SEARCH_URL?: string;
+  BARENTSWATCH_SCOPE?: string;
+  BARENTSWATCH_TOKEN_URL?: string;
+  BARENTSWATCH_LATEST_URL?: string;
 }
 
 type Config = {
+  productMode?: ProductMode;
   lat: number;
   lon: number;
   radiusKm: number;
+  distanceOrigin?: DistanceOrigin;
+  povDeg?: number;
   homeAirportIata?: string;
   follow?: FollowSettings;
   label?: string;
   device?: DeviceSettings;
   updatedAt?: string;
+};
+
+type ProductMode = "flight" | "marine";
+
+type DistanceOrigin = {
+  lat: number;
+  lon: number;
+  label?: string;
 };
 
 type RequestContext = {
@@ -269,7 +283,7 @@ type DisplayFlight = {
   onGround?: boolean;
   distanceKm: number;
   bearingDeg: number;
-  source?: "fr24" | "avinor" | "aviationstack";
+  source?: "fr24" | "avinor" | "aviationstack" | "barentswatch" | "mock";
   status?: string;
   gate?: string;
   gateMessage?: string;
@@ -283,12 +297,43 @@ type DisplayFlight = {
   locationLabel?: string;
   locationValue?: string;
   routeProgress?: number;
+  radarX?: number;
+  radarY?: number;
+  radarHeadingDeg?: number;
 };
 
 type LiveSourceStatus = {
-  source: "fr24";
+  source: "fr24" | "barentswatch" | "mock";
   ok: boolean;
   error?: string;
+};
+
+type MarineVessel = {
+  vesselName?: string;
+  mmsi?: string;
+  imo?: string;
+  vesselType?: string;
+  destination?: string;
+  speedKnots?: number;
+  courseDeg?: number;
+  headingDeg?: number;
+  lat: number;
+  lon: number;
+  status?: string;
+  eta?: string;
+  distanceKm: number;
+  searchDistanceKm: number;
+  bearingDeg: number;
+  radarX?: number;
+  radarY?: number;
+  radarHeadingDeg?: number;
+  raw?: Record<string, unknown>;
+  source: "barentswatch" | "mock";
+};
+
+type BarentsWatchCredentials = {
+  clientId: string;
+  clientSecret: string;
 };
 
 type ClockPayload = {
@@ -466,6 +511,8 @@ const SCREEN_STATE_KEY = "screen-state:v1";
 const HOMEY_TOKEN_KEY = "homey-token:v1";
 const ACCOUNT_FR24_SECRET_KEY = "secret:fr24-api-key:v1";
 const ACCOUNT_FR24_USAGE_CACHE_KEY = "fr24-usage-cache:v1";
+const ACCOUNT_BARENTSWATCH_SECRET_KEY = "secret:barentswatch-credentials:v1";
+const ACCOUNT_BARENTSWATCH_TOKEN_KEY = "barentswatch:token:v1";
 const SOUND_STATE_KEY = "sound-state:v1";
 const DEVICE_STATUS_KEY = "device-status:v1";
 const DEVICE_COMMAND_KEY = "device-command:v1";
@@ -586,6 +633,15 @@ const DEFAULT_AIRSPACE_COLORS: AirspaceColors = {
   routeProgress: "#00f900"
 };
 
+const DEFAULT_MARINE_COLORS: AirspaceColors = {
+  airline: "#ffc777",
+  route: "#ffc777",
+  aircraft: "#ffc777",
+  context: "#ffc777",
+  progress: "#a6a6a6",
+  routeProgress: "#17265d"
+};
+
 const DEFAULT_CLOCK_COLORS: ClockColors = {
   clockTopColor: "#ffc777",
   clockColor: "#f8ff00"
@@ -698,10 +754,13 @@ export default {
       if (url.pathname === "/api/provision/claim" && request.method === "POST") return claimProvisioning(request, env, context);
       if (url.pathname.match(/^\/api\/screens\/[^/]+\/config$/) && request.method === "GET") return configResponse(env, context);
       if (url.pathname.match(/^\/api\/screens\/[^/]+\/config$/) && request.method === "POST") return saveConfig(request, env, context);
+      if (url.pathname.match(/^\/api\/screens\/[^/]+\/product-mode$/) && request.method === "POST") return saveProductMode(request, env, context);
       if (url.pathname.match(/^\/api\/screens\/[^/]+\/fr24-key$/) && request.method === "GET") return fr24KeyStatusResponse(env, context);
       if (url.pathname.match(/^\/api\/screens\/[^/]+\/fr24-key$/) && request.method === "POST") return saveFr24Key(request, env, context);
       if (url.pathname === "/api/account/fr24-key" && request.method === "GET") return fr24KeyStatusResponse(env, context);
       if (url.pathname === "/api/account/fr24-key" && request.method === "POST") return saveFr24Key(request, env, context);
+      if (url.pathname === "/api/account/barentswatch-key" && request.method === "GET") return barentsWatchKeyStatusResponse(env, context);
+      if (url.pathname === "/api/account/barentswatch-key" && request.method === "POST") return saveBarentsWatchKey(request, env, context);
       if (url.pathname === "/api/account/fr24-usage" && request.method === "GET") return fr24UsageResponse(env, context);
       if (url.pathname === "/api/account/homey-token/rotate" && request.method === "POST") return rotateHomeyToken(request, env, context);
       if (url.pathname.match(/^\/api\/screens\/[^/]+\/display$/) && request.method === "GET") return flightsResponse(env, true, context);
@@ -713,6 +772,7 @@ export default {
       if (url.pathname.match(/^\/api\/screens\/[^/]+\/display-mode\/(?:airspace|hybrid|flight|airport-board|airport_board|clock)$/) && isAutomationRequestMethod(request)) return writeDisplayMode(env, displayModeFromPath(url.pathname), "homey-api", context);
       if (url.pathname === "/api/config" && request.method === "GET") return configResponse(env, context);
       if (url.pathname === "/api/config" && request.method === "POST") return saveConfig(request, env, context);
+      if (url.pathname === "/api/product-mode" && request.method === "POST") return saveProductMode(request, env, context);
       if (url.pathname === "/api/device-config" && request.method === "GET") return deviceConfigResponse(env, context);
       if (url.pathname === "/api/realtime-state" && request.method === "GET") return realtimeStateResponse(env, context);
       if (url.pathname === "/api/device-status" && request.method === "GET") return deviceStatusResponse(env, context);
@@ -743,6 +803,7 @@ export default {
       if (url.pathname === "/api/sound-test" && request.method === "POST") return triggerSoundTest(request, env, context);
       if (url.pathname === "/api/flights" && request.method === "GET") return flightsResponse(env, false, context);
       if (url.pathname === "/api/display" && request.method === "GET") return flightsResponse(env, true, context);
+      if (url.pathname === "/api/display-refresh" && request.method === "POST") return forceDisplayRefresh(env, context);
       if (url.pathname === "/api/avinor-board" && request.method === "GET") return avinorBoardResponse(env, context);
       if (url.pathname === "/api/aviationstack" && request.method === "GET") return aviationstackDebugResponse(request, env, context);
       if (url.pathname === "/api/health") return jsonResponse({ ok: true });
@@ -1126,15 +1187,36 @@ function constantTimeEquals(a: string | undefined, b: string | undefined): boole
 }
 
 async function getConfig(env: Env, context?: RequestContext): Promise<Config> {
-  const stored = await env.FLIGHT_DISPLAY_KV.get(scopedKey(CONFIG_KEY, context), "json");
-  if (stored && isConfig(stored)) return withConfigDefaults(stored, env);
+  const root = await env.FLIGHT_DISPLAY_KV.get(scopedKey(CONFIG_KEY, context), "json");
+  const productMode = normalizeProductMode(root && typeof root === "object" ? (root as { productMode?: unknown }).productMode : undefined);
+  const modeStored = await env.FLIGHT_DISPLAY_KV.get(scopedKey(modeConfigKey(productMode), context), "json");
+  if (modeStored && isConfig(modeStored)) return withConfigDefaults({ ...modeStored, productMode }, env);
+  if (root && isConfig(root)) return withConfigDefaults({ ...root, productMode }, env);
 
-  return withConfigDefaults({
+  return withConfigDefaults(defaultConfigForMode(env, productMode), env);
+}
+
+function modeConfigKey(mode: ProductMode): string {
+  return `${CONFIG_KEY}:${mode}`;
+}
+
+function defaultConfigForMode(env: Env, productMode: ProductMode): Config {
+  const base: Config = {
+    productMode,
     lat: parseNumber(env.DEFAULT_LAT, 59.9139),
     lon: parseNumber(env.DEFAULT_LON, 10.7522),
-    radiusKm: parseNumber(env.DEFAULT_RADIUS_KM, 10),
+    radiusKm: productMode === "marine" ? 1 : parseNumber(env.DEFAULT_RADIUS_KM, 10),
     label: "Home"
-  }, env);
+  };
+  if (productMode === "marine") {
+    base.distanceOrigin = { lat: base.lat, lon: base.lon, label: "Window" };
+    base.device = {
+      ...normalizeDeviceSettings(undefined),
+      displayMode: "hybrid",
+      lineColors: DEFAULT_MARINE_COLORS
+    };
+  }
+  return base;
 }
 
 function defaultScreenState(): ScreenState {
@@ -1318,13 +1400,14 @@ async function toggleScreenState(env: Env, context?: RequestContext): Promise<Re
 async function configResponse(env: Env, context?: RequestContext): Promise<Response> {
   const screenId = normalizeId(context?.screenId);
   const userEmail = normalizeEmail(context?.userEmail);
-  const [config, aviationstackApiKey, screenState, soundState, deviceStatus, fr24Key, accountScreens, homeyToken] = await Promise.all([
+  const [config, aviationstackApiKey, screenState, soundState, deviceStatus, fr24Key, barentsWatchKey, accountScreens, homeyToken] = await Promise.all([
     getConfig(env, context),
     getAviationstackApiKey(env),
     getScreenState(env, context),
     getSoundState(env, context),
     getDeviceStatus(env, context),
     fr24KeyStatus(env, context),
+    barentsWatchKeyStatus(env, context),
     userEmail ? listUserScreens(env, userEmail) : Promise.resolve([]),
     userEmail ? getHomeyTokenRecord(env, userEmail, true) : Promise.resolve(null)
   ]);
@@ -1343,11 +1426,13 @@ async function configResponse(env: Env, context?: RequestContext): Promise<Respo
           screenId: screen.screenId,
           deviceId: screen.deviceId,
           label: screenConfig.label || "SkyFrame",
+          productMode: normalizeProductMode(screenConfig.productMode),
           pairedAt: screen.pairedAt
         };
       }))
     },
     fr24Key,
+    barentsWatchKey,
     homeyToken: homeyToken ? publicHomeyTokenRecord(homeyToken) : null,
     screenState,
     deviceStatus,
@@ -1599,11 +1684,15 @@ async function saveConfig(request: Request, env: Env, context?: RequestContext):
   if (!isConfig(body)) {
     return jsonResponse({ error: "Expected lat, lon and radiusKm numbers" }, 400);
   }
+  const productMode = normalizeProductMode((body as { productMode?: unknown }).productMode);
 
   const config: Config = {
+    productMode,
     lat: clamp(body.lat, -90, 90),
     lon: clamp(body.lon, -180, 180),
-    radiusKm: clamp(body.radiusKm, 1, 100),
+    radiusKm: productMode === "marine" ? clamp(body.radiusKm, 0.5, 3) : clamp(body.radiusKm, 1, 100),
+    ...(productMode === "marine" ? { distanceOrigin: normalizeDistanceOrigin((body as { distanceOrigin?: unknown }).distanceOrigin, body) } : {}),
+    povDeg: clampNumber((body as { povDeg?: unknown }).povDeg, 0, 359, 0),
     homeAirportIata: normalizeAirportCode(body.homeAirportIata, env.HOME_AIRPORT_IATA || "OSL"),
     follow: normalizeFollowSettings((body as { follow?: unknown }).follow),
     label: typeof body.label === "string" ? body.label.slice(0, 80) : undefined,
@@ -1621,7 +1710,10 @@ async function saveConfig(request: Request, env: Env, context?: RequestContext):
   }
 
   const configUpdatedAt = config.updatedAt || new Date().toISOString();
-  await env.FLIGHT_DISPLAY_KV.put(scopedKey(CONFIG_KEY, context), JSON.stringify(config));
+  await Promise.all([
+    env.FLIGHT_DISPLAY_KV.put(scopedKey(CONFIG_KEY, context), JSON.stringify({ productMode, updatedAt: configUpdatedAt })),
+    env.FLIGHT_DISPLAY_KV.put(scopedKey(modeConfigKey(productMode), context), JSON.stringify(config))
+  ]);
   await broadcastRealtime(env, {
     type: "config_changed",
     updatedAt: configUpdatedAt,
@@ -1635,6 +1727,41 @@ async function saveConfig(request: Request, env: Env, context?: RequestContext):
   return configResponse(env, context);
 }
 
+async function saveProductMode(request: Request, env: Env, context?: RequestContext): Promise<Response> {
+  const screenId = normalizeId(context?.screenId);
+  if (!screenId || screenId === DEFAULT_SCREEN_ID) {
+    return jsonResponse({ error: "Screen ID required" }, 400, { "Cache-Control": "no-store" });
+  }
+
+  const userEmail = normalizeEmail(context?.userEmail);
+  const ownerEmail = await ownerEmailForScreen(env, screenId);
+  if (userEmail && ownerEmail && userEmail !== ownerEmail) {
+    return jsonResponse({ error: "Screen not found" }, 404, { "Cache-Control": "no-store" });
+  }
+
+  const body = await readJsonObject(request);
+  const productMode = normalizeProductMode(body.productMode ?? body.mode);
+  const updatedAt = new Date().toISOString();
+
+  await env.FLIGHT_DISPLAY_KV.put(scopedKey(CONFIG_KEY, { ...context, screenId }), JSON.stringify({ productMode, updatedAt }));
+  await broadcastRealtime(env, {
+    type: "config_changed",
+    updatedAt,
+    source: "product-mode"
+  }, { ...context, screenId });
+  await broadcastRealtime(env, {
+    type: "display_changed",
+    updatedAt,
+    source: "product-mode"
+  }, { ...context, screenId });
+
+  return jsonResponse({
+    screenId,
+    productMode,
+    updatedAt
+  }, 200, { "Cache-Control": "no-store" });
+}
+
 async function deviceConfigResponse(env: Env, context?: RequestContext): Promise<Response> {
   const [config, screenState, soundState, fr24, adminUiSettings] = await Promise.all([getConfig(env, context), getScreenState(env, context), getSoundState(env, context), fr24KeyStatus(env, context), getAdminUiSettings(env)]);
   const normalizedDevice = enforceFr24DeviceSettings(normalizeDeviceSettings(config.device), fr24.screenConfigured);
@@ -1643,6 +1770,7 @@ async function deviceConfigResponse(env: Env, context?: RequestContext): Promise
     : normalizedDevice.brightness;
   return jsonResponse({
     updatedAt: config.updatedAt || null,
+    productMode: normalizeProductMode(config.productMode),
     homeAirportIata: config.homeAirportIata,
     follow: fr24.screenConfigured ? config.follow : { ...normalizeFollowSettings(config.follow), enabled: false },
     device: {
@@ -2072,6 +2200,59 @@ async function saveFr24Key(request: Request, env: Env, context?: RequestContext)
   }, 200, { "Cache-Control": "no-store" });
 }
 
+async function barentsWatchKeyStatusResponse(env: Env, context?: RequestContext): Promise<Response> {
+  return jsonResponse(await barentsWatchKeyStatus(env, context), 200, { "Cache-Control": "no-store" });
+}
+
+async function barentsWatchKeyStatus(env: Env, context?: RequestContext): Promise<{ configured: boolean; screenConfigured: boolean; source: string; screenId?: string }> {
+  const screenId = normalizeId(context?.screenId);
+  const userEmail = normalizeEmail(context?.userEmail) || (screenId ? await ownerEmailForScreen(env, screenId) : undefined);
+  if (userEmail) {
+    const accountStored = await env.FLIGHT_DISPLAY_KV.get(accountScopedKey(ACCOUNT_BARENTSWATCH_SECRET_KEY, userEmail));
+    if (accountStored) {
+      return {
+        configured: true,
+        screenConfigured: true,
+        source: "account",
+        ...(screenId ? { screenId } : {})
+      };
+    }
+  }
+
+  return {
+    configured: false,
+    screenConfigured: false,
+    source: "missing",
+    ...(screenId ? { screenId } : {})
+  };
+}
+
+async function saveBarentsWatchKey(request: Request, env: Env, context?: RequestContext): Promise<Response> {
+  const authFailure = requireAuthenticatedUser(context);
+  if (authFailure) return authFailure;
+
+  const userEmail = normalizeEmail(context?.userEmail);
+  if (!userEmail) return jsonResponse({ error: "Login required" }, 401, { "Cache-Control": "no-store" });
+
+  const body = await readJsonObject(request);
+  const credentials = normalizeBarentsWatchCredentials(body.credentials ?? body.apiKey ?? body.key ?? body);
+  if (!credentials) {
+    return jsonResponse({ error: "Expected BarentsWatch clientId and clientSecret" }, 400, { "Cache-Control": "no-store" });
+  }
+
+  const encrypted = await encryptSecret(env, JSON.stringify(credentials));
+  await Promise.all([
+    env.FLIGHT_DISPLAY_KV.put(accountScopedKey(ACCOUNT_BARENTSWATCH_SECRET_KEY, userEmail), encrypted),
+    env.FLIGHT_DISPLAY_KV.delete(accountScopedKey(ACCOUNT_BARENTSWATCH_TOKEN_KEY, userEmail))
+  ]);
+  return jsonResponse({
+    ok: true,
+    configured: true,
+    screenConfigured: true,
+    source: "account"
+  }, 200, { "Cache-Control": "no-store" });
+}
+
 type Fr24UsageEndpointSummary = {
   endpoint: string;
   requestCount: number;
@@ -2491,12 +2672,37 @@ async function getRgb565LogoObject(bucket: R2Bucket, filename: string): Promise<
 }
 
 function withConfigDefaults(config: Config, env: Env): Config {
-  return {
+  const productMode = normalizeProductMode(config.productMode);
+  const normalized: Config = {
     ...config,
+    productMode,
+    povDeg: clampNumber(config.povDeg, 0, 359, 0),
     homeAirportIata: normalizeAirportCode(config.homeAirportIata, env.HOME_AIRPORT_IATA || "OSL"),
     follow: normalizeFollowSettings(config.follow),
     device: normalizeDeviceSettings(config.device)
   };
+  if (productMode === "marine") {
+    normalized.distanceOrigin = normalizeDistanceOrigin(config.distanceOrigin, config);
+    normalized.radiusKm = clampNumber(config.radiusKm, 0.5, 3, 1);
+  }
+  return normalized;
+}
+
+function normalizeProductMode(value: unknown): ProductMode {
+  return value === "marine" ? "marine" : "flight";
+}
+
+function normalizeDistanceOrigin(value: unknown, fallback: Pick<Config, "lat" | "lon">): DistanceOrigin {
+  const v = value && typeof value === "object" ? value as Partial<DistanceOrigin> : {};
+  return {
+    lat: clampNumber(v.lat, -90, 90, fallback.lat),
+    lon: clampNumber(v.lon, -180, 180, fallback.lon),
+    label: typeof v.label === "string" && v.label.trim() ? v.label.slice(0, 80) : "Window"
+  };
+}
+
+function getDistanceOrigin(config: Config): DistanceOrigin {
+  return normalizeDistanceOrigin(config.distanceOrigin, config);
 }
 
 function normalizeFollowSettings(value: unknown): FollowSettings {
@@ -3155,6 +3361,9 @@ function localDateString(date: Date, timezone: string): string {
 
 async function flightsResponse(env: Env, compact: boolean, context?: RequestContext): Promise<Response> {
   const [rawConfig, screenState, fr24] = await Promise.all([getConfig(env, context), getScreenState(env, context), fr24KeyStatus(env, context)]);
+  if (normalizeProductMode(rawConfig.productMode) === "marine") {
+    return marineDisplayResponse(env, rawConfig, screenState, compact, context);
+  }
   const normalizedDevice = enforceFr24DeviceSettings(normalizeDeviceSettings(rawConfig.device), fr24.screenConfigured);
   const config: Config = {
     ...rawConfig,
@@ -3220,6 +3429,352 @@ async function flightsResponse(env: Env, compact: boolean, context?: RequestCont
   });
 }
 
+async function marineDisplayResponse(env: Env, config: Config, screenState: ScreenState, compact: boolean, context?: RequestContext): Promise<Response> {
+  const normalizedDevice = normalizeDeviceSettings(config.device);
+  const suspendedReason = displaySuspendedReason(config, screenState);
+  const barentsWatchKey = await barentsWatchKeyStatus(env, context);
+  const liveSourceStatus: LiveSourceStatus = {
+    source: "barentswatch",
+    ok: barentsWatchKey.screenConfigured,
+    error: barentsWatchKey.screenConfigured ? undefined : "BarentsWatch AIS credentials are missing"
+  };
+
+  if (suspendedReason || normalizedDevice.displayMode === "clock") {
+    const mode = normalizedDevice.displayMode === "clock" ? "clock" : suspendedReason || "disabled";
+    return jsonResponse(await displayPayload(env, config, screenState, compact, mode, [], [], [], [], liveSourceStatus, context), 200, {
+      "Cache-Control": "no-store"
+    });
+  }
+
+  let vessels: MarineVessel[] = [];
+  if (barentsWatchKey.screenConfigured) {
+    try {
+      vessels = await getMarineVessels(env, config, context);
+      liveSourceStatus.ok = true;
+      liveSourceStatus.error = undefined;
+    } catch (error) {
+      liveSourceStatus.ok = false;
+      liveSourceStatus.error = error instanceof Error ? error.message : "Marine source request failed";
+      vessels = [];
+    }
+  }
+
+  const limit = Math.max(1, Math.min(24, parseNumber(env.DISPLAY_LIMIT, 8)));
+  const displayFlights = vessels.slice(0, limit).map((vessel) => marineVesselToDisplayFlight(vessel));
+  const payload = await displayPayload(env, config, screenState, compact, displayFlights.length ? "marine" : "marine_waiting", [], [], displayFlights, [], liveSourceStatus, context);
+
+  return jsonResponse({
+    ...payload,
+    productMode: "marine",
+    center: { lat: config.lat, lon: config.lon, radiusKm: config.radiusKm },
+    distanceOrigin: getDistanceOrigin(config),
+    radar: {
+      aspect: 126 / 46,
+      forwardBearingDeg: marineForwardBearing(config)
+    },
+    vessels
+  }, 200, {
+    "Cache-Control": "no-store"
+  });
+}
+
+async function forceDisplayRefresh(env: Env, context?: RequestContext): Promise<Response> {
+  const authFailure = requireAuthenticatedUser(context);
+  if (authFailure) return authFailure;
+  const updatedAt = new Date().toISOString();
+  await broadcastRealtime(env, {
+    type: "display_changed",
+    updatedAt,
+    source: "force-fetch"
+  }, context);
+  return jsonResponse({ ok: true, updatedAt }, 200, { "Cache-Control": "no-store" });
+}
+
+async function getMarineVessels(env: Env, config: Config, context?: RequestContext): Promise<MarineVessel[]> {
+  const apiVessels = await fetchMarineVesselsFromApi(env, config, context);
+  return apiVessels
+    .map((vessel) => projectMarineVesselToRadar(vessel, config))
+    .filter((vessel) => isMarineVesselInRadar(vessel))
+    .sort((a, b) => a.distanceKm - b.distanceKm);
+}
+
+async function fetchMarineVesselsFromApi(env: Env, config: Config, context?: RequestContext): Promise<MarineVessel[]> {
+  const credentials = await getBarentsWatchCredentials(env, context);
+  if (!credentials) throw new Error("BarentsWatch AIS credentials are missing");
+  const token = await getBarentsWatchToken(env, credentials, context);
+  const response = await fetch(env.BARENTSWATCH_LATEST_URL || "https://live.ais.barentswatch.no/v1/latest/combined", {
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${token}`
+    }
+  });
+  if (!response.ok) throw new Error(`BarentsWatch AIS request failed: ${response.status}`);
+  const body = await response.json();
+  const rows = Array.isArray(body) ? body : [];
+  return rows.map((row) => normalizeMarineVessel(row, config, "barentswatch")).filter((vessel): vessel is MarineVessel => Boolean(vessel));
+}
+
+async function getBarentsWatchToken(env: Env, credentials: BarentsWatchCredentials, context?: RequestContext): Promise<string> {
+  const userEmail = normalizeEmail(context?.userEmail) || (context?.screenId ? await ownerEmailForScreen(env, context.screenId) : undefined);
+  const tokenKey = userEmail ? accountScopedKey(ACCOUNT_BARENTSWATCH_TOKEN_KEY, userEmail) : ACCOUNT_BARENTSWATCH_TOKEN_KEY;
+  const cached = await env.FLIGHT_DISPLAY_KV.get(tokenKey, "json");
+  if (isCachedBarentsWatchToken(cached) && cached.expiresAt > Date.now() + 30_000) return cached.accessToken;
+
+  const form = new URLSearchParams();
+  form.set("grant_type", "client_credentials");
+  form.set("client_id", credentials.clientId);
+  form.set("client_secret", credentials.clientSecret);
+  form.set("scope", env.BARENTSWATCH_SCOPE || "ais");
+
+  const response = await fetch(env.BARENTSWATCH_TOKEN_URL || "https://id.barentswatch.no/connect/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: form
+  });
+  if (!response.ok) throw new Error(`BarentsWatch token request failed: ${response.status}`);
+
+  const body = await response.json() as { access_token?: string; expires_in?: number };
+  if (!body.access_token) throw new Error("BarentsWatch token response did not include access_token");
+
+  const expiresAt = Date.now() + clampNumber(body.expires_in, 60, 86400, 3600) * 1000;
+  await env.FLIGHT_DISPLAY_KV.put(tokenKey, JSON.stringify({ accessToken: body.access_token, expiresAt }), {
+    expirationTtl: Math.max(60, Math.floor((expiresAt - Date.now()) / 1000))
+  });
+  return body.access_token;
+}
+
+function isCachedBarentsWatchToken(value: unknown): value is { accessToken: string; expiresAt: number } {
+  if (!value || typeof value !== "object") return false;
+  const token = value as { accessToken?: unknown; expiresAt?: unknown };
+  return typeof token.accessToken === "string" && Number.isFinite(token.expiresAt);
+}
+
+function normalizeMarineVessel(value: unknown, config: Config, source: MarineVessel["source"]): MarineVessel | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const row = value as Record<string, unknown>;
+  const lat = firstNumber(row, ["lat", "latitude"]);
+  const lon = firstNumber(row, ["lon", "lng", "longitude"]);
+  if (lat === undefined || lon === undefined) return undefined;
+  const distanceOrigin = getDistanceOrigin(config);
+  return {
+    vesselName: firstString(row, ["vesselName", "name", "shipName"]),
+    mmsi: firstString(row, ["mmsi"]),
+    imo: firstString(row, ["imo", "imoNumber"]),
+    vesselType: marineVesselType(row.vesselType ?? row.type ?? row.shipType),
+    destination: firstString(row, ["destination", "dest"]),
+    speedKnots: firstNumber(row, ["speedKnots", "sog", "speed", "speedOverGround"]),
+    courseDeg: firstNumber(row, ["courseDeg", "cog", "course", "courseOverGround"]),
+    headingDeg: firstNumber(row, ["headingDeg", "heading", "trueHeading"]),
+    lat,
+    lon,
+    status: marineNavigationStatus(row.status ?? row.navStatus ?? row.navigationalStatus),
+    eta: firstString(row, ["eta"]),
+    distanceKm: haversineKm(distanceOrigin.lat, distanceOrigin.lon, lat, lon),
+    searchDistanceKm: haversineKm(config.lat, config.lon, lat, lon),
+    bearingDeg: bearing(distanceOrigin.lat, distanceOrigin.lon, lat, lon),
+    raw: source === "barentswatch" ? compactMarineRaw(row) : undefined,
+    source
+  };
+}
+
+function marineVesselToDisplayFlight(vessel: MarineVessel): DisplayFlight {
+  const id = vessel.mmsi || vessel.imo || vessel.vesselName || "VESSEL";
+  const distance = `${round(vessel.distanceKm, 1)} KM`;
+  const direction = marineCardinal(vessel.bearingDeg);
+  const course = vessel.courseDeg === undefined ? undefined : `${Math.round(vessel.courseDeg)} DEG`;
+  const speed = vessel.speedKnots === undefined ? "-- KN" : `${round(vessel.speedKnots, 1)} KN`;
+  const vesselName = marineDisplayPart(vessel.vesselName) || id;
+  const shipType = marineDisplayPart(marineVesselType(vessel.vesselType));
+  const destination = marineDisplayPart(vessel.destination);
+  const status = marineDisplayPart(vessel.status) || "Ukjent status";
+  const line1 = [vesselName, shipType].filter(Boolean).join(" - ");
+  const line2 = [course, speed, destination, status].filter(Boolean).join(" - ");
+  return {
+    callsign: id,
+    flight: id,
+    airline: line1,
+    airlineCode: "SHIP",
+    aircraft: line2,
+    registration: vessel.imo || vessel.mmsi,
+    origin: "",
+    destination: destination || "",
+    contextLabel: "Distance",
+    contextValue: `${distance} ${direction}`,
+    lat: vessel.lat,
+    lon: vessel.lon,
+    speedKts: vessel.speedKnots,
+    headingDeg: vessel.courseDeg ?? vessel.headingDeg,
+    distanceKm: vessel.distanceKm,
+    bearingDeg: vessel.bearingDeg,
+    radarX: vessel.radarX,
+    radarY: vessel.radarY,
+    radarHeadingDeg: vessel.radarHeadingDeg,
+    source: vessel.source,
+    status: vessel.status,
+    displayTime: vessel.eta,
+    locationLabel: "Marine traffic",
+    locationValue: `${distance} ${direction}`,
+    routeProgress: Math.max(0, Math.min(1, 1 - vessel.distanceKm / 50))
+  };
+}
+
+function marineDisplayPart(value: unknown): string | undefined {
+  if (typeof value !== "string" && typeof value !== "number") return undefined;
+  const text = String(value).trim();
+  if (!text) return undefined;
+  const normalized = text.toLowerCase();
+  if (normalized === "unknown" || normalized === "unknown dest." || normalized === "ukjent" || normalized === "n/a" || normalized === "null") return undefined;
+  return text;
+}
+
+function projectMarineVesselToRadar(vessel: MarineVessel, config: Config): MarineVessel {
+  const centerLatRad = toRad(config.lat);
+  const kmPerDegLat = 111.32;
+  const kmPerDegLon = Math.max(0.001, 111.32 * Math.cos(centerLatRad));
+  const eastKm = (vessel.lon - config.lon) * kmPerDegLon;
+  const northKm = (vessel.lat - config.lat) * kmPerDegLat;
+  const forwardBearing = marineForwardBearing(config);
+  const forwardRad = toRad(forwardBearing);
+  const forwardEast = Math.sin(forwardRad);
+  const forwardNorth = Math.cos(forwardRad);
+  const rightEast = Math.cos(forwardRad);
+  const rightNorth = -Math.sin(forwardRad);
+  const rightKm = eastKm * rightEast + northKm * rightNorth;
+  const forwardKm = eastKm * forwardEast + northKm * forwardNorth;
+  const halfHeightKm = Math.max(0.5, config.radiusKm);
+  const halfWidthKm = halfHeightKm * (126 / 46);
+  const absoluteHeading = vessel.courseDeg ?? vessel.headingDeg ?? vessel.bearingDeg;
+  return {
+    ...vessel,
+    searchDistanceKm: Math.max(Math.abs(rightKm) / halfWidthKm, Math.abs(forwardKm) / halfHeightKm),
+    radarX: 0.5 + rightKm / (halfWidthKm * 2),
+    radarY: 0.5 - forwardKm / (halfHeightKm * 2),
+    radarHeadingDeg: ((absoluteHeading - forwardBearing) % 360 + 360) % 360
+  };
+}
+
+function marineForwardBearing(config: Config): number {
+  const distanceOrigin = getDistanceOrigin(config);
+  const originDistanceKm = haversineKm(distanceOrigin.lat, distanceOrigin.lon, config.lat, config.lon);
+  if (originDistanceKm > 0.01) return bearing(distanceOrigin.lat, distanceOrigin.lon, config.lat, config.lon);
+  return clampNumber(config.povDeg, 0, 359, 0);
+}
+
+function compactMarineRaw(row: Record<string, unknown>): Record<string, unknown> {
+  const output: Record<string, unknown> = {};
+  [
+    "mmsi", "imo", "name", "vesselName", "shipName", "callSign", "callsign",
+    "lat", "latitude", "lon", "lng", "longitude",
+    "destination", "dest", "eta",
+    "sog", "speed", "speedKnots", "speedOverGround",
+    "cog", "course", "courseDeg", "courseOverGround",
+    "heading", "headingDeg", "trueHeading",
+    "rot", "rateOfTurn",
+    "status", "navStatus", "navigationalStatus",
+    "vesselType", "shipType", "type",
+    "draught", "draft",
+    "length", "width",
+    "timestamp", "msgtime", "messageTime"
+  ].forEach((key) => {
+    const value = row[key];
+    if (value !== undefined && value !== null) output[key] = value;
+  });
+  return output;
+}
+
+function isMarineVesselInRadar(vessel: MarineVessel): boolean {
+  return typeof vessel.radarX === "number"
+    && typeof vessel.radarY === "number"
+    && vessel.radarX >= 0
+    && vessel.radarX <= 1
+    && vessel.radarY >= 0
+    && vessel.radarY <= 1;
+}
+
+function marineVesselType(value: unknown): string | undefined {
+  const numeric = typeof value === "number"
+    ? value
+    : typeof value === "string" && /^\d+$/.test(value.trim())
+      ? Number(value.trim())
+      : undefined;
+  if (numeric !== undefined) {
+    const exact: Record<number, string> = {
+      0: "Not available",
+      20: "Wing in ground",
+      21: "Wing in ground Hazard A",
+      22: "Wing in ground Hazard B",
+      23: "Wing in ground Hazard C",
+      24: "Wing in ground Hazard D",
+      30: "Fishing",
+      31: "Towing",
+      32: "Towing large",
+      33: "Dredging or underwater ops",
+      34: "Diving ops",
+      35: "Military ops",
+      36: "Sailing",
+      37: "Pleasure craft",
+      40: "High speed craft",
+      41: "High speed craft Hazard A",
+      42: "High speed craft Hazard B",
+      43: "High speed craft Hazard C",
+      44: "High speed craft Hazard D",
+      49: "High speed craft",
+      50: "Pilot vessel",
+      51: "Search and rescue",
+      52: "Tug",
+      53: "Port tender",
+      54: "Anti-pollution",
+      55: "Law enforcement",
+      56: "Local vessel",
+      57: "Local vessel",
+      58: "Medical transport",
+      59: "Noncombatant ship",
+      60: "Passenger",
+      69: "Passenger",
+      70: "Cargo",
+      79: "Cargo",
+      80: "Tanker",
+      89: "Tanker",
+      90: "Other type",
+      99: "Other type"
+    };
+    if (exact[numeric]) return exact[numeric];
+    if (numeric >= 25 && numeric <= 29) return "Wing in ground";
+    if (numeric >= 61 && numeric <= 64) return `Passenger Hazard ${String.fromCharCode(64 + numeric - 60)}`;
+    if (numeric >= 71 && numeric <= 74) return `Cargo Hazard ${String.fromCharCode(64 + numeric - 70)}`;
+    if (numeric >= 81 && numeric <= 84) return `Tanker Hazard ${String.fromCharCode(64 + numeric - 80)}`;
+    if (numeric >= 91 && numeric <= 94) return `Other type Hazard ${String.fromCharCode(64 + numeric - 90)}`;
+    return `Type ${numeric}`;
+  }
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : undefined;
+}
+
+function marineNavigationStatus(value: unknown): string | undefined {
+  if (typeof value === "number") {
+    const statuses: Record<number, string> = {
+      0: "Underveis",
+      1: "Ankret",
+      2: "Ikke under kommando",
+      3: "Begrenset manovrering",
+      4: "Begrenset av dypgang",
+      5: "Fortoyd",
+      6: "Grunnstott",
+      7: "Fisker",
+      8: "Seiler",
+      15: "Ukjent status"
+    };
+    return statuses[value] || `Status ${value}`;
+  }
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function marineCardinal(deg: number): string {
+  const points = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+  return points[Math.round(deg / 45) % points.length];
+}
+
 async function displayPayload(
   env: Env,
   config: Config,
@@ -3248,6 +3803,7 @@ async function displayPayload(
         lat: config.lat,
         lon: config.lon,
         radiusKm: config.radiusKm,
+        povDeg: config.povDeg || 0,
         follow: config.follow,
         device: normalizedDevice,
         clock,
@@ -3347,6 +3903,9 @@ async function toCompactDisplayFlight(env: Env, f: DisplayFlight, config: Config
     gate: f.gate || "",
     gateMessage: f.gateMessage || "",
     source: f.source || "",
+    radarX: typeof f.radarX === "number" ? round(f.radarX, 4) : null,
+    radarY: typeof f.radarY === "number" ? round(f.radarY, 4) : null,
+    radarHeadingDeg: typeof f.radarHeadingDeg === "number" ? Math.round(f.radarHeadingDeg) : null,
     layout: followStatus ? "follow_status" : "follow_cycle",
     followStatus,
     locationLabel: f.locationLabel || "",
@@ -3359,6 +3918,7 @@ async function toCompactDisplayFlight(env: Env, f: DisplayFlight, config: Config
       context
     },
     b: f.source === "avinor" ? null : Math.round(f.bearingDeg),
+    distKm: Number.isFinite(f.distanceKm) ? round(f.distanceKm, 1) : null,
     alt: f.altitudeFt ?? null,
     spd: f.speedKts ?? null,
     trk: f.headingDeg ?? null,
@@ -4000,6 +4560,32 @@ function normalizeSecretString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function normalizeBarentsWatchCredentials(value: unknown): BarentsWatchCredentials | undefined {
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (!text) return undefined;
+    if (text.startsWith("{")) {
+      try {
+        return normalizeBarentsWatchCredentials(JSON.parse(text));
+      } catch {
+        return undefined;
+      }
+    }
+    const separatorIndex = text.lastIndexOf(":");
+    if (separatorIndex > 0 && separatorIndex < text.length - 1) {
+      const clientId = text.slice(0, separatorIndex).trim();
+      const clientSecret = text.slice(separatorIndex + 1).trim();
+      if (clientId && clientSecret) return { clientId, clientSecret };
+    }
+    return undefined;
+  }
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  const clientId = normalizeSecretString(record.clientId ?? record.client_id ?? record.id);
+  const clientSecret = normalizeSecretString(record.clientSecret ?? record.client_secret ?? record.secret);
+  return clientId && clientSecret ? { clientId, clientSecret } : undefined;
+}
+
 async function sha256Hex(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -4435,6 +5021,16 @@ async function getFr24ApiKey(env: Env, context?: RequestContext): Promise<string
     if (accountStored) return decryptSecret(env, accountStored);
   }
   return undefined;
+}
+
+async function getBarentsWatchCredentials(env: Env, context?: RequestContext): Promise<BarentsWatchCredentials | undefined> {
+  const screenId = normalizeId(context?.screenId);
+  const userEmail = normalizeEmail(context?.userEmail) || (screenId ? await ownerEmailForScreen(env, screenId) : undefined);
+  if (!userEmail) return undefined;
+  const accountStored = await env.FLIGHT_DISPLAY_KV.get(accountScopedKey(ACCOUNT_BARENTSWATCH_SECRET_KEY, userEmail));
+  if (!accountStored) return undefined;
+  const decrypted = await decryptSecret(env, accountStored);
+  return normalizeBarentsWatchCredentials(decrypted);
 }
 
 function normalizeFlight(record: unknown, config: Config, fallbackFlight?: string): DisplayFlight | null {

@@ -20,6 +20,9 @@ DEFAULT_RADIUS_KM = "10"
 CACHE_TTL_SECONDS = "60"
 DISPLAY_LIMIT = "8"
 ACCESS_TEAM_DOMAIN = "danaksel.cloudflareaccess.com"
+BARENTSWATCH_SCOPE = "ais"
+BARENTSWATCH_TOKEN_URL = "https://id.barentswatch.no/connect/token"
+BARENTSWATCH_LATEST_URL = "https://live.ais.barentswatch.no/v1/latest/combined"
 
 [[kv_namespaces]]
 binding = "FLIGHT_DISPLAY_KV"

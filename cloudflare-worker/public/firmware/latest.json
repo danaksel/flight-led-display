@@ -1,10 +1,11 @@
 {
-  "version": "V1.4",
-  "url": "https://skyframe.danaksel.no/public/firmware/skyframe-v1.4.bin",
-  "sha256": "e0580a5c180d7e0acce64c2a3e0033c0df51da60cce69652bea3079bab55986f",
-  "size": 1109792,
+  "version": "V1.8",
+  "url": "https://skyframe.danaksel.no/public/firmware/skyframe-v1.8.bin",
+  "sha256": "27e40d0a6d88d4650dcf4d057dc3c2363e34a5ab9a88a9c99c00365d27ec211f",
+  "size": 1121456,
   "releaseNotes": [
-    "Makes OTA firmware installation manual from the control panel.",
-    "Keeps followed-flight info split 50/50 within the selected display duration."
+    "Draws a larger active-vessel direction marker in all eight directions.",
+    "Aligns marine text rows to preserve 1 px bottom margin.",
+    "Keeps emulator and firmware marine radar rendering in sync."
   ]
 }

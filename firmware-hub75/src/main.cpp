@@ -21,7 +21,7 @@ namespace
 constexpr uint16_t PanelWidth = 128;
 constexpr uint16_t PanelHeight = 64;
 constexpr uint8_t Brightness = 8;
-constexpr const char *SKYFRAME_FW_VERSION = "V1.4";
+constexpr const char *SKYFRAME_FW_VERSION = "V1.8";
 constexpr const char *DeviceConfigUrl = "https://skyframe.danaksel.no/public/device-config";
 constexpr const char *SoundStateUrl = "https://skyframe.danaksel.no/public/sound-state";
 constexpr const char *RealtimeStateUrl = "https://skyframe.danaksel.no/public/realtime-state";
@@ -235,6 +235,7 @@ bool otaUpdateRequested = false;
 
 void drawIdleScreen(uint8_t index);
 void drawCurrentLiveFlight();
+void drawMarinePayload(JsonObject flight, size_t itemCount);
 void fetchSoundState();
 void soundPollTask(void *);
 void networkPollTask(void *);
@@ -2934,6 +2935,123 @@ void storeIdleScreens(JsonArray screens)
     nextIdleCycleAt = idleCycleStartedAt + static_cast<uint32_t>(timetableCycleSeconds) * 1000UL;
 }
 
+float jsonFloat(JsonVariantConst value, float fallback = 0.0f)
+{
+    if (value.is<float>()) return value.as<float>();
+    if (value.is<int>()) return static_cast<float>(value.as<int>());
+    if (value.is<const char *>())
+    {
+        const String text = value.as<const char *>();
+        if (text.length()) return text.toFloat();
+    }
+    return fallback;
+}
+
+int16_t clampPixel(float value, int16_t minValue, int16_t maxValue, int16_t fallback)
+{
+    if (isnan(value) || isinf(value)) return fallback;
+    return constrain(static_cast<int16_t>(roundf(value)), minValue, maxValue);
+}
+
+void drawMarineVesselMarker(int16_t x, int16_t y, float headingDeg, uint16_t color, bool active)
+{
+    const int16_t directions[8][2] = {
+        {0, -1}, {1, -1}, {1, 0}, {1, 1},
+        {0, 1}, {-1, 1}, {-1, 0}, {-1, -1}
+    };
+    int index = static_cast<int>(roundf(fmodf(headingDeg + 360.0f, 360.0f) / 45.0f)) % 8;
+    const int16_t dx = directions[index][0];
+    const int16_t dy = directions[index][1];
+    const int16_t backX = -dx;
+    const int16_t backY = -dy;
+    const int16_t perpX = -dy;
+    const int16_t perpY = dx;
+
+    display->drawPixel(x + backX, y + backY, color);
+    if (active)
+    {
+        display->drawPixel(x + backX * 2 + perpX, y + backY * 2 + perpY, color);
+        display->drawPixel(x + backX * 2 - perpX, y + backY * 2 - perpY, color);
+    }
+    if (!active || ((millis() / 450) % 2 == 0)) display->drawPixel(x, y, color);
+}
+
+void drawMarineRadar(JsonObject activeItem)
+{
+    constexpr int16_t boxX = 1;
+    constexpr int16_t boxY = 1;
+    constexpr int16_t boxW = 126;
+    constexpr int16_t boxH = 46;
+    const uint16_t sea = lineRouteProgressColor ? lineRouteProgressColor : panelColor(0x17, 0x26, 0x5D);
+    const uint16_t otherColor = lineProgressColor ? lineProgressColor : panelColor(0xA6, 0xA6, 0xA6);
+    const uint16_t activeColor = lineAirlineColor ? lineAirlineColor : panelColor(0xFF, 0xC7, 0x77);
+
+    display->fillRect(boxX, boxY, boxW, boxH, sea);
+
+    const String activeId = valueOr(activeItem["cs"], valueOr(activeItem["flt"]));
+    JsonArray vessels = currentDisplayDoc["vessels"].as<JsonArray>();
+    uint8_t drawn = 0;
+    for (JsonObject vessel : vessels)
+    {
+        if (drawn >= 12) break;
+        const String vesselId = valueOr(vessel["mmsi"], valueOr(vessel["imo"], valueOr(vessel["vesselName"])));
+        if (vesselId.length() && vesselId == activeId) continue;
+        const float radarX = jsonFloat(vessel["radarX"], -1.0f);
+        const float radarY = jsonFloat(vessel["radarY"], -1.0f);
+        if (radarX < 0.0f || radarX > 1.0f || radarY < 0.0f || radarY > 1.0f) continue;
+        const int16_t x = clampPixel(boxX + radarX * (boxW - 1), boxX + 3, boxX + boxW - 4, boxX + boxW / 2);
+        const int16_t y = clampPixel(boxY + radarY * (boxH - 1), boxY + 3, boxY + boxH - 4, boxY + boxH / 2);
+        const float headingDeg = jsonFloat(vessel["radarHeadingDeg"], jsonFloat(vessel["headingDeg"], jsonFloat(vessel["courseDeg"], jsonFloat(vessel["bearingDeg"], 0.0f))));
+        drawMarineVesselMarker(x, y, headingDeg, otherColor, false);
+        drawn++;
+    }
+
+    const float activeRadarX = jsonFloat(activeItem["radarX"], 0.5f);
+    const float activeRadarY = jsonFloat(activeItem["radarY"], 0.5f);
+    const float activeBearingDeg = jsonFloat(activeItem["b"], 0.0f);
+    const int16_t activeX = clampPixel(boxX + activeRadarX * (boxW - 1), boxX + 4, boxX + boxW - 5, boxX + boxW / 2);
+    const int16_t activeY = clampPixel(boxY + activeRadarY * (boxH - 1), boxY + 4, boxY + boxH - 5, boxY + boxH / 2);
+    drawMarineVesselMarker(activeX, activeY, jsonFloat(activeItem["radarHeadingDeg"], jsonFloat(activeItem["trk"], activeBearingDeg)), activeColor, true);
+}
+
+void drawMarinePayload(JsonObject flight, size_t itemCount)
+{
+    idleLayoutActive = false;
+    liveLayoutActive = false;
+    clockLayoutActive = false;
+    display->fillScreen(panelColor(0, 0, 0));
+    display->setTextSize(1);
+    display->setTextWrap(false);
+
+    drawMarineRadar(flight);
+
+    JsonObject lines = flight["lines"];
+    const String name = valueOr(lines["airline"], valueOr(flight["air"], valueOr(flight["cs"], "VESSEL")));
+    String details = valueOr(lines["aircraft"]);
+    if (!details.length())
+    {
+        const String destination = valueOr(flight["to"]);
+        const String speed = flight["spd"].isNull() ? "-- KN" : String(jsonFloat(flight["spd"], 0.0f), 1) + " KN";
+        const String status = valueOr(flight["status"]);
+        details = speed;
+        if (destination.length())
+        {
+            if (details.length()) details += " - ";
+            details += destination;
+        }
+        if (status.length())
+        {
+            if (details.length()) details += " - ";
+            details += status;
+        }
+    }
+
+    const uint16_t textColor = lineRouteColor ? lineRouteColor : panelColor(0xFF, 0xC7, 0x77);
+    drawTickerText(name, 1, 48, textColor, 126);
+    drawTickerText(details, 1, 56, textColor, 126);
+    presentFrame();
+}
+
 void drawFlightPayload(JsonObject flight, const char *mode, size_t flightCount, size_t flightIndex)
 {
     idleLayoutActive = false;
@@ -3030,7 +3148,14 @@ void drawCurrentLiveFlight()
     if (currentLiveFlight >= flightCount) currentLiveFlight = 0;
     JsonObject flight = flights[currentLiveFlight];
     const char *mode = currentDisplayDoc["mode"] | "";
-    drawFlightPayload(flight, mode, flightCount, currentLiveFlight);
+    if (String(mode) == "marine")
+    {
+        drawMarinePayload(flight, flightCount);
+    }
+    else
+    {
+        drawFlightPayload(flight, mode, flightCount, currentLiveFlight);
+    }
     liveLayoutActive = true;
 }
 
