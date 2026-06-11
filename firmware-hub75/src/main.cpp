@@ -21,7 +21,7 @@ namespace
 constexpr uint16_t PanelWidth = 128;
 constexpr uint16_t PanelHeight = 64;
 constexpr uint8_t Brightness = 8;
-constexpr const char *SKYFRAME_FW_VERSION = "V1.9";
+constexpr const char *SKYFRAME_FW_VERSION = "V1.10";
 constexpr const char *DeviceConfigUrl = "https://skyframe.danaksel.no/public/device-config";
 constexpr const char *SoundStateUrl = "https://skyframe.danaksel.no/public/sound-state";
 constexpr const char *RealtimeStateUrl = "https://skyframe.danaksel.no/public/realtime-state";
@@ -323,6 +323,7 @@ uint16_t lineAircraftColor = 0;
 uint16_t lineContextColor = 0;
 uint16_t lineProgressColor = 0;
 uint16_t lineRouteProgressColor = 0;
+uint16_t lineLandColor = 0;
 uint8_t clockGradientBottomR = 0x08;
 uint8_t clockGradientBottomG = 0x1B;
 uint8_t clockGradientBottomB = 0x6B;
@@ -2706,6 +2707,7 @@ bool applyDeviceConfigPayload(const String &body, int httpCode, bool httpOk)
     lineContextColor = parseHexColorOr(valueOr(lineColors["context"]), defaultDataColor);
     lineProgressColor = parseHexColorOr(valueOr(lineColors["progress"]), defaultHeaderColor);
     lineRouteProgressColor = parseHexColorOr(valueOr(lineColors["routeProgress"]), panelColor(0x00, 0xD4, 0x6A));
+    lineLandColor = parseHexColorOr(valueOr(lineColors["land"]), panelColor(0, 0, 0));
     const String nextClockTopColor = valueOr(device["clockTopColor"], "#ffffff");
     const String nextClockColor = valueOr(device["clockColor"], "#081b6b");
     parseHexRgb(nextClockTopColor, clockGradientTopR, clockGradientTopG, clockGradientTopB);
@@ -2998,7 +3000,7 @@ void drawMarineLandMask(int16_t boxX, int16_t boxY, int16_t boxW, int16_t boxH)
     if (width <= 0 || height <= 0 || width > boxW || height > boxH) return;
     if (strcmp(encoding, "base64-land-bits-v1") != 0 || !data[0]) return;
 
-    const uint16_t landColor = panelColor(0, 0, 0);
+    const uint16_t landColor = lineLandColor ? lineLandColor : panelColor(0, 0, 0);
     uint32_t buffer = 0;
     uint8_t bits = 0;
     uint16_t byteIndex = 0;

@@ -143,7 +143,7 @@ Vessel rendering:
 - The active vessel has a blinking body pixel and a larger trailing direction marker.
 - Direction markers must work in all eight directions: N, NE, E, SE, S, SW, W and NW.
 
-If the Worker includes `radar.landMask` with `encoding: "base64-land-bits-v1"`, the firmware draws those mask bits as black/off LEDs inside the `126 x 46` radar rectangle before drawing vessel pixels. This keeps the land/sea outline pixel-identical with the emulator.
+If the Worker includes `radar.landMask` with `encoding: "base64-land-bits-v1"`, the firmware draws those mask bits with the configured marine land color inside the `126 x 46` radar rectangle before drawing vessel pixels. The default is black/off LEDs. This keeps the land/sea outline pixel-identical with the emulator.
 
 The firmware should not generate or display mock AIS data. If no live marine vessels are in the payload, the display should show the ordinary waiting/empty state from the Worker payload.
 
@@ -162,7 +162,7 @@ shasum -a 256 firmware-hub75/.pio/build/waveshare_esp32_s3_rgb_matrix/firmware.b
 
 Copy the resulting `.bin` to `cloudflare-worker/public/firmware/`, update `cloudflare-worker/public/firmware/latest.json`, then deploy the Worker.
 
-Current deployed firmware line is `V1.9`, which includes Marine mode rendering, corrected radar orientation, active-vessel direction markers, exact marine text-row margins and optional land/sea mask rendering.
+Current deployed firmware line is `V1.10`, which includes Marine mode rendering, corrected radar orientation, active-vessel direction markers, exact marine text-row margins, optional land/sea mask rendering and configurable marine land color.
 
 ## Build And Upload
 

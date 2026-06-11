@@ -148,6 +148,7 @@ type DeviceSettings = {
     context: string;
     progress: string;
     routeProgress: string;
+    land: string;
   };
   clockColor: string;
   clockTopColor: string;
@@ -662,7 +663,8 @@ const DEFAULT_AIRSPACE_COLORS: AirspaceColors = {
   aircraft: "#ffc777",
   context: "#ffaa00",
   progress: "#aaaaaa",
-  routeProgress: "#00f900"
+  routeProgress: "#00f900",
+  land: "#000000"
 };
 
 const DEFAULT_MARINE_COLORS: AirspaceColors = {
@@ -671,7 +673,8 @@ const DEFAULT_MARINE_COLORS: AirspaceColors = {
   aircraft: "#ffc777",
   context: "#ffc777",
   progress: "#a6a6a6",
-  routeProgress: "#17265d"
+  routeProgress: "#17265d",
+  land: "#000000"
 };
 
 const DEFAULT_CLOCK_COLORS: ClockColors = {
@@ -2905,7 +2908,8 @@ function normalizeLineColors(value: unknown): DeviceSettings["lineColors"] {
     aircraft: normalizeHexColor(v.aircraft, DEFAULT_AIRSPACE_COLORS.aircraft),
     context: normalizeHexColor(v.context, DEFAULT_AIRSPACE_COLORS.context),
     progress: normalizeHexColor(v.progress, DEFAULT_AIRSPACE_COLORS.progress),
-    routeProgress: normalizeHexColor(v.routeProgress, DEFAULT_AIRSPACE_COLORS.routeProgress)
+    routeProgress: normalizeHexColor(v.routeProgress, DEFAULT_AIRSPACE_COLORS.routeProgress),
+    land: normalizeHexColor(v.land, DEFAULT_AIRSPACE_COLORS.land)
   };
 }
 

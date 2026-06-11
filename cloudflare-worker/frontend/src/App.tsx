@@ -60,6 +60,7 @@ type Config = {
       context: string;
       progress: string;
       routeProgress: string;
+      land: string;
     };
     clockColor: string;
     clockTopColor: string;
@@ -407,8 +408,11 @@ const lineColorLabels: Record<keyof Config["device"]["lineColors"], string> = {
   aircraft: "Aircraft",
   context: "Details",
   progress: "Page progress",
-  routeProgress: "Route progress"
+  routeProgress: "Route progress",
+  land: "Land"
 };
+
+const flightColorKeys: Array<keyof Config["device"]["lineColors"]> = ["airline", "route", "aircraft", "context", "progress", "routeProgress"];
 
 const marineColorLabels: Record<keyof Config["device"]["lineColors"], string> = {
   airline: "Active ship on radar",
@@ -416,7 +420,8 @@ const marineColorLabels: Record<keyof Config["device"]["lineColors"], string> = 
   aircraft: "Text detail",
   context: "Text context",
   progress: "Inactive ships on radar",
-  routeProgress: "Radar background"
+  routeProgress: "Radar background",
+  land: "Land areas"
 };
 
 const timetableColorLabels: Record<keyof Config["device"]["timetableColors"], string> = {
@@ -445,7 +450,8 @@ const defaultAirspaceColors: AirspaceColors = {
   aircraft: "#ffc777",
   context: "#ffaa00",
   progress: "#aaaaaa",
-  routeProgress: "#00f900"
+  routeProgress: "#00f900",
+  land: "#000000"
 };
 
 const defaultMarineColors: AirspaceColors = {
@@ -454,7 +460,8 @@ const defaultMarineColors: AirspaceColors = {
   aircraft: "#ffc777",
   context: "#ffc777",
   progress: "#a6a6a6",
-  routeProgress: "#17265d"
+  routeProgress: "#17265d",
+  land: "#000000"
 };
 
 const defaultClockColors: ClockColors = {
@@ -627,7 +634,8 @@ function normalizeAirspaceColors(value: unknown): AirspaceColors {
     aircraft: normalizeHexColor(v.aircraft, defaultAirspaceColors.aircraft),
     context: normalizeHexColor(v.context, defaultAirspaceColors.context),
     progress: normalizeHexColor(v.progress, defaultAirspaceColors.progress),
-    routeProgress: normalizeHexColor(v.routeProgress, defaultAirspaceColors.routeProgress)
+    routeProgress: normalizeHexColor(v.routeProgress, defaultAirspaceColors.routeProgress),
+    land: normalizeHexColor(v.land, defaultAirspaceColors.land)
   };
 }
 
@@ -1798,7 +1806,7 @@ function drawMarineVesselMarker(ctx: CanvasRenderingContext2D, x: number, y: num
   if (!active || Math.floor(Date.now() / 450) % 2 === 0) ctx.fillRect(x, y, 1, 1);
 }
 
-function drawMarineLandMask(ctx: CanvasRenderingContext2D, radar: MarineRadarPayload | null | undefined, boxX: number, boxY: number, boxW: number, boxH: number) {
+function drawMarineLandMask(ctx: CanvasRenderingContext2D, radar: MarineRadarPayload | null | undefined, boxX: number, boxY: number, boxW: number, boxH: number, landColor: string) {
   const mask = radar?.landMask;
   if (!mask || mask.encoding !== "base64-land-bits-v1" || !mask.data || mask.width <= 0 || mask.height <= 0) return;
   let binary = "";
@@ -1809,7 +1817,7 @@ function drawMarineLandMask(ctx: CanvasRenderingContext2D, radar: MarineRadarPay
   }
   const width = Math.min(mask.width, boxW);
   const height = Math.min(mask.height, boxH);
-  ctx.fillStyle = "#000000";
+  ctx.fillStyle = landColor || defaultMarineColors.land;
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const bitIndex = y * mask.width + x;
@@ -1829,12 +1837,13 @@ function drawMarineLayoutExact(ctx: CanvasRenderingContext2D, flight: DisplayFli
   const activeColor = colors.airline || defaultMarineColors.airline;
   const inactiveColor = colors.progress || defaultMarineColors.progress;
   const textColor = colors.route || defaultMarineColors.route;
+  const landColor = colors.land || defaultMarineColors.land;
 
   ctx.fillStyle = "#000000";
   ctx.fillRect(0, 0, 128, 64);
   ctx.fillStyle = radarBackground;
   ctx.fillRect(boxX, boxY, boxW, boxH);
-  drawMarineLandMask(ctx, radar, boxX, boxY, boxW, boxH);
+  drawMarineLandMask(ctx, radar, boxX, boxY, boxW, boxH, landColor);
 
   const activeId = flight.cs || flight.flt || flight.callsign || flight.flight || "";
   flights.slice(0, 12).forEach((item) => {
@@ -2882,7 +2891,7 @@ function MarineRadarSettings(props: {
   updateConfig: React.Dispatch<React.SetStateAction<Config>>;
   saveCustomColorSet: <T extends object>(group: keyof ColorCustomSets, values: T) => void;
 }) {
-  const visibleColorKeys: Array<keyof Config["device"]["lineColors"]> = ["routeProgress", "airline", "progress", "route"];
+  const visibleColorKeys: Array<keyof Config["device"]["lineColors"]> = ["routeProgress", "land", "airline", "progress", "route"];
   return (
     <div style={{ display: "grid", gap: "14px" }}>
       <ColorPresetManager<AirspaceColors>
@@ -4203,11 +4212,11 @@ export default function App() {
                   onSaveCustom={(values) => saveCustomColorSet("airspace", values)}
                 >
                   <div style={{ display: "grid", gap: "12px", gridTemplateColumns: "1fr 1fr" }}>
-                    {Object.entries(config.device.lineColors).map(([key, value]) => (
+                    {flightColorKeys.map((key) => (
                       <ColorPicker
                         key={key}
-                        label={lineColorLabels[key as keyof Config["device"]["lineColors"]] ?? key}
-                        value={value}
+                        label={lineColorLabels[key] ?? key}
+                        value={config.device.lineColors[key]}
                         onChange={(nextValue) => updateConfig((current) => ({ ...current, device: { ...current.device, lineColors: { ...current.device.lineColors, [key]: nextValue } } }))}
                       />
                     ))}

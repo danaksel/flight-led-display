@@ -1,11 +1,11 @@
 {
-  "version": "V1.9",
-  "url": "https://skyframe.danaksel.no/public/firmware/skyframe-v1.9.bin",
-  "sha256": "7f1c972baee099068dc8c6ae9171da2d6e4bbb218993e2088faa788f02922fa2",
-  "size": 1122000,
+  "version": "V1.10",
+  "url": "https://skyframe.danaksel.no/public/firmware/skyframe-v1.10.bin",
+  "sha256": "035780d7b9c83b88eca023589f96730feffb574a2a1e849f2a176f32a2010157",
+  "size": 1122288,
   "releaseNotes": [
-    "Adds optional marine land/sea mask rendering inside the radar area.",
-    "Draws land as black/off LEDs while preserving the configured radar sea color.",
-    "Keeps emulator and firmware marine landmask rendering in sync."
+    "Adds configurable marine land color in the control panel.",
+    "Keeps emulator and firmware landmask colors in sync.",
+    "Preserves black/off land pixels as the default for existing screens."
   ]
 }
