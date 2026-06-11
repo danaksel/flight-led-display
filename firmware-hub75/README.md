@@ -15,6 +15,7 @@ Target firmware for the Waveshare ESP32-S3-RGB-Matrix controller and a 128 x 64 
 - Download and cache missing logos from the Worker.
 - Rotate locally between fetched flights.
 - Render the 128 x 64 layout used by the web emulator.
+- Render the Marine mode radar/text layout used by the web emulator.
 - Render clock mode locally with seconds line, minute stack and thin 7-segment HH/MM/SS.
 - Play PA/test sound and optional clock tick through ES8311/NS4150.
 - Provision Wi-Fi through a local setup access point and captive portal when no credentials are stored, when saved credentials fail, or when BOOT is held during startup.
@@ -112,6 +113,38 @@ The firmware reads `deviceCommand` from `/public/realtime-state` and can also re
 
 Wi-Fi and device token are stored in ESP32 Preferences/NVS so normal firmware updates do not wipe customer setup. Resetting those values should happen through the control panel or admin commands.
 
+## Marine Display Layout
+
+Marine mode uses the same firmware image and the same `/public/display` endpoint as Flight mode. The Worker selects the payload based on the screen's active `productMode`.
+
+The marine renderer must stay pixel-identical with the web emulator:
+
+```text
+128 x 64 panel
+
+y=0      1 px top margin
+y=1-46   radar rectangle, x=1, w=126, h=46
+y=47     1 px gap
+y=48-54  text line 1: Vessel name - Ship type
+y=55     1 px gap
+y=56-62  text line 2: Course - Speed - Destination - Status
+y=63     1 px bottom margin
+```
+
+The radar is viewer-relative:
+
+- `radarX` increases to the viewer's right.
+- `radarY` increases downward on the panel, so straight ahead from the POV point is smaller `radarY`.
+- `radarHeadingDeg` is already relative to the radar coordinate system and should be used for the vessel direction marker.
+
+Vessel rendering:
+
+- Inactive vessels are a fixed body pixel with a small trailing direction marker.
+- The active vessel has a blinking body pixel and a larger trailing direction marker.
+- Direction markers must work in all eight directions: N, NE, E, SE, S, SW, W and NW.
+
+The firmware should not generate or display mock AIS data. If no live marine vessels are in the payload, the display should show the ordinary waiting/empty state from the Worker payload.
+
 ## OTA
 
 This firmware uses the ESP32 Arduino default dual OTA partition layout for the `esp32s3camlcd` board (`ota_0` and `ota_1`). `SKYFRAME_FW_VERSION` in `src/main.cpp` identifies the running version.
@@ -126,6 +159,8 @@ shasum -a 256 firmware-hub75/.pio/build/waveshare_esp32_s3_rgb_matrix/firmware.b
 ```
 
 Copy the resulting `.bin` to `cloudflare-worker/public/firmware/`, update `cloudflare-worker/public/firmware/latest.json`, then deploy the Worker.
+
+Current deployed firmware line is `V1.8`, which includes Marine mode rendering, corrected radar orientation, active-vessel direction markers and the exact marine text-row margins.
 
 ## Build And Upload
 

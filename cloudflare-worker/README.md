@@ -31,12 +31,69 @@ npm run deploy
 
 Legacy inline control panels and the pixel editor have been removed. The active app is `frontend/src/App.tsx`.
 
+## Product Modes
+
+SkyFrame is one product with two per-screen modes:
+
+- `flight`
+- `marine`
+
+The selected mode is stored as the only shared top-level screen setting. Mode-specific settings are stored separately:
+
+```text
+config:v1          active productMode only
+config:v1:flight   flight settings
+config:v1:marine   marine settings
+```
+
+Do not reuse flight settings for marine, or marine settings for flight. The control panel should show only the sections for the active mode. A mode switch in the Account panel must not mutate the other mode's config.
+
+Marine display data is served through the same `/api/display` and `/public/display` endpoints as flight data, but `productMode: "marine"` changes the payload and firmware layout.
+
+`POST /api/display-refresh` forces a one-off display refresh. It broadcasts `display_changed` over realtime so the physical screen fetches `/public/display` immediately. The control panel uses the same action for the marine "Fetch now" button.
+
 ## Account Data
 
 - FR24 keys are stored per account, encrypted with `CREDENTIAL_ENCRYPTION_KEY`.
 - Screen display modes that require FR24 are unlocked when the owner account has a key.
+- BarentsWatch AIS Client ID and Client Secret are stored per account, encrypted with `CREDENTIAL_ENCRYPTION_KEY`.
+- Marine mode requires BarentsWatch AIS credentials for live vessel data. Missing credentials, API errors and empty radar areas must be surfaced as real states, not replaced with mock data.
 - Homey tokens are stored per account and can be rotated from the account panel.
 - Homey sends HTTP `POST` to screen-specific URLs and includes `X-SkyFrame-Homey-Token`.
+
+## BarentsWatch AIS
+
+Marine mode uses the BarentsWatch Live AIS "latest position" endpoint:
+
+```text
+GET https://live.ais.barentswatch.no/v1/latest/combined
+```
+
+The Worker obtains an OAuth token using account credentials:
+
+```text
+POST https://id.barentswatch.no/connect/token
+scope=ais
+grant_type=client_credentials
+```
+
+Relevant Worker variables:
+
+```toml
+BARENTSWATCH_SCOPE = "ais"
+BARENTSWATCH_TOKEN_URL = "https://id.barentswatch.no/connect/token"
+BARENTSWATCH_LATEST_URL = "https://live.ais.barentswatch.no/v1/latest/combined"
+```
+
+AIS data is normalized into the compact display format used by the firmware and emulator. Ship type codes are mapped to human-readable names such as `High speed craft`, `Cargo`, `Passenger` and `Tanker`.
+
+Marine radar projection uses a viewer-relative coordinate system:
+
+- Positive forward is from the POV point toward the radar center and maps to the top of the LED radar.
+- Positive right is the viewer's right side from the same POV and maps to the right side of the LED radar.
+- `radarHeadingDeg` is a heading relative to that radar coordinate system, used by firmware and emulator to draw the vessel direction marker.
+
+Do not introduce mock AIS data in customer-facing responses. Local tests should use explicit fixtures or local-only test helpers instead of falling back inside production display code.
 
 Example:
 
@@ -62,8 +119,8 @@ Firmware binaries can be published as Worker assets under `public/firmware/`.
 
 ```json
 {
-  "version": "V1.4",
-  "url": "https://skyframe.danaksel.no/public/firmware/skyframe-v1.4.bin",
+  "version": "V1.8",
+  "url": "https://skyframe.danaksel.no/public/firmware/skyframe-v1.8.bin",
   "sha256": "<64 hex chars>",
   "size": 1234567,
   "releaseNotes": [
@@ -72,4 +129,4 @@ Firmware binaries can be published as Worker assets under `public/firmware/`.
 }
 ```
 
-Use `V<major>.<minor>` in `SKYFRAME_FW_VERSION`, `latest.json` and the lowercase binary filename, for example `skyframe-v1.4.bin`. Every firmware release must include short pointwise `releaseNotes` for the control panel update card. Firmware installation is manual: the display may report update availability from `latest.json`, but it must only download and install after an explicit `ota_update` command.
+Use `V<major>.<minor>` in `SKYFRAME_FW_VERSION`, `latest.json` and the lowercase binary filename, for example `skyframe-v1.8.bin`. Every firmware release must include short pointwise `releaseNotes` for the control panel update card. Firmware installation is manual: the display may report update availability from `latest.json`, but it must only download and install after an explicit `ota_update` command.

@@ -1,6 +1,6 @@
 # SkyFrame
 
-SkyFrame is a consumer-facing flight display for a 128 x 64 HUB75 RGB LED panel driven by a Waveshare ESP32-S3-RGB-Matrix board.
+SkyFrame is a consumer-facing flight and marine traffic display for a 128 x 64 HUB75 RGB LED panel driven by a Waveshare ESP32-S3-RGB-Matrix board.
 
 The product model is simple: one firmware image can be flashed before delivery, and every customer-specific decision happens later through Cloudflare, Google login, pairing and the control panel.
 
@@ -15,8 +15,9 @@ Customer browser
 Cloudflare Worker
   React control panel
   Pairing and account flow
-  Per-screen FR24 secret storage
-  Shared public APIs for Avinor, logos and display payloads
+  Account-level FR24 and BarentsWatch secret storage
+  Per-screen product mode and separate mode-specific settings
+  Shared public APIs for Avinor, BarentsWatch AIS, logos and display payloads
   KV-backed config, screen state, vitals and pending device commands
   Durable Object realtime fanout
   Static React assets served from Worker assets
@@ -47,7 +48,54 @@ The setup URL scrolls on the panel so the full `/start` path is visible.
 
 5. Customer opens `https://skyframe.danaksel.no/start`, signs in with Google, enters the pairing code and gives the screen a device name.
 6. FR24 is optional. Without a personal FR24 key, the control panel disables AirSpace, Follow Flight and AirSpace + Airport Board. Airport Board and Clock still work.
-7. Later changes happen from the control panel. The device should not need to be connected to a PC again for normal ownership, Wi-Fi or restart tasks.
+7. BarentsWatch AIS credentials are optional and are only used by screens set to Marine mode.
+8. Later changes happen from the control panel. The device should not need to be connected to a PC again for normal ownership, Wi-Fi or restart tasks.
+
+## Product Modes
+
+Each paired screen has one shared top-level `productMode`:
+
+- `flight`
+- `marine`
+
+The mode is selected in the Account panel under "My screens". The mode decides which control-panel sections are shown and which display payload the firmware receives.
+
+Flight and Marine settings are intentionally separate. The Worker stores an active mode pointer plus a separate config profile for each mode:
+
+```text
+config:v1          active productMode only
+config:v1:flight   flight profile
+config:v1:marine   marine profile
+```
+
+Do not share location, radius, colors, display behavior or other settings between the two modes. Only the screen identity, account, pairing/device token, power state, maintenance commands and active `productMode` are common.
+
+### Flight Mode
+
+Flight mode uses FR24, Avinor and airline logo assets. FR24 credentials are account-scoped and encrypted with `CREDENTIAL_ENCRYPTION_KEY`.
+
+### Marine Mode
+
+Marine mode uses BarentsWatch Live AIS. BarentsWatch Client ID and Client Secret are account-scoped and encrypted with `CREDENTIAL_ENCRYPTION_KEY`.
+
+Marine mode renders:
+
+- 1 px outer margin.
+- Radar area at `x=1`, `y=1`, `w=126`, `h=46`.
+- Text line 1 at `y=48`: `Vessel name - Ship type`.
+- Text line 2 at `y=56`: `Course - Speed - Destination - Status`.
+- 1 px bottom margin.
+
+Marine radar uses two geographic points:
+
+- Radar center: the center of the rectangular radar area.
+- POV/distance origin: where the screen/viewer is physically located.
+
+Distances and bearings shown in text are measured from the POV point. Radar projection is centered on the radar center. The top edge of the radar is "straight ahead" from the POV point toward the radar center, and the right edge is the viewer's right side from that same POV.
+
+Marine radius is configurable from 0.5 km to 3.0 km in 0.1 km steps. Normal AIS polling uses the marine fetch interval, and the control panel also has a "Fetch now" button that sends a realtime display refresh to the physical screen and refreshes the emulator preview immediately.
+
+Mock AIS data must not be used in the customer-facing control panel or display payload. If BarentsWatch credentials are missing, the API fails, or there are no vessels in the selected radar area, the UI should show that state explicitly.
 
 ## Project Structure
 
@@ -76,9 +124,15 @@ Per-screen/private resources:
 - Device token
 - Screen config and device name
 - Screen state and vitals
-- Personal FR24 key
+- Active product mode
 
-FR24 is intentionally per screen because the key costs money and belongs to the owner. Avinor, logo assets, KV namespace and R2 are shared infrastructure.
+Per-account/private resources:
+
+- Personal FR24 key
+- Personal BarentsWatch AIS credentials
+- Homey token
+
+FR24 and BarentsWatch credentials are intentionally account-scoped because they belong to the owner and should follow the account across unpairing, Wi-Fi changes, factory reset and re-pairing. Avinor, logo assets, KV namespace and R2 are shared infrastructure.
 
 ## Important Routes
 
@@ -92,7 +146,10 @@ FR24 is intentionally per screen because the key costs money and belongs to the 
   Admin-only overview of users, screens, FR24 status, screen state and device vitals. Admin can delete a screen, which sends it back to pairing mode.
 
 - `/api/config`
-  Reads and saves the current screen config for the signed-in user/screen.
+  Reads and saves the current screen config for the signed-in user/screen. The active product mode decides whether this reads/writes the flight or marine profile.
+
+- `/api/display-refresh`
+  Forces an immediate display fetch. The Worker broadcasts `display_changed` so the physical screen fetches `/public/display` immediately, and the control panel refreshes the preview.
 
 - `/api/device-command`
   Sends a maintenance command to the current screen. Supported commands are `restart`, `unpair`, `forget_wifi` and `factory_reset`.
@@ -274,7 +331,7 @@ npx wrangler secret put CREDENTIAL_ENCRYPTION_KEY
 npx wrangler secret put AVIATIONSTACK_API_KEY
 ```
 
-FR24 keys are account-scoped. Each owner adds their own FR24 key from the account panel in the control panel, and that key follows the account across screen unpairing, Wi-Fi changes, factory reset and re-pairing.
+FR24 keys and BarentsWatch AIS credentials are account-scoped. Each owner adds their own keys from the account panel in the control panel, and those credentials follow the account across screen unpairing, Wi-Fi changes, factory reset and re-pairing.
 
 Optional automation/device hardening:
 
@@ -309,7 +366,11 @@ The Worker validates `X-SkyFrame-Homey-Token`. `/api/screens/{screenId}/...` ali
 - Control panel shows the device name in the header.
 - Multiple screens owned by the same account can be selected from the header.
 - AirSpace and Follow modes are disabled until the screen has a personal FR24 key.
-- Header account icon opens the account panel with signed-in user, screens, FR24 and Homey token.
+- Header account icon opens the account panel with signed-in user, screens, FR24, BarentsWatch AIS and Homey token.
+- Account panel can switch each screen between Flight and Marine without overwriting the other mode's settings.
+- Marine mode shows no mock AIS data to customers.
+- Marine mode can force an immediate AIS/display fetch from the Vessels panel.
+- Marine emulator and firmware preserve the exact `128 x 64` marine layout and margins.
 - Power switch turns the screen on/off.
 - General screen can restart, update firmware, unpair or reset Wi-Fi remotely.
 - Admin shows all active screens, owners and clean vitals.
