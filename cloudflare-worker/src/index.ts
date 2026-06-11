@@ -3701,7 +3701,7 @@ async function marineLandMaskFor(env: Env, config: Config): Promise<MarineLandMa
   const height = 46;
   const forwardBearingDeg = marineForwardBearing(config);
   const keyParts = [
-    "marine-landmask:v1",
+    "marine-landmask:v2",
     dataset.version,
     round(config.lat, 5),
     round(config.lon, 5),
@@ -3851,12 +3851,78 @@ function buildMarineLandMask(dataset: MarineLandDataset, config: Config, width: 
       }
     }
   }
+  cleanMarineLandMaskArtifacts(bytes, width, height);
   return {
     width,
     height,
     encoding: "base64-land-bits-v1",
     data: bytesToStandardBase64(bytes)
   };
+}
+
+function cleanMarineLandMaskArtifacts(bytes: Uint8Array, width: number, height: number): void {
+  const total = width * height;
+  const visited = new Uint8Array(total);
+  const isLand = (index: number) => Boolean(bytes[Math.floor(index / 8)] & (1 << (index % 8)));
+  const clearLand = (index: number) => { bytes[Math.floor(index / 8)] &= ~(1 << (index % 8)); };
+
+  for (let start = 0; start < total; start++) {
+    if (visited[start] || !isLand(start)) continue;
+    const stack = [start];
+    visited[start] = 1;
+    const pixels: number[] = [];
+    let minX = width;
+    let minY = height;
+    let maxX = 0;
+    let maxY = 0;
+    let touchesEdge = false;
+    let seaBorder = 0;
+    let border = 0;
+
+    while (stack.length) {
+      const index = stack.pop() as number;
+      pixels.push(index);
+      const x = index % width;
+      const y = Math.floor(index / width);
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+      if (x === 0 || y === 0 || x === width - 1 || y === height - 1) touchesEdge = true;
+
+      [[x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]].forEach(([nx, ny]) => {
+        if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
+          border++;
+          return;
+        }
+        const next = ny * width + nx;
+        if (isLand(next)) {
+          if (!visited[next]) {
+            visited[next] = 1;
+            stack.push(next);
+          }
+        } else {
+          seaBorder++;
+          border++;
+        }
+      });
+    }
+
+    const componentWidth = maxX - minX + 1;
+    const componentHeight = maxY - minY + 1;
+    const area = pixels.length;
+    const fill = area / Math.max(1, componentWidth * componentHeight);
+    const aspect = Math.max(componentWidth, componentHeight) / Math.max(1, Math.min(componentWidth, componentHeight));
+    const surroundedBySea = !touchesEdge && border > 0 && seaBorder / border > 0.72;
+    const lineLike = Math.min(componentWidth, componentHeight) <= 1
+      || (Math.min(componentWidth, componentHeight) <= 2 && area <= 18)
+      || (aspect >= 5 && fill <= 0.42 && area <= 42);
+    const speck = area <= 2 && surroundedBySea;
+
+    if (surroundedBySea && (lineLike || speck)) {
+      pixels.forEach(clearLand);
+    }
+  }
 }
 
 function marineRadarPixelLatLon(config: Config, x: number, y: number, width: number, height: number, forwardBearingDeg: number): [number, number] {
