@@ -347,11 +347,21 @@ type MarineLandMask = {
 type MarineLandDataset = {
   version: string;
   features: MarineLandFeature[];
+  raster?: MarineLandRaster;
 };
 
 type MarineLandFeature = {
   bbox?: [number, number, number, number];
   rings: MarineLngLat[][];
+};
+
+type MarineLandRaster = {
+  bbox: [number, number, number, number];
+  width: number;
+  height: number;
+  encoding: "base64-land-bits-v1";
+  data: string;
+  bytes: Uint8Array;
 };
 
 type MarineLngLat = [number, number];
@@ -3686,7 +3696,7 @@ function marineForwardBearing(config: Config): number {
 
 async function marineLandMaskFor(env: Env, config: Config): Promise<MarineLandMask | undefined> {
   const dataset = await loadMarineLandDataset(env);
-  if (!dataset || !dataset.features.length) return undefined;
+  if (!dataset || (!dataset.features.length && !dataset.raster)) return undefined;
   const width = 126;
   const height = 46;
   const forwardBearingDeg = marineForwardBearing(config);
@@ -3738,16 +3748,39 @@ async function loadMarineLandDataset(env: Env): Promise<MarineLandDataset | null
 function normalizeMarineLandDataset(value: unknown): MarineLandDataset | null {
   if (!value || typeof value !== "object") return null;
   const input = value as Record<string, unknown>;
+  const raster = normalizeMarineLandRaster(input);
   if (Array.isArray(input.features)) {
     const features = input.features
       .flatMap((feature) => normalizeMarineLandFeature(feature))
       .filter((feature): feature is MarineLandFeature => Boolean(feature));
     return {
       version: typeof input.version === "string" ? input.version : typeof input.name === "string" ? input.name : "geojson",
-      features
+      features,
+      ...(raster ? { raster } : {})
+    };
+  }
+  if (raster) {
+    return {
+      version: typeof input.version === "string" ? input.version : "raster",
+      features: [],
+      raster
     };
   }
   return null;
+}
+
+function normalizeMarineLandRaster(input: Record<string, unknown>): MarineLandRaster | undefined {
+  if (input.type !== "raster-landmask-v1") return undefined;
+  const bbox = normalizeMarineBbox(input.bbox);
+  const width = Number(input.width);
+  const height = Number(input.height);
+  const encoding = input.encoding;
+  const data = input.data;
+  if (!bbox || !Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) return undefined;
+  if (encoding !== "base64-land-bits-v1" || typeof data !== "string" || !data) return undefined;
+  const bytes = standardBase64ToBytes(data);
+  if (bytes.length < Math.ceil(width * height / 8)) return undefined;
+  return { bbox, width, height, encoding, data, bytes };
 }
 
 function normalizeMarineLandFeature(value: unknown): MarineLandFeature[] {
@@ -3812,7 +3845,7 @@ function buildMarineLandMask(dataset: MarineLandDataset, config: Config, width: 
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const [lat, lon] = marineRadarPixelLatLon(config, x, y, width, height, forwardBearingDeg);
-      if (marinePointIsLand(lon, lat, dataset.features)) {
+      if (marinePointIsLandInDataset(lon, lat, dataset)) {
         const bitIndex = y * width + x;
         bytes[Math.floor(bitIndex / 8)] |= 1 << (bitIndex % 8);
       }
@@ -3840,6 +3873,24 @@ function marineRadarPixelLatLon(config: Config, x: number, y: number, width: num
 }
 
 function marinePointIsLand(lon: number, lat: number, features: MarineLandFeature[]): boolean {
+  return marinePointIsLandInFeatures(lon, lat, features);
+}
+
+function marinePointIsLandInDataset(lon: number, lat: number, dataset: MarineLandDataset): boolean {
+  if (dataset.raster) return marinePointIsLandInRaster(lon, lat, dataset.raster);
+  return marinePointIsLandInFeatures(lon, lat, dataset.features);
+}
+
+function marinePointIsLandInRaster(lon: number, lat: number, raster: MarineLandRaster): boolean {
+  const [minLon, minLat, maxLon, maxLat] = raster.bbox;
+  if (lon < minLon || lon > maxLon || lat < minLat || lat > maxLat) return false;
+  const x = Math.max(0, Math.min(raster.width - 1, Math.floor(((lon - minLon) / (maxLon - minLon)) * raster.width)));
+  const y = Math.max(0, Math.min(raster.height - 1, Math.floor(((maxLat - lat) / (maxLat - minLat)) * raster.height)));
+  const bitIndex = y * raster.width + x;
+  return Boolean(raster.bytes[Math.floor(bitIndex / 8)] & (1 << (bitIndex % 8)));
+}
+
+function marinePointIsLandInFeatures(lon: number, lat: number, features: MarineLandFeature[]): boolean {
   return features.some((feature) => {
     if (feature.bbox) {
       const [minLon, minLat, maxLon, maxLat] = feature.bbox;
@@ -3870,6 +3921,13 @@ function bytesToStandardBase64(values: Uint8Array): string {
   let binary = "";
   values.forEach((value) => { binary += String.fromCharCode(value); });
   return btoa(binary);
+}
+
+function standardBase64ToBytes(value: string): Uint8Array {
+  const binary = atob(value);
+  const output = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) output[i] = binary.charCodeAt(i);
+  return output;
 }
 
 function compactMarineRaw(row: Record<string, unknown>): Record<string, unknown> {

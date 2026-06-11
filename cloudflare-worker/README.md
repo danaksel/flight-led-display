@@ -93,7 +93,21 @@ Marine radar projection uses a viewer-relative coordinate system:
 - Positive right is the viewer's right side from the same POV and maps to the right side of the LED radar.
 - `radarHeadingDeg` is a heading relative to that radar coordinate system, used by firmware and emulator to draw the vessel direction marker.
 
-Optional land/sea outline support uses a preprocessed land-polygon extract. The deployed starter dataset at `public/marine/land-polygons.json` is generated from Natural Earth 10m land for the Nordic/North Sea region. For a more detailed local coastline, replace it with an OSMCoastline-derived regional extract, or set `MARINE_LANDMASK_URL` to a hosted JSON file. The Worker accepts GeoJSON `FeatureCollection` with `Polygon`/`MultiPolygon` geometry, or the compact form:
+Optional land/sea outline support uses a preprocessed landmask extract. The deployed dataset at `public/marine/land-polygons.json` is generated from Kartverket Topografisk norgeskart WMS for inner Oslofjord. For another area, replace it with an OSMCoastline/Kartverket-derived regional extract, or set `MARINE_LANDMASK_URL` to a hosted JSON file. The Worker accepts raster landmasks, GeoJSON `FeatureCollection` with `Polygon`/`MultiPolygon` geometry, or the compact polygon form:
+
+```json
+{
+  "type": "raster-landmask-v1",
+  "version": "kartverket-topo-inner-oslofjord-2026-06-11-v1",
+  "bbox": [10.35, 59.65, 10.9, 60.02],
+  "width": 2200,
+  "height": 1480,
+  "encoding": "base64-land-bits-v1",
+  "data": "..."
+}
+```
+
+Polygon form:
 
 ```json
 {

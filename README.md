@@ -95,7 +95,7 @@ Distances and bearings shown in text are measured from the POV point. Radar proj
 
 Marine radius is configurable from 0.5 km to 3.0 km in 0.1 km steps. Normal AIS polling uses the marine fetch interval, and the control panel also has a "Fetch now" button that sends a realtime display refresh to the physical screen and refreshes the emulator preview immediately.
 
-Marine radar can draw a land/sea outline from a preprocessed land-polygon extract. The deployed starter dataset is `public/marine/land-polygons.json`, generated from Natural Earth 10m land for the Nordic/North Sea region. The Worker can also use `MARINE_LANDMASK_URL` if configured. At runtime the Worker converts the current rotated `126 x 46` radar rectangle to a compact `base64-land-bits-v1` mask and caches it in KV. Firmware and emulator draw set bits as black/off LEDs and leave unset bits as the configured radar background color.
+Marine radar can draw a land/sea outline from a preprocessed landmask extract. The deployed dataset is `public/marine/land-polygons.json`, generated from Kartverket Topografisk norgeskart WMS for inner Oslofjord. The Worker can also use `MARINE_LANDMASK_URL` if configured. At runtime the Worker converts the current rotated `126 x 46` radar rectangle to a compact `base64-land-bits-v1` mask and caches it in KV. Firmware and emulator draw set bits as black/off LEDs and leave unset bits as the configured radar background color.
 
 Mock AIS data must not be used in the customer-facing control panel or display payload. If BarentsWatch credentials are missing, the API fails, or there are no vessels in the selected radar area, the UI should show that state explicitly.
 
