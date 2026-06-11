@@ -1,11 +1,11 @@
 {
-  "version": "V1.11",
-  "url": "https://skyframe.danaksel.no/public/firmware/skyframe-v1.11.bin",
-  "sha256": "d14b0831e03aea68af7f64eb1faca46834b11b3d5a2fb16f19cefea08e6a3b05",
-  "size": 1123152,
+  "version": "V1.12",
+  "url": "https://skyframe.danaksel.no/public/firmware/skyframe-v1.12.bin",
+  "sha256": "5f31afecd1fb85b192594dc3db0c9e38153c7dd0a31921e54caa6cb59302dbcd",
+  "size": 1123168,
   "releaseNotes": [
-    "Keeps the marine radar visible when no vessels are nearby.",
-    "Leaves both marine text lines blank until a vessel is present.",
-    "Keeps emulator and firmware empty-radar behavior in sync."
+    "Restores scrolling for overflowing marine text on the physical display.",
+    "Restores blinking for the active vessel pixel.",
+    "Keeps marine firmware redraw behavior aligned with the emulator."
   ]
 }

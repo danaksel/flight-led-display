@@ -164,7 +164,7 @@ shasum -a 256 firmware-hub75/.pio/build/waveshare_esp32_s3_rgb_matrix/firmware.b
 
 Copy the resulting `.bin` to `cloudflare-worker/public/firmware/`, update `cloudflare-worker/public/firmware/latest.json`, then deploy the Worker.
 
-Current deployed firmware line is `V1.11`, which includes Marine mode rendering, corrected radar orientation, active-vessel direction markers, exact marine text-row margins, optional land/sea mask rendering, configurable marine land color and persistent radar rendering when no vessels are present.
+Current deployed firmware line is `V1.12`, which includes Marine mode rendering, corrected radar orientation, active-vessel direction markers, blinking active-vessel pixels, scrolling marine text rows, exact marine text-row margins, optional land/sea mask rendering, configurable marine land color and persistent radar rendering when no vessels are present.
 
 ## Build And Upload
 

@@ -21,7 +21,7 @@ namespace
 constexpr uint16_t PanelWidth = 128;
 constexpr uint16_t PanelHeight = 64;
 constexpr uint8_t Brightness = 8;
-constexpr const char *SKYFRAME_FW_VERSION = "V1.11";
+constexpr const char *SKYFRAME_FW_VERSION = "V1.12";
 constexpr const char *DeviceConfigUrl = "https://skyframe.danaksel.no/public/device-config";
 constexpr const char *SoundStateUrl = "https://skyframe.danaksel.no/public/sound-state";
 constexpr const char *RealtimeStateUrl = "https://skyframe.danaksel.no/public/realtime-state";
@@ -3118,8 +3118,8 @@ void drawMarinePayload(JsonObject flight, size_t itemCount)
     }
 
     const uint16_t textColor = lineRouteColor ? lineRouteColor : panelColor(0xFF, 0xC7, 0x77);
-    drawTickerText(name, 1, 48, textColor, 126);
-    drawTickerText(details, 1, 56, textColor, 126);
+    drawTickerTextBoxedClipped(name, 1, 48, textColor, 126, liveCycleStartedAt, liveScrollPixelsPerSecond);
+    drawTickerTextBoxedClipped(details, 1, 56, textColor, 126, liveCycleStartedAt, liveScrollPixelsPerSecond);
     presentFrame();
 }
 
@@ -3273,6 +3273,7 @@ void drawDisplayPayload(JsonDocument &doc)
         liveCycleStartedAt = millis();
         JsonObject flight = flightCount > 0 ? flights[currentLiveFlight].as<JsonObject>() : JsonObject();
         drawMarinePayload(flight, flightCount);
+        liveLayoutActive = true;
         nextLiveCycleAt = flightCount > 0 ? millis() + static_cast<uint32_t>(displayCycleSeconds) * 1000UL : 0;
         lastLiveRenderAt = millis();
         Serial.print("Display OK. mode=marine flights=");
