@@ -86,6 +86,8 @@ Marine mode renders:
 - Text line 2 at `y=56`: `Course - Speed - Destination - Status`.
 - 1 px bottom margin.
 
+Vessels with AIS status anchored, moored or in port are filtered out before radar/text rendering. Destination is included on text line 2 when AIS provides a usable destination value.
+
 Marine radar uses two geographic points:
 
 - Radar center: the center of the rectangular radar area.

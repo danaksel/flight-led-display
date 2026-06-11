@@ -3531,6 +3531,7 @@ async function forceDisplayRefresh(env: Env, context?: RequestContext): Promise<
 async function getMarineVessels(env: Env, config: Config, context?: RequestContext): Promise<MarineVessel[]> {
   const apiVessels = await fetchMarineVesselsFromApi(env, config, context);
   return apiVessels
+    .filter((vessel) => !isMarineVesselExcludedByStatus(vessel))
     .map((vessel) => projectMarineVesselToRadar(vessel, config))
     .filter((vessel) => isMarineVesselInRadar(vessel))
     .sort((a, b) => a.distanceKm - b.distanceKm);
@@ -4108,6 +4109,36 @@ function marineNavigationStatus(value: unknown): string | undefined {
     return statuses[value] || `Status ${value}`;
   }
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function isMarineVesselExcludedByStatus(vessel: MarineVessel): boolean {
+  return isStationaryMarineStatus(vessel.status);
+}
+
+function isStationaryMarineStatus(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+  if (!normalized) return false;
+  return [
+    "ankret",
+    "oppankret",
+    "fortoyd",
+    "at anchor",
+    "anchored",
+    "moored",
+    "berthed",
+    "made fast",
+    "in port",
+    "in harbour",
+    "in harbor",
+    "i havn",
+    "til havn",
+    "i hamn"
+  ].some((status) => normalized === status || normalized.includes(status));
 }
 
 function marineCardinal(deg: number): string {

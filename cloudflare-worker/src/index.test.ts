@@ -746,4 +746,89 @@ describe("display polling contract", () => {
     ]);
   });
 
+  it("filters anchored and moored marine vessels while keeping destination in text", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof Request ? input.url : String(input);
+
+      if (url.includes("id.barentswatch.no/connect/token")) {
+        return new Response(JSON.stringify({ access_token: "barents-token", expires_in: 3600 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+
+      if (url.includes("live.ais.barentswatch.no/v1/latest/combined")) {
+        return new Response(JSON.stringify([
+          {
+            mmsi: "257000001",
+            vesselName: "MOVING ONE",
+            vesselType: 70,
+            destination: "OSLO",
+            lat: 59.9142,
+            lon: 10.753,
+            sog: 12.4,
+            cog: 91,
+            status: 0
+          },
+          {
+            mmsi: "257000002",
+            vesselName: "ANCHOR ONE",
+            destination: "OSLO",
+            lat: 59.9144,
+            lon: 10.7532,
+            sog: 0,
+            cog: 0,
+            status: 1
+          },
+          {
+            mmsi: "257000003",
+            vesselName: "MOORED ONE",
+            destination: "OSLO",
+            lat: 59.9145,
+            lon: 10.7533,
+            sog: 0,
+            cog: 0,
+            status: "Moored"
+          }
+        ]), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+
+      return new Response(null, { status: 404 });
+    });
+
+    const config = {
+      ...baseConfig(),
+      productMode: "marine",
+      radiusKm: 1,
+      device: {
+        ...(baseConfig().device as Record<string, unknown>),
+        displayMode: "hybrid"
+      }
+    };
+    const env = makeEnv({
+      CREDENTIAL_ENCRYPTION_KEY: "test-secret"
+    }, {
+      [CONFIG_KEY]: config
+    });
+
+    const keyResponse = await userRequest("/api/account/barentswatch-key", env, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clientId: "client", clientSecret: "secret" })
+    });
+    expect(keyResponse.status).toBe(200);
+
+    const response = await userRequest("/api/display", env);
+    const json = await response.json() as { flights?: Array<Record<string, unknown>>; vessels?: Array<Record<string, unknown>> };
+    const firstFlight = json.flights?.[0] as { lines?: Record<string, string> } | undefined;
+
+    expect(response.status).toBe(200);
+    expect(json.vessels?.map((vessel) => vessel.vesselName)).toEqual(["MOVING ONE"]);
+    expect(json.flights).toHaveLength(1);
+    expect(firstFlight?.lines?.aircraft).toContain("OSLO");
+  });
+
 });
