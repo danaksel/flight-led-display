@@ -149,6 +149,7 @@ type DeviceSettings = {
     progress: string;
     routeProgress: string;
     land: string;
+    icon: string;
   };
   clockColor: string;
   clockTopColor: string;
@@ -302,6 +303,7 @@ type DisplayFlight = {
   radarX?: number;
   radarY?: number;
   radarHeadingDeg?: number;
+  marineIcon?: string;
 };
 
 type LiveSourceStatus = {
@@ -664,7 +666,8 @@ const DEFAULT_AIRSPACE_COLORS: AirspaceColors = {
   context: "#ffaa00",
   progress: "#aaaaaa",
   routeProgress: "#00f900",
-  land: "#000000"
+  land: "#000000",
+  icon: "#ffc777"
 };
 
 const DEFAULT_MARINE_COLORS: AirspaceColors = {
@@ -674,7 +677,8 @@ const DEFAULT_MARINE_COLORS: AirspaceColors = {
   context: "#ffc777",
   progress: "#a6a6a6",
   routeProgress: "#17265d",
-  land: "#000000"
+  land: "#000000",
+  icon: "#ffc777"
 };
 
 const DEFAULT_CLOCK_COLORS: ClockColors = {
@@ -774,6 +778,7 @@ export default {
       if (url.pathname === "/public/device-status" && request.method === "POST") return saveDeviceStatus(request, env, context);
       if (url.pathname === "/public/firmware/latest.json" && request.method === "GET") return firmwareLatestPublicResponse(request, env, context);
       if (url.pathname.match(/^\/public\/firmware\/[^/]+\.bin$/) && request.method === "GET") return firmwareAssetResponse(request, env, url.pathname.replace(/^\/public/, ""), "application/octet-stream");
+      if (url.pathname.match(/^\/public\/marine\/icons\/[^/]+\.(?:rgb565|bmp)$/) && request.method === "GET") return firmwareAssetResponse(request, env, url.pathname.replace(/^\/public/, ""), url.pathname.endsWith(".rgb565") ? "application/octet-stream" : "image/bmp");
       if (url.pathname === "/public/device-config" && request.method === "GET") return deviceConfigResponse(env, context);
       if (url.pathname === "/public/sound-state" && request.method === "GET") return soundStateResponse(env, context);
       if (url.pathname === "/public/display" && request.method === "GET") return flightsResponse(env, true, context);
@@ -897,6 +902,7 @@ async function authorizeRequest(request: Request, env: Env, pathname: string, co
   if (pathname === "/api/health") return undefined;
   if (pathname.startsWith("/public/provision/")) return undefined;
   if (pathname.startsWith("/public/firmware/")) return undefined;
+  if (pathname.startsWith("/public/marine/icons/")) return undefined;
   if (pathname.startsWith("/public/logos-rgb565/") || pathname.startsWith("/public/logos/")) return undefined;
 
   if (isScreenAutomationApiPath(pathname) || isPublicHomeyPath) {
@@ -2920,7 +2926,8 @@ function normalizeLineColors(value: unknown): DeviceSettings["lineColors"] {
     context: normalizeHexColor(v.context, DEFAULT_AIRSPACE_COLORS.context),
     progress: normalizeHexColor(v.progress, DEFAULT_AIRSPACE_COLORS.progress),
     routeProgress: normalizeHexColor(v.routeProgress, DEFAULT_AIRSPACE_COLORS.routeProgress),
-    land: normalizeHexColor(v.land, DEFAULT_AIRSPACE_COLORS.land)
+    land: normalizeHexColor(v.land, DEFAULT_AIRSPACE_COLORS.land),
+    icon: normalizeHexColor(v.icon, DEFAULT_AIRSPACE_COLORS.icon)
   };
 }
 
@@ -3634,11 +3641,10 @@ function marineVesselToDisplayFlight(vessel: MarineVessel): DisplayFlight {
   const course = vessel.courseDeg === undefined ? undefined : `${Math.round(vessel.courseDeg)} DEG`;
   const speed = vessel.speedKnots === undefined ? "-- KN" : `${round(vessel.speedKnots, 1)} KN`;
   const vesselName = marineDisplayPart(vessel.vesselName) || id;
-  const shipType = marineDisplayPart(marineVesselType(vessel.vesselType));
   const destination = marineDisplayPart(vessel.destination);
-  const status = marineDisplayPart(vessel.status) || "Ukjent status";
-  const line1 = [vesselName, shipType].filter(Boolean).join(" - ");
-  const line2 = [course, speed, destination, status].filter(Boolean).join(" - ");
+  const marineIcon = marineVesselIcon(vessel.vesselType);
+  const line1 = vesselName;
+  const line2 = [course, speed, destination].filter(Boolean).join(" - ");
   return {
     callsign: id,
     flight: id,
@@ -3659,6 +3665,7 @@ function marineVesselToDisplayFlight(vessel: MarineVessel): DisplayFlight {
     radarX: vessel.radarX,
     radarY: vessel.radarY,
     radarHeadingDeg: vessel.radarHeadingDeg,
+    marineIcon,
     source: vessel.source,
     status: vessel.status,
     displayTime: vessel.eta,
@@ -4122,6 +4129,12 @@ function marineNavigationStatus(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function marineVesselIcon(value: unknown): string {
+  const type = marineVesselType(value);
+  if (type === "Diving ops") return "diving";
+  return "";
+}
+
 function isMarineVesselExcludedByStatus(vessel: MarineVessel): boolean {
   return isStationaryMarineStatus(vessel.status);
 }
@@ -4285,6 +4298,7 @@ async function toCompactDisplayFlight(env: Env, f: DisplayFlight, config: Config
     gate: f.gate || "",
     gateMessage: f.gateMessage || "",
     source: f.source || "",
+    marineIcon: f.marineIcon || "",
     radarX: typeof f.radarX === "number" ? round(f.radarX, 4) : null,
     radarY: typeof f.radarY === "number" ? round(f.radarY, 4) : null,
     radarHeadingDeg: typeof f.radarHeadingDeg === "number" ? Math.round(f.radarHeadingDeg) : null,

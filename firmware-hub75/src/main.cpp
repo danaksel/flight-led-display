@@ -21,7 +21,7 @@ namespace
 constexpr uint16_t PanelWidth = 128;
 constexpr uint16_t PanelHeight = 64;
 constexpr uint8_t Brightness = 8;
-constexpr const char *SKYFRAME_FW_VERSION = "V1.12";
+constexpr const char *SKYFRAME_FW_VERSION = "V1.13";
 constexpr const char *DeviceConfigUrl = "https://skyframe.danaksel.no/public/device-config";
 constexpr const char *SoundStateUrl = "https://skyframe.danaksel.no/public/sound-state";
 constexpr const char *RealtimeStateUrl = "https://skyframe.danaksel.no/public/realtime-state";
@@ -324,6 +324,7 @@ uint16_t lineContextColor = 0;
 uint16_t lineProgressColor = 0;
 uint16_t lineRouteProgressColor = 0;
 uint16_t lineLandColor = 0;
+uint16_t lineIconColor = 0;
 uint8_t clockGradientBottomR = 0x08;
 uint8_t clockGradientBottomG = 0x1B;
 uint8_t clockGradientBottomB = 0x6B;
@@ -1420,6 +1421,24 @@ void drawBitmapSymbolBoxClipped(int16_t x, int16_t y, const char *bitmap[], uint
                 display->drawPixel(targetX, targetY, color);
             }
         }
+    }
+}
+
+const char *MarineDivingIcon[] = {
+    "..............",
+    ".#####..#.....",
+    "#.....#.#.....",
+    "#.....#.#.....",
+    "#..#..#.#.....",
+    ".##.##..#.....",
+    ".......##....."
+};
+
+void drawMarineTypeIcon(const String &icon, int16_t x, int16_t y, uint16_t color)
+{
+    if (icon == "diving")
+    {
+        drawBitmapSymbol(x, y, MarineDivingIcon, 7, color);
     }
 }
 
@@ -2708,6 +2727,7 @@ bool applyDeviceConfigPayload(const String &body, int httpCode, bool httpOk)
     lineProgressColor = parseHexColorOr(valueOr(lineColors["progress"]), defaultHeaderColor);
     lineRouteProgressColor = parseHexColorOr(valueOr(lineColors["routeProgress"]), panelColor(0x00, 0xD4, 0x6A));
     lineLandColor = parseHexColorOr(valueOr(lineColors["land"]), panelColor(0, 0, 0));
+    lineIconColor = parseHexColorOr(valueOr(lineColors["icon"]), panelColor(0xFF, 0xC7, 0x77));
     const String nextClockTopColor = valueOr(device["clockTopColor"], "#ffffff");
     const String nextClockColor = valueOr(device["clockColor"], "#081b6b");
     parseHexRgb(nextClockTopColor, clockGradientTopR, clockGradientTopG, clockGradientTopB);
@@ -3103,22 +3123,25 @@ void drawMarinePayload(JsonObject flight, size_t itemCount)
     {
         const String destination = valueOr(flight["to"]);
         const String speed = flight["spd"].isNull() ? "-- KN" : String(jsonFloat(flight["spd"], 0.0f), 1) + " KN";
-        const String status = valueOr(flight["status"]);
         details = speed;
         if (destination.length())
         {
             if (details.length()) details += " - ";
             details += destination;
         }
-        if (status.length())
-        {
-            if (details.length()) details += " - ";
-            details += status;
-        }
     }
 
     const uint16_t textColor = lineRouteColor ? lineRouteColor : panelColor(0xFF, 0xC7, 0x77);
-    drawTickerTextBoxedClipped(name, 1, 48, textColor, 126, liveCycleStartedAt, liveScrollPixelsPerSecond);
+    const String marineIcon = valueOr(flight["marineIcon"]);
+    if (marineIcon.length())
+    {
+        drawTickerTextBoxedClipped(name, 1, 48, textColor, 110, liveCycleStartedAt, liveScrollPixelsPerSecond);
+        drawMarineTypeIcon(marineIcon, 113, 48, lineIconColor ? lineIconColor : panelColor(0xFF, 0xC7, 0x77));
+    }
+    else
+    {
+        drawTickerTextBoxedClipped(name, 1, 48, textColor, 126, liveCycleStartedAt, liveScrollPixelsPerSecond);
+    }
     drawTickerTextBoxedClipped(details, 1, 56, textColor, 126, liveCycleStartedAt, liveScrollPixelsPerSecond);
     presentFrame();
 }

@@ -125,9 +125,9 @@ The marine renderer must stay pixel-identical with the web emulator:
 y=0      1 px top margin
 y=1-46   radar rectangle, x=1, w=126, h=46
 y=47     1 px gap
-y=48-54  text line 1: Vessel name - Ship type
+y=48-54  text line 1: Vessel name, optional vessel type icon at the right edge
 y=55     1 px gap
-y=56-62  text line 2: Course - Speed - Destination - Status
+y=56-62  text line 2: Course - Speed - Destination
 y=63     1 px bottom margin
 ```
 
@@ -164,7 +164,7 @@ shasum -a 256 firmware-hub75/.pio/build/waveshare_esp32_s3_rgb_matrix/firmware.b
 
 Copy the resulting `.bin` to `cloudflare-worker/public/firmware/`, update `cloudflare-worker/public/firmware/latest.json`, then deploy the Worker.
 
-Current deployed firmware line is `V1.12`, which includes Marine mode rendering, corrected radar orientation, active-vessel direction markers, blinking active-vessel pixels, scrolling marine text rows, exact marine text-row margins, optional land/sea mask rendering, configurable marine land color and persistent radar rendering when no vessels are present.
+Current deployed firmware line is `V1.13`, which includes Marine mode rendering, corrected radar orientation, active-vessel direction markers, blinking active-vessel pixels, scrolling marine text rows, vessel type icons, exact marine text-row margins, optional land/sea mask rendering, configurable marine land and icon colors and persistent radar rendering when no vessels are present.
 
 ## Build And Upload
 

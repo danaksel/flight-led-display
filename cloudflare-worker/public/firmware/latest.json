@@ -1,11 +1,11 @@
 {
-  "version": "V1.12",
-  "url": "https://skyframe.danaksel.no/public/firmware/skyframe-v1.12.bin",
-  "sha256": "5f31afecd1fb85b192594dc3db0c9e38153c7dd0a31921e54caa6cb59302dbcd",
-  "size": 1123168,
+  "version": "V1.13",
+  "url": "https://skyframe.danaksel.no/public/firmware/skyframe-v1.13.bin",
+  "sha256": "ef048be88ce6bd2bd27263dc022c46cf1b783db091970f02ad8e1d3c7ecaa78a",
+  "size": 1123488,
   "releaseNotes": [
-    "Restores scrolling for overflowing marine text on the physical display.",
-    "Restores blinking for the active vessel pixel.",
-    "Keeps marine firmware redraw behavior aligned with the emulator."
+    "Adds marine vessel type icon rendering, starting with diving operations.",
+    "Adds configurable marine icon color in the control panel.",
+    "Removes navigation status text from marine text line 2."
   ]
 }
