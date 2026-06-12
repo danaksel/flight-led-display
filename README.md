@@ -82,11 +82,13 @@ Marine mode renders:
 
 - 1 px outer margin.
 - Radar area at `x=1`, `y=1`, `w=126`, `h=46`.
-- Text line 1 at `y=48`: `Vessel name` with optional vessel type icon at the right edge.
-- Text line 2 at `y=56`: `Course - Speed - Destination`.
+- Text line 1 at `y=48`: `Vessel name` followed by an optional cropped `7 px` vessel type icon after one character-space gap.
+- Text line 2 at `y=56`: configurable `SOG` or `STW`, configurable `COG` or `HDG` with degree symbol and cardinal direction, then optional `Destination`.
 - 1 px bottom margin.
 
 Vessels with AIS status anchored, moored or in port are filtered out before radar/text rendering. Destination is included on text line 2 when AIS provides a usable destination value. AIS status is not shown as text.
+
+Marine speed format defaults to `SOG` and can be changed to `STW`. Marine direction format defaults to `COG` and can be changed to `HDG`. If AIS does not provide a selected value, the display shows `--` for that field instead of substituting a different measurement.
 
 Marine radar uses two geographic points:
 

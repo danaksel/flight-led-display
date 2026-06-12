@@ -1,11 +1,11 @@
 {
-  "version": "V1.13",
-  "url": "https://skyframe.danaksel.no/public/firmware/skyframe-v1.13.bin",
-  "sha256": "ef048be88ce6bd2bd27263dc022c46cf1b783db091970f02ad8e1d3c7ecaa78a",
-  "size": 1123488,
+  "version": "V1.14",
+  "url": "https://skyframe.danaksel.no/public/firmware/skyframe-v1.14.bin",
+  "sha256": "d7eb92cb2b25073886054e6632b3a9839bb411ed2e9de9c8e3df328c798e3c03",
+  "size": 1124240,
   "releaseNotes": [
-    "Adds marine vessel type icon rendering, starting with diving operations.",
-    "Adds configurable marine icon color in the control panel.",
-    "Removes navigation status text from marine text line 2."
+    "Adds configurable marine SOG/STW and COG/HDG text formats.",
+    "Moves marine vessel icons next to the vessel name and crops unused icon width.",
+    "Adds a dedicated degree symbol glyph for marine direction text."
   ]
 }

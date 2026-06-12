@@ -53,6 +53,8 @@ type Config = {
       track: "deg" | "cardinal";
       verticalRate: "fpm" | "fts" | "ms" | "mph" | "kmh";
     };
+    marineSpeedSource: "sog" | "stw";
+    marineDirectionSource: "hdg" | "cog";
     lineColors: {
       airline: string;
       route: string;
@@ -230,7 +232,10 @@ type DisplayFlight = {
   status?: string;
   alt?: number;
   spd?: number;
+  stw?: number;
   trk?: number;
+  hdg?: number;
+  cog?: number;
   vr?: number;
   radarX?: number | null;
   radarY?: number | null;
@@ -530,6 +535,8 @@ const defaultConfig: Config = {
       track: "deg",
       verticalRate: "fpm"
     },
+    marineSpeedSource: "sog",
+    marineDirectionSource: "cog",
     lineColors: defaultAirspaceColors,
     clockColor: defaultClockColors.clockColor,
     clockTopColor: defaultClockColors.clockTopColor,
@@ -761,6 +768,8 @@ function normalizeConfig(input: Partial<Config> & Record<string, unknown>): Conf
         track: followUnits.track ?? defaultConfig.device.followUnits.track,
         verticalRate: followUnits.verticalRate ?? defaultConfig.device.followUnits.verticalRate
       },
+      marineSpeedSource: device.marineSpeedSource === "stw" ? "stw" : "sog",
+      marineDirectionSource: device.marineDirectionSource === "hdg" ? "hdg" : "cog",
       lineColors: normalizeAirspaceColors(lineColors),
       clockColor: normalizeClockColors(device).clockColor,
       clockTopColor: normalizeClockColors(device).clockTopColor,
@@ -1069,6 +1078,7 @@ const ledGlyphs: Record<string, string[]> = {
   " ": ["00000", "00000", "00000", "00000", "00000", "00000", "00000"],
   "-": ["00000", "00000", "00000", "11111", "00000", "00000", "00000"],
   ".": ["00000", "00000", "00000", "00000", "00000", "01100", "01100"],
+  "°": ["01100", "10010", "10010", "01100", "00000", "00000", "00000"],
   ":": ["00000", "00100", "00000", "00000", "00100", "00000", "00000"],
   "/": ["00001", "00010", "00100", "01000", "10000", "00000", "00000"],
   "0": ["01110", "10001", "10011", "10101", "11001", "10001", "01110"],
@@ -1111,7 +1121,7 @@ const ledGlyphs: Record<string, string[]> = {
 
 function ledCharAdvance(char: string): number {
   if (char === " ") return 4;
-  if (char === ":" || char === ".") return 5;
+  if (char === ":" || char === "." || char === "°") return 5;
   return 6;
 }
 
@@ -1815,15 +1825,20 @@ function drawMarineVesselMarker(ctx: CanvasRenderingContext2D, x: number, y: num
 
 const marineIconMasks: Record<string, string[]> = {
   diving: [
-    "..............",
-    ".#####..#.....",
-    "#.....#.#.....",
-    "#.....#.#.....",
-    "#..#..#.#.....",
-    ".##.##..#.....",
-    ".......##....."
+    ".........",
+    ".#####..#",
+    "#.....#.#",
+    "#.....#.#",
+    "#..#..#.#",
+    ".##.##..#",
+    ".......##"
   ]
 };
+
+function marineIconWidth(icon: string | undefined): number {
+  const mask = icon ? marineIconMasks[icon] : undefined;
+  return mask?.[0]?.length ?? 0;
+}
 
 function drawMarineIcon(ctx: CanvasRenderingContext2D, icon: string | undefined, x: number, y: number, color: string) {
   const mask = icon ? marineIconMasks[icon] : undefined;
@@ -1902,13 +1917,19 @@ function drawMarineLayoutExact(ctx: CanvasRenderingContext2D, flight: DisplayFli
 
   const name = flight.lines?.airline || flight.air || flight.cs || flight.flt || "VESSEL";
   const destination = normalizeMarineTextPart(flight.to || flight.destination);
-  const course = Number.isFinite(flight.trk) ? `${Math.round(Number(flight.trk))} DEG` : "";
-  const speed = Number.isFinite(flight.spd) ? `${Number(flight.spd).toFixed(1)} KN` : "-- KN";
-  const details = flight.lines?.aircraft || [course, speed, destination].filter(Boolean).join(" - ");
+  const speedSource = config.device.marineSpeedSource;
+  const directionSource = config.device.marineDirectionSource;
+  const speed = `${speedSource.toUpperCase()}: ${formatMarineFallbackNumber(speedSource === "stw" ? flight.stw : flight.spd)} kt`;
+  const course = formatMarineFallbackDirection(directionSource.toUpperCase(), directionSource === "hdg" ? flight.hdg ?? flight.trk : flight.cog ?? flight.trk);
+  const details = flight.lines?.aircraft || [speed, course, destination].filter(Boolean).join(" - ");
   const hasIcon = Boolean(flight.marineIcon && marineIconMasks[flight.marineIcon]);
   if (hasIcon) {
-    drawTickerLine(ctx, name, 1, 48, textColor, 110, config, tickerStartedAt, now);
-    drawMarineIcon(ctx, flight.marineIcon, 113, 48, iconColor);
+    const iconWidth = marineIconWidth(flight.marineIcon);
+    const gap = ledCharAdvance(" ");
+    const maxNameWidth = Math.max(1, 126 - gap - iconWidth);
+    const nameFieldWidth = Math.min(measureLedText(name), maxNameWidth);
+    drawTickerLine(ctx, name, 1, 48, textColor, nameFieldWidth, config, tickerStartedAt, now);
+    drawMarineIcon(ctx, flight.marineIcon, 1 + nameFieldWidth + gap, 48, iconColor);
   } else {
     drawTickerLine(ctx, name, 1, 48, textColor, 126, config, tickerStartedAt, now);
   }
@@ -1922,6 +1943,18 @@ function normalizeMarineTextPart(value: unknown): string {
   const normalized = text.toLowerCase();
   if (normalized === "unknown" || normalized === "unknown dest." || normalized === "ukjent" || normalized === "n/a" || normalized === "null") return "";
   return text;
+}
+
+function formatMarineFallbackNumber(value: unknown): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "--";
+  return (Math.round(value * 10) / 10).toLocaleString("nb-NO", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+}
+
+function formatMarineFallbackDirection(label: string, value: unknown): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return `${label}: --`;
+  const heading = ((Math.round(value) % 360) + 360) % 360;
+  const cardinal = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][Math.round(heading / 45) % 8];
+  return `${label}: ${heading}°/${cardinal}`;
 }
 
 function drawLiveFlightLayoutExact(ctx: CanvasRenderingContext2D, flight: DisplayFlight, config: Config, logo: HTMLImageElement | null | undefined, cycleStartedAt: number, tickerStartedAt: number, now: number, flightCount: number) {
@@ -2922,6 +2955,20 @@ function MarineVesselsSettings(props: {
         >
           Fetch now
         </button>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+        <Field label="Speed format">
+          <SelectInput value={props.config.device.marineSpeedSource} onChange={(event) => props.updateConfig((current) => ({ ...current, device: { ...current.device, marineSpeedSource: event.target.value as Config["device"]["marineSpeedSource"] } }))}>
+            <option value="sog">SOG - Speed Over Ground</option>
+            <option value="stw">STW - Speed Through Water</option>
+          </SelectInput>
+        </Field>
+        <Field label="Direction format">
+          <SelectInput value={props.config.device.marineDirectionSource} onChange={(event) => props.updateConfig((current) => ({ ...current, device: { ...current.device, marineDirectionSource: event.target.value as Config["device"]["marineDirectionSource"] } }))}>
+            <option value="cog">COG - Course Over Ground</option>
+            <option value="hdg">HDG - Heading</option>
+          </SelectInput>
+        </Field>
       </div>
       <SliderField label="Vessel display duration" value={props.config.device.displayCycleSeconds} min={2} max={30} suffix=" s" onChange={(value) => props.updateConfig((current) => ({ ...current, device: { ...current.device, displayCycleSeconds: value } }))} />
       <SliderField label="Text scroll speed" value={props.config.device.scrollPixelsPerSecond} min={2} max={30} suffix=" px/s" onChange={(value) => props.updateConfig((current) => ({ ...current, device: { ...current.device, scrollPixelsPerSecond: value } }))} />

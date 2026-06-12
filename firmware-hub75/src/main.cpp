@@ -21,7 +21,8 @@ namespace
 constexpr uint16_t PanelWidth = 128;
 constexpr uint16_t PanelHeight = 64;
 constexpr uint8_t Brightness = 8;
-constexpr const char *SKYFRAME_FW_VERSION = "V1.13";
+constexpr const char *SKYFRAME_FW_VERSION = "V1.14";
+constexpr char DegreeGlyph = '\x01';
 constexpr const char *DeviceConfigUrl = "https://skyframe.danaksel.no/public/device-config";
 constexpr const char *SoundStateUrl = "https://skyframe.danaksel.no/public/sound-state";
 constexpr const char *RealtimeStateUrl = "https://skyframe.danaksel.no/public/realtime-state";
@@ -784,6 +785,7 @@ String normalizeLedText(const String &value)
     result.replace("Ç", "C");
     result.replace("ñ", "n");
     result.replace("Ñ", "N");
+    result.replace("°", String(DegreeGlyph));
     result.toUpperCase();
     return result;
 }
@@ -819,7 +821,7 @@ bool parseHexRgb(const String &value, uint8_t &r, uint8_t &g, uint8_t &b)
 uint8_t charAdvance(char c)
 {
     if (c == ' ') return 4;
-    if (c == ':') return 5;
+    if (c == ':' || c == DegreeGlyph) return 5;
     return 6;
 }
 
@@ -848,6 +850,37 @@ String fitText(const String &text, uint8_t maxWidth)
     return output;
 }
 
+void drawDegreeGlyph(int16_t x, int16_t y, uint16_t color)
+{
+    display->drawPixel(x + 1, y, color);
+    display->drawPixel(x + 2, y, color);
+    display->drawPixel(x, y + 1, color);
+    display->drawPixel(x + 3, y + 1, color);
+    display->drawPixel(x + 1, y + 2, color);
+    display->drawPixel(x + 2, y + 2, color);
+}
+
+void drawDegreeGlyphClipped(int16_t x, int16_t y, uint16_t color, int16_t clipTop, int16_t clipBottom, uint8_t maxWidth)
+{
+    const int8_t pixels[][2] = {{1, 0}, {2, 0}, {0, 1}, {3, 1}, {1, 2}, {2, 2}};
+    for (const auto &pixel : pixels)
+    {
+        if (pixel[0] >= maxWidth) continue;
+        const int16_t targetY = y + pixel[1];
+        if (targetY < clipTop || targetY >= clipBottom) continue;
+        display->drawPixel(x + pixel[0], targetY, color);
+    }
+}
+
+void drawDegreeGlyphCanvas(GFXcanvas1 &canvas, int16_t x, int16_t y)
+{
+    const int8_t pixels[][2] = {{1, 0}, {2, 0}, {0, 1}, {3, 1}, {1, 2}, {2, 2}};
+    for (const auto &pixel : pixels)
+    {
+        canvas.drawPixel(x + pixel[0], y + pixel[1], 1);
+    }
+}
+
 void drawTextFit(const String &text, int16_t x, int16_t y, uint16_t color, uint8_t maxWidth)
 {
     const String fitted = fitText(text, maxWidth);
@@ -857,7 +890,8 @@ void drawTextFit(const String &text, int16_t x, int16_t y, uint16_t color, uint8
         const char c = fitted[i];
         if (c != ' ')
         {
-            display->drawChar(cursorX, y, c, color, panelColor(0, 0, 0), 1);
+            if (c == DegreeGlyph) drawDegreeGlyph(cursorX, y, color);
+            else display->drawChar(cursorX, y, c, color, panelColor(0, 0, 0), 1);
         }
         cursorX += charAdvance(c);
     }
@@ -866,6 +900,11 @@ void drawTextFit(const String &text, int16_t x, int16_t y, uint16_t color, uint8
 void drawCharClipped(char c, int16_t x, int16_t y, uint16_t color, int16_t clipTop, int16_t clipBottom, uint8_t maxWidth)
 {
     if (c == ' ') return;
+    if (c == DegreeGlyph)
+    {
+        drawDegreeGlyphClipped(x, y, color, clipTop, clipBottom, maxWidth);
+        return;
+    }
     GFXcanvas1 canvas(6, 8);
     canvas.fillScreen(0);
     canvas.drawChar(0, 0, c, 1, 0, 1);
@@ -1181,7 +1220,8 @@ void drawTickerText(const String &text, int16_t x, int16_t y, uint16_t color, ui
         const char c = normalized[i];
         if (c != ' ')
         {
-            display->drawChar(cursorX, y, c, color, panelColor(0, 0, 0), 1);
+            if (c == DegreeGlyph) drawDegreeGlyph(cursorX, y, color);
+            else display->drawChar(cursorX, y, c, color, panelColor(0, 0, 0), 1);
         }
         cursorX += charAdvance(c);
     }
@@ -1210,7 +1250,8 @@ void drawTickerTextBoxed(const String &text, int16_t x, int16_t y, uint16_t colo
         const char c = normalized[i];
         if (c != ' ')
         {
-            canvas.drawChar(cursorX, 0, c, 1, 0, 1);
+            if (c == DegreeGlyph) drawDegreeGlyphCanvas(canvas, cursorX, 0);
+            else canvas.drawChar(cursorX, 0, c, 1, 0, 1);
         }
         cursorX += charAdvance(c);
     }
@@ -1252,7 +1293,8 @@ void drawTickerTextBoxedClipped(const String &text, int16_t x, int16_t y, uint16
         const char c = normalized[i];
         if (c != ' ')
         {
-            canvas.drawChar(cursorX, 0, c, 1, 0, 1);
+            if (c == DegreeGlyph) drawDegreeGlyphCanvas(canvas, cursorX, 0);
+            else canvas.drawChar(cursorX, 0, c, 1, 0, 1);
         }
         cursorX += charAdvance(c);
     }
@@ -1425,14 +1467,20 @@ void drawBitmapSymbolBoxClipped(int16_t x, int16_t y, const char *bitmap[], uint
 }
 
 const char *MarineDivingIcon[] = {
-    "..............",
-    ".#####..#.....",
-    "#.....#.#.....",
-    "#.....#.#.....",
-    "#..#..#.#.....",
-    ".##.##..#.....",
-    ".......##....."
+    ".........",
+    ".#####..#",
+    "#.....#.#",
+    "#.....#.#",
+    "#..#..#.#",
+    ".##.##..#",
+    ".......##"
 };
+
+uint8_t marineTypeIconWidth(const String &icon)
+{
+    if (icon == "diving") return 9;
+    return 0;
+}
 
 void drawMarineTypeIcon(const String &icon, int16_t x, int16_t y, uint16_t color)
 {
@@ -3133,10 +3181,14 @@ void drawMarinePayload(JsonObject flight, size_t itemCount)
 
     const uint16_t textColor = lineRouteColor ? lineRouteColor : panelColor(0xFF, 0xC7, 0x77);
     const String marineIcon = valueOr(flight["marineIcon"]);
-    if (marineIcon.length())
+    const uint8_t iconWidth = marineTypeIconWidth(marineIcon);
+    if (iconWidth)
     {
-        drawTickerTextBoxedClipped(name, 1, 48, textColor, 110, liveCycleStartedAt, liveScrollPixelsPerSecond);
-        drawMarineTypeIcon(marineIcon, 113, 48, lineIconColor ? lineIconColor : panelColor(0xFF, 0xC7, 0x77));
+        constexpr uint8_t gap = 4;
+        const uint8_t maxNameWidth = max<int16_t>(1, 126 - gap - iconWidth);
+        const uint8_t nameFieldWidth = min<uint16_t>(textPixelWidth(normalizeLedText(name)), maxNameWidth);
+        drawTickerTextBoxedClipped(name, 1, 48, textColor, nameFieldWidth, liveCycleStartedAt, liveScrollPixelsPerSecond);
+        drawMarineTypeIcon(marineIcon, 1 + nameFieldWidth + gap, 48, lineIconColor ? lineIconColor : panelColor(0xFF, 0xC7, 0x77));
     }
     else
     {

@@ -87,6 +87,8 @@ BARENTSWATCH_LATEST_URL = "https://live.ais.barentswatch.no/v1/latest/combined"
 
 AIS data is normalized into the compact display format used by the firmware and emulator. Ship type codes are mapped to human-readable names such as `High speed craft`, `Cargo`, `Passenger` and `Tanker`.
 
+Marine text formatting is stored per marine screen profile. Customers can choose `SOG` or `STW` for speed and `COG` or `HDG` for direction; the direction line includes a degree symbol and 8-way cardinal label. Missing AIS values are rendered as `--` instead of being replaced by another measurement.
+
 Marine radar projection uses a viewer-relative coordinate system:
 
 - Positive forward is from the POV point toward the radar center and maps to the top of the LED radar.
