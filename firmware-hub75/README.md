@@ -127,11 +127,11 @@ y=1-46   radar rectangle, x=1, w=126, h=46
 y=47     1 px gap
 y=48-54  text line 1: Vessel name, optional cropped vessel type icon after one character-space gap
 y=55     1 px gap
-y=56-62  text line 2: SOG/STW - COG/HDG with degree and cardinal direction - Destination
+y=56-62  text line 2: SOG rounded to whole knots - COG with degree and cardinal direction - Destination
 y=63     1 px bottom margin
 ```
 
-The Worker sends the marine text lines preformatted. Speed format is customer-selectable between `SOG` and `STW`; direction format is customer-selectable between `COG` and `HDG`. The firmware includes a dedicated `°` glyph so physical display output matches the emulator.
+The Worker sends the marine text lines preformatted. Marine speed and direction are fixed to `SOG` and `COG`. The firmware includes a dedicated `°` glyph so physical display output matches the emulator.
 
 The radar is viewer-relative:
 
@@ -166,7 +166,7 @@ shasum -a 256 firmware-hub75/.pio/build/waveshare_esp32_s3_rgb_matrix/firmware.b
 
 Copy the resulting `.bin` to `cloudflare-worker/public/firmware/`, update `cloudflare-worker/public/firmware/latest.json`, then deploy the Worker.
 
-Current deployed firmware line is `V1.14`, which includes Marine mode rendering, corrected radar orientation, active-vessel direction markers, blinking active-vessel pixels, scrolling marine text rows, cropped vessel type icons placed next to vessel names, exact marine text-row margins, optional land/sea mask rendering, configurable marine land and icon colors, configurable marine SOG/STW and COG/HDG text formats and persistent radar rendering when no vessels are present.
+Current deployed firmware line is `V1.15`, which includes Marine mode rendering, corrected radar orientation, active-vessel direction markers, blinking active-vessel pixels, scrolling marine text rows, cropped vessel type icons placed next to vessel names, exact marine text-row margins, optional land/sea mask rendering, configurable marine land and icon colors, fixed marine SOG/COG text formatting and persistent radar rendering when no vessels are present.
 
 ## Build And Upload
 

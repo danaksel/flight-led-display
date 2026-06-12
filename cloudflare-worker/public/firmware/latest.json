@@ -1,11 +1,11 @@
 {
-  "version": "V1.14",
-  "url": "https://skyframe.danaksel.no/public/firmware/skyframe-v1.14.bin",
-  "sha256": "d7eb92cb2b25073886054e6632b3a9839bb411ed2e9de9c8e3df328c798e3c03",
-  "size": 1124240,
+  "version": "V1.15",
+  "url": "https://skyframe.danaksel.no/public/firmware/skyframe-v1.15.bin",
+  "sha256": "20a7a315171129375cd3ef66ce0f3dea117ed59304d48710932a1d6d8d3a73e7",
+  "size": 1125248,
   "releaseNotes": [
-    "Adds configurable marine SOG/STW and COG/HDG text formats.",
-    "Moves marine vessel icons next to the vessel name and crops unused icon width.",
-    "Adds a dedicated degree symbol glyph for marine direction text."
+    "Fixes marine text to SOG and COG with rounded whole-knot speed.",
+    "Adds marine icons for passenger, SAR, tanker, cargo, fishing, high-speed and sailing vessels.",
+    "Removes marine speed and direction format selectors from the control panel."
   ]
 }

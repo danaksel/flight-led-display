@@ -53,8 +53,6 @@ type Config = {
       track: "deg" | "cardinal";
       verticalRate: "fpm" | "fts" | "ms" | "mph" | "kmh";
     };
-    marineSpeedSource: "sog" | "stw";
-    marineDirectionSource: "hdg" | "cog";
     lineColors: {
       airline: string;
       route: string;
@@ -232,10 +230,7 @@ type DisplayFlight = {
   status?: string;
   alt?: number;
   spd?: number;
-  stw?: number;
   trk?: number;
-  hdg?: number;
-  cog?: number;
   vr?: number;
   radarX?: number | null;
   radarY?: number | null;
@@ -535,8 +530,6 @@ const defaultConfig: Config = {
       track: "deg",
       verticalRate: "fpm"
     },
-    marineSpeedSource: "sog",
-    marineDirectionSource: "cog",
     lineColors: defaultAirspaceColors,
     clockColor: defaultClockColors.clockColor,
     clockTopColor: defaultClockColors.clockTopColor,
@@ -768,8 +761,6 @@ function normalizeConfig(input: Partial<Config> & Record<string, unknown>): Conf
         track: followUnits.track ?? defaultConfig.device.followUnits.track,
         verticalRate: followUnits.verticalRate ?? defaultConfig.device.followUnits.verticalRate
       },
-      marineSpeedSource: device.marineSpeedSource === "stw" ? "stw" : "sog",
-      marineDirectionSource: device.marineDirectionSource === "hdg" ? "hdg" : "cog",
       lineColors: normalizeAirspaceColors(lineColors),
       clockColor: normalizeClockColors(device).clockColor,
       clockTopColor: normalizeClockColors(device).clockTopColor,
@@ -1824,6 +1815,69 @@ function drawMarineVesselMarker(ctx: CanvasRenderingContext2D, x: number, y: num
 }
 
 const marineIconMasks: Record<string, string[]> = {
+  passenger: [
+    ".....#....#...",
+    "...###########",
+    "..##.#.#.#.#.#",
+    ".#############",
+    ".#.#.#.#.#.#.#",
+    "##############",
+    ".#############"
+  ],
+  sar: [
+    "..............",
+    "..............",
+    "####..##..###.",
+    "#....#..#.#..#",
+    "####.####.###.",
+    "...#.#..#.#..#",
+    "####.#..#.#..#"
+  ],
+  tanker: [
+    "..............",
+    "...........##.",
+    "...........##.",
+    "...#....#..##.",
+    "##############",
+    ".#############",
+    "..###########."
+  ],
+  cargo: [
+    "..............",
+    "...........##.",
+    ".#.#.#.#.#.##.",
+    ".#.#.#.#.#.##.",
+    "##############",
+    ".#############",
+    "..###########."
+  ],
+  fishing: [
+    "....##......",
+    "..######...#",
+    ".#.######.##",
+    "############",
+    ".########.##",
+    "..######...#",
+    "....##......"
+  ],
+  high_speed: [
+    ".....##.......",
+    ".....####.....",
+    "...###########",
+    ".#############",
+    "##.#.#.#.#.#.#",
+    "##############",
+    ".#############"
+  ],
+  sailing: [
+    "....#.....#...",
+    "...##....##...",
+    "..###...###...",
+    ".####..####...",
+    "....#.....#.##",
+    "##############",
+    "..###########."
+  ],
   diving: [
     ".........",
     ".#####..#",
@@ -1917,10 +1971,8 @@ function drawMarineLayoutExact(ctx: CanvasRenderingContext2D, flight: DisplayFli
 
   const name = flight.lines?.airline || flight.air || flight.cs || flight.flt || "VESSEL";
   const destination = normalizeMarineTextPart(flight.to || flight.destination);
-  const speedSource = config.device.marineSpeedSource;
-  const directionSource = config.device.marineDirectionSource;
-  const speed = `${speedSource.toUpperCase()}: ${formatMarineFallbackNumber(speedSource === "stw" ? flight.stw : flight.spd)} kt`;
-  const course = formatMarineFallbackDirection(directionSource.toUpperCase(), directionSource === "hdg" ? flight.hdg ?? flight.trk : flight.cog ?? flight.trk);
+  const speed = `SOG: ${formatMarineFallbackNumber(flight.spd)} kt`;
+  const course = formatMarineFallbackDirection(flight.trk);
   const details = flight.lines?.aircraft || [speed, course, destination].filter(Boolean).join(" - ");
   const hasIcon = Boolean(flight.marineIcon && marineIconMasks[flight.marineIcon]);
   if (hasIcon) {
@@ -1947,14 +1999,14 @@ function normalizeMarineTextPart(value: unknown): string {
 
 function formatMarineFallbackNumber(value: unknown): string {
   if (typeof value !== "number" || !Number.isFinite(value)) return "--";
-  return (Math.round(value * 10) / 10).toLocaleString("nb-NO", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  return Math.round(value).toLocaleString("nb-NO", { maximumFractionDigits: 0 });
 }
 
-function formatMarineFallbackDirection(label: string, value: unknown): string {
-  if (typeof value !== "number" || !Number.isFinite(value)) return `${label}: --`;
+function formatMarineFallbackDirection(value: unknown): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "COG: --";
   const heading = ((Math.round(value) % 360) + 360) % 360;
   const cardinal = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][Math.round(heading / 45) % 8];
-  return `${label}: ${heading}°/${cardinal}`;
+  return `COG: ${heading}°/${cardinal}`;
 }
 
 function drawLiveFlightLayoutExact(ctx: CanvasRenderingContext2D, flight: DisplayFlight, config: Config, logo: HTMLImageElement | null | undefined, cycleStartedAt: number, tickerStartedAt: number, now: number, flightCount: number) {
@@ -2955,20 +3007,6 @@ function MarineVesselsSettings(props: {
         >
           Fetch now
         </button>
-      </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
-        <Field label="Speed format">
-          <SelectInput value={props.config.device.marineSpeedSource} onChange={(event) => props.updateConfig((current) => ({ ...current, device: { ...current.device, marineSpeedSource: event.target.value as Config["device"]["marineSpeedSource"] } }))}>
-            <option value="sog">SOG - Speed Over Ground</option>
-            <option value="stw">STW - Speed Through Water</option>
-          </SelectInput>
-        </Field>
-        <Field label="Direction format">
-          <SelectInput value={props.config.device.marineDirectionSource} onChange={(event) => props.updateConfig((current) => ({ ...current, device: { ...current.device, marineDirectionSource: event.target.value as Config["device"]["marineDirectionSource"] } }))}>
-            <option value="cog">COG - Course Over Ground</option>
-            <option value="hdg">HDG - Heading</option>
-          </SelectInput>
-        </Field>
       </div>
       <SliderField label="Vessel display duration" value={props.config.device.displayCycleSeconds} min={2} max={30} suffix=" s" onChange={(value) => props.updateConfig((current) => ({ ...current, device: { ...current.device, displayCycleSeconds: value } }))} />
       <SliderField label="Text scroll speed" value={props.config.device.scrollPixelsPerSecond} min={2} max={30} suffix=" px/s" onChange={(value) => props.updateConfig((current) => ({ ...current, device: { ...current.device, scrollPixelsPerSecond: value } }))} />

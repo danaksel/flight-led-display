@@ -141,8 +141,6 @@ type DeviceSettings = {
     track: "deg" | "cardinal";
     verticalRate: "fpm" | "fts" | "ms" | "mph" | "kmh";
   };
-  marineSpeedSource: "sog" | "stw";
-  marineDirectionSource: "hdg" | "cog";
   lineColors: {
     airline: string;
     route: string;
@@ -283,10 +281,7 @@ type DisplayFlight = {
   lon?: number;
   altitudeFt?: number;
   speedKts?: number;
-  speedThroughWaterKts?: number;
   headingDeg?: number;
-  courseDeg?: number;
-  trueHeadingDeg?: number;
   verticalRateFpm?: number;
   onGround?: boolean;
   distanceKm: number;
@@ -324,7 +319,6 @@ type MarineVessel = {
   vesselType?: string;
   destination?: string;
   speedKnots?: number;
-  speedThroughWaterKnots?: number;
   courseDeg?: number;
   headingDeg?: number;
   lat: number;
@@ -2804,8 +2798,6 @@ function normalizeDeviceSettings(value: unknown): DeviceSettings {
     configRefreshSeconds: clampNumber(v.configRefreshSeconds, 60, 3600, 300),
     timezone: typeof v.timezone === "string" && v.timezone.trim() ? v.timezone.slice(0, 64) : "Europe/Oslo",
     followUnits: normalizeFollowUnits((v as { followUnits?: unknown }).followUnits),
-    marineSpeedSource: oneOf((v as { marineSpeedSource?: unknown }).marineSpeedSource, ["sog", "stw"], "sog"),
-    marineDirectionSource: oneOf((v as { marineDirectionSource?: unknown }).marineDirectionSource, ["hdg", "cog"], "cog"),
     lineColors: normalizeLineColors((v as { lineColors?: unknown }).lineColors),
     clockColor: normalizeHexColor((v as { clockColor?: unknown }).clockColor, DEFAULT_CLOCK_COLORS.clockColor),
     clockTopColor: normalizeHexColor((v as { clockTopColor?: unknown }).clockTopColor, DEFAULT_CLOCK_COLORS.clockTopColor),
@@ -3522,7 +3514,7 @@ async function marineDisplayResponse(env: Env, config: Config, screenState: Scre
   }
 
   const limit = Math.max(1, Math.min(24, parseNumber(env.DISPLAY_LIMIT, 8)));
-  const displayFlights = vessels.slice(0, limit).map((vessel) => marineVesselToDisplayFlight(vessel, normalizedDevice));
+  const displayFlights = vessels.slice(0, limit).map((vessel) => marineVesselToDisplayFlight(vessel));
   const landMask = await marineLandMaskFor(env, config);
   const payload = await displayPayload(env, config, screenState, compact, "marine", [], [], displayFlights, [], liveSourceStatus, context);
 
@@ -3628,7 +3620,6 @@ function normalizeMarineVessel(value: unknown, config: Config, source: MarineVes
     vesselType: marineVesselType(row.vesselType ?? row.type ?? row.shipType),
     destination: firstString(row, ["destination", "dest"]),
     speedKnots: firstNumber(row, ["speedKnots", "sog", "speed", "speedOverGround"]),
-    speedThroughWaterKnots: firstNumber(row, ["speedThroughWaterKnots", "speedThroughWater", "stw", "waterSpeed", "speedWater"]),
     courseDeg: firstNumber(row, ["courseDeg", "cog", "course", "courseOverGround"]),
     headingDeg: firstNumber(row, ["headingDeg", "heading", "trueHeading"]),
     lat,
@@ -3643,19 +3634,15 @@ function normalizeMarineVessel(value: unknown, config: Config, source: MarineVes
   };
 }
 
-function marineVesselToDisplayFlight(vessel: MarineVessel, device: DeviceSettings): DisplayFlight {
+function marineVesselToDisplayFlight(vessel: MarineVessel): DisplayFlight {
   const id = vessel.mmsi || vessel.imo || vessel.vesselName || "VESSEL";
   const distance = `${round(vessel.distanceKm, 1)} KM`;
   const direction = marineCardinal(vessel.bearingDeg);
   const vesselName = marineDisplayPart(vessel.vesselName) || id;
   const destination = marineDisplayPart(vessel.destination);
   const marineIcon = marineVesselIcon(vessel.vesselType);
-  const speedValue = device.marineSpeedSource === "stw" ? vessel.speedThroughWaterKnots : vessel.speedKnots;
-  const directionValue = device.marineDirectionSource === "hdg" ? vessel.headingDeg : vessel.courseDeg;
-  const speedLabel = device.marineSpeedSource.toUpperCase();
-  const directionLabel = device.marineDirectionSource.toUpperCase();
-  const speed = `${speedLabel}: ${formatMarineDecimal(speedValue)} kt`;
-  const course = formatMarineDirection(directionLabel, directionValue);
+  const speed = `SOG: ${formatMarineSpeed(vessel.speedKnots)} kt`;
+  const course = formatMarineCourse(vessel.courseDeg);
   const line1 = vesselName;
   const line2 = [speed, course, destination].filter(Boolean).join(" - ");
   return {
@@ -3672,10 +3659,7 @@ function marineVesselToDisplayFlight(vessel: MarineVessel, device: DeviceSetting
     lat: vessel.lat,
     lon: vessel.lon,
     speedKts: vessel.speedKnots,
-    speedThroughWaterKts: vessel.speedThroughWaterKnots,
-    headingDeg: directionValue ?? vessel.courseDeg ?? vessel.headingDeg,
-    courseDeg: vessel.courseDeg,
-    trueHeadingDeg: vessel.headingDeg,
+    headingDeg: vessel.courseDeg ?? vessel.headingDeg,
     distanceKm: vessel.distanceKm,
     bearingDeg: vessel.bearingDeg,
     radarX: vessel.radarX,
@@ -3691,15 +3675,15 @@ function marineVesselToDisplayFlight(vessel: MarineVessel, device: DeviceSetting
   };
 }
 
-function formatMarineDecimal(value: number | undefined): string {
+function formatMarineSpeed(value: number | undefined): string {
   if (value === undefined || !Number.isFinite(value)) return "--";
-  return round(value, 1).toLocaleString("nb-NO", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  return Math.round(value).toLocaleString("nb-NO", { maximumFractionDigits: 0 });
 }
 
-function formatMarineDirection(label: string, value: number | undefined): string {
-  if (value === undefined || !Number.isFinite(value)) return `${label}: --`;
+function formatMarineCourse(value: number | undefined): string {
+  if (value === undefined || !Number.isFinite(value)) return "COG: --";
   const deg = ((Math.round(value) % 360) + 360) % 360;
-  return `${label}: ${deg}°/${marineCardinal(deg)}`;
+  return `COG: ${deg}°/${marineCardinal(deg)}`;
 }
 
 function marineDisplayPart(value: unknown): string | undefined {
@@ -4159,6 +4143,15 @@ function marineNavigationStatus(value: unknown): string | undefined {
 function marineVesselIcon(value: unknown): string {
   const type = marineVesselType(value);
   if (type === "Diving ops") return "diving";
+  if (!type) return "";
+  const normalized = type.toLowerCase();
+  if (normalized.startsWith("passenger")) return "passenger";
+  if (normalized === "search and rescue") return "sar";
+  if (normalized.startsWith("tanker")) return "tanker";
+  if (normalized.startsWith("cargo")) return "cargo";
+  if (normalized === "fishing") return "fishing";
+  if (normalized.startsWith("high speed craft")) return "high_speed";
+  if (normalized === "sailing" || normalized === "pleasure craft") return "sailing";
   return "";
 }
 
@@ -4344,10 +4337,7 @@ async function toCompactDisplayFlight(env: Env, f: DisplayFlight, config: Config
     distKm: Number.isFinite(f.distanceKm) ? round(f.distanceKm, 1) : null,
     alt: f.altitudeFt ?? null,
     spd: f.speedKts ?? null,
-    stw: f.speedThroughWaterKts ?? null,
     trk: f.headingDeg ?? null,
-    hdg: f.trueHeadingDeg ?? null,
-    cog: f.courseDeg ?? null,
     vr: f.verticalRateFpm ?? null,
     metrics
   };

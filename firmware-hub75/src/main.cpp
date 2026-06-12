@@ -21,7 +21,7 @@ namespace
 constexpr uint16_t PanelWidth = 128;
 constexpr uint16_t PanelHeight = 64;
 constexpr uint8_t Brightness = 8;
-constexpr const char *SKYFRAME_FW_VERSION = "V1.14";
+constexpr const char *SKYFRAME_FW_VERSION = "V1.15";
 constexpr char DegreeGlyph = '\x01';
 constexpr const char *DeviceConfigUrl = "https://skyframe.danaksel.no/public/device-config";
 constexpr const char *SoundStateUrl = "https://skyframe.danaksel.no/public/sound-state";
@@ -1476,9 +1476,81 @@ const char *MarineDivingIcon[] = {
     ".......##"
 };
 
+const char *MarinePassengerIcon[] = {
+    ".....#....#...",
+    "...###########",
+    "..##.#.#.#.#.#",
+    ".#############",
+    ".#.#.#.#.#.#.#",
+    "##############",
+    ".#############"
+};
+
+const char *MarineSarIcon[] = {
+    "..............",
+    "..............",
+    "####..##..###.",
+    "#....#..#.#..#",
+    "####.####.###.",
+    "...#.#..#.#..#",
+    "####.#..#.#..#"
+};
+
+const char *MarineTankerIcon[] = {
+    "..............",
+    "...........##.",
+    "...........##.",
+    "...#....#..##.",
+    "##############",
+    ".#############",
+    "..###########."
+};
+
+const char *MarineCargoIcon[] = {
+    "..............",
+    "...........##.",
+    ".#.#.#.#.#.##.",
+    ".#.#.#.#.#.##.",
+    "##############",
+    ".#############",
+    "..###########."
+};
+
+const char *MarineFishingIcon[] = {
+    "....##......",
+    "..######...#",
+    ".#.######.##",
+    "############",
+    ".########.##",
+    "..######...#",
+    "....##......"
+};
+
+const char *MarineHighSpeedIcon[] = {
+    ".....##.......",
+    ".....####.....",
+    "...###########",
+    ".#############",
+    "##.#.#.#.#.#.#",
+    "##############",
+    ".#############"
+};
+
+const char *MarineSailingIcon[] = {
+    "....#.....#...",
+    "...##....##...",
+    "..###...###...",
+    ".####..####...",
+    "....#.....#.##",
+    "##############",
+    "..###########."
+};
+
 uint8_t marineTypeIconWidth(const String &icon)
 {
     if (icon == "diving") return 9;
+    if (icon == "fishing") return 12;
+    if (icon == "passenger" || icon == "sar" || icon == "tanker" || icon == "cargo" || icon == "high_speed" || icon == "sailing") return 14;
     return 0;
 }
 
@@ -1487,6 +1559,34 @@ void drawMarineTypeIcon(const String &icon, int16_t x, int16_t y, uint16_t color
     if (icon == "diving")
     {
         drawBitmapSymbol(x, y, MarineDivingIcon, 7, color);
+    }
+    else if (icon == "passenger")
+    {
+        drawBitmapSymbol(x, y, MarinePassengerIcon, 7, color);
+    }
+    else if (icon == "sar")
+    {
+        drawBitmapSymbol(x, y, MarineSarIcon, 7, color);
+    }
+    else if (icon == "tanker")
+    {
+        drawBitmapSymbol(x, y, MarineTankerIcon, 7, color);
+    }
+    else if (icon == "cargo")
+    {
+        drawBitmapSymbol(x, y, MarineCargoIcon, 7, color);
+    }
+    else if (icon == "fishing")
+    {
+        drawBitmapSymbol(x, y, MarineFishingIcon, 7, color);
+    }
+    else if (icon == "high_speed")
+    {
+        drawBitmapSymbol(x, y, MarineHighSpeedIcon, 7, color);
+    }
+    else if (icon == "sailing")
+    {
+        drawBitmapSymbol(x, y, MarineSailingIcon, 7, color);
     }
 }
 
